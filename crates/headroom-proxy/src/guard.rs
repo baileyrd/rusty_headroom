@@ -59,6 +59,26 @@ pub fn is_self_referential(upstream: &str, listen: SocketAddr) -> bool {
     }
 
     let listen_ip = listen.ip();
+
+    // Bound to every interface, which is what `HEADROOM_HOST=0.0.0.0` means and what a
+    // container deployment almost always sets. The proxy then answers on loopback as
+    // well, so an upstream of `http://127.0.0.1:<same port>` is itself.
+    //
+    // This branch is the whole point of the commit that added it. Without it, `0.0.0.0`
+    // fell through to the exact-string comparison below — `"127.0.0.1" == "0.0.0.0"`,
+    // false — and the proxy started happily and relayed to itself. Measured: one request
+    // came back `429` in 0.26s, the rate limiter catching roughly six hundred self-relays,
+    // which is a confusing quota error in place of the clear startup refusal this
+    // function exists to produce.
+    //
+    // Loopback spellings only. A machine's own routable address (`10.0.0.5`, say) is also
+    // itself, and catching that needs interface enumeration — a syscall at startup whose
+    // answer varies with network conditions, which is the same reason the DNS lookup
+    // below is not attempted. Named as a limit rather than left to be discovered.
+    if listen_ip.is_unspecified() {
+        return is_loopback_host(host);
+    }
+
     if !listen_ip.is_loopback() {
         // A specific bind address only collides with that exact address, or with a
         // hostname that resolves to it — which this deliberately does not attempt,
@@ -281,6 +301,40 @@ mod tests {
             !is_self_referential("http://localhost:8787", listen),
             "a specific bind does not answer on loopback"
         );
+    }
+
+    #[test]
+    fn a_bind_to_every_interface_collides_with_loopback() {
+        // `HEADROOM_HOST=0.0.0.0` is what a container deployment sets, and it means the
+        // proxy answers on loopback too — so `http://127.0.0.1:<same port>` is itself.
+        //
+        // This fell through to the exact-string comparison for a specific bind:
+        // `"127.0.0.1" == "0.0.0.0"`, false. The proxy started and relayed to itself.
+        // Measured before the fix: one request returned 429 in 0.26s, the rate limiter
+        // catching roughly six hundred self-relays — a confusing quota error instead of
+        // the clear startup refusal this function exists to produce.
+        for listen_addr in ["0.0.0.0:8787", "[::]:8787"] {
+            let listen = listen(listen_addr);
+            for upstream in [
+                "http://127.0.0.1:8787",
+                "http://localhost:8787",
+                "http://[::1]:8787",
+                "http://0.0.0.0:8787",
+            ] {
+                assert!(
+                    is_self_referential(upstream, listen),
+                    "{upstream} against {listen_addr}"
+                );
+            }
+
+            // And the check still lets a real deployment start. A guard that refuses
+            // everything is as useless as one that refuses nothing.
+            assert!(!is_self_referential("https://api.anthropic.com", listen));
+            assert!(
+                !is_self_referential("http://127.0.0.1:9999", listen),
+                "a different port is a different service, even bound to everything"
+            );
+        }
     }
 
     #[test]

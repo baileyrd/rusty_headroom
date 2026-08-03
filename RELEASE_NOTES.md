@@ -6,6 +6,29 @@ the crate starts publishing releases.
 
 ---
 
+## A proxy bound to every interface could point at itself
+**2026-08-03** · the container deployment shape, and the guard missed it
+
+- **The hole:** `is_self_referential` handled a loopback bind and a specific bind, and fell
+  through on **`0.0.0.0`** — which is what `HEADROOM_HOST` is set to in a container. It
+  compared `"127.0.0.1" == "0.0.0.0"`, got false, and let the proxy start.
+- Bound to every interface, the proxy *does* answer on loopback, so
+  `HEADROOM_UPSTREAM=http://127.0.0.1:<same port>` is itself.
+- **Measured before the fix:** the proxy started, and one request returned **`429` in
+  0.26s** — the rate limiter catching roughly six hundred self-relays. An operator gets a
+  confusing quota error instead of the clear startup refusal this guard exists to produce.
+- **Fixed:** an unspecified bind (`0.0.0.0`, `[::]`) collides with every loopback spelling
+  on the same port. It now refuses:
+  `upstream http://127.0.0.1:8911 is this proxy's own listen address (0.0.0.0:8911)`.
+- **Still starts** for a real upstream on `0.0.0.0` — verified, `health=200` — and for a
+  different port, because a guard that refuses everything is as useless as one that
+  refuses nothing.
+- **Named as a limit, not left to be found:** a machine's own routable address is also
+  itself, and catching that needs interface enumeration — a syscall whose answer varies
+  with network conditions, the same reason the DNS lookup beside it is not attempted.
+
+---
+
 ## The credential reaching the provider was never checked end to end
 **2026-08-03** · 871 tests pass with `x-api-key` stripped from every request
 
