@@ -327,3 +327,29 @@ exists to move.
 
 **Would change if:** a provider adds cache reporting to its stream, which is a new field
 to read rather than a change to this rule.
+
+## D19 — memory injection is gated on the lossy permission, and fed from a file
+**2026-08-03**
+
+Gap row Y3 asks for live-zone-tail memory injection. Two decisions were needed to make
+it reachable.
+
+**Where the memories come from.** Nothing in this proxy populates a `MemoryStore`.
+`MemoryStore` is in-process and in-memory by design (Y1), and the reference's MCP surface
+is three tools — none of them a `remember`. Adding one would be inventing surface rather
+than reaching parity. So memories are loaded from a JSON-lines file named by
+`HEADROOM_MEMORY`, read **once at startup**, exactly as recommendations are. Reading per
+request would let the same request produce different bytes depending on when it arrived,
+and those bytes go upstream — busting the very cache the live-zone placement exists to
+protect (I4). No file means no injection, so the default behaviour is unchanged.
+
+**Which permission gates it.** `policy.lossy_transforms`, not `lossless_transforms`.
+The lossless permission is granted on OAuth because a meaning-preserving change cannot
+exceed a granted scope (D14). Injection is not a transform of anything: it adds content
+the client never sent, which plainly can exceed a scope. So only pay-as-you-go traffic
+gets it. Verified through the release binary — the same memory file injects under
+`x-api-key` and injects nothing under an `sk-ant-oat` bearer.
+
+**Would change if:** an agent-facing way to record memories lands, at which point the
+file becomes one source among several rather than the only one. The injection point and
+the permission gate do not change with it.

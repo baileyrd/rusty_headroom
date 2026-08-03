@@ -61,11 +61,17 @@ impl AppState {
         };
 
         Self {
-            compressors: Arc::new(Compressors::with_recommendations(
-                Arc::new(InMemoryCcrStore::new()),
-                // Read once, here, at construction. See `Config::recommendations`.
-                Config::recommendations(),
-            )),
+            compressors: Arc::new(
+                Compressors::with_recommendations(
+                    Arc::new(InMemoryCcrStore::new()),
+                    // Read once, here, at construction. See `Config::recommendations`.
+                    Config::recommendations(),
+                )
+                // Also read once. A memory set that changed between requests would make
+                // the same request produce different bytes depending on when it arrived,
+                // and those bytes go upstream — see `Config::memories`.
+                .with_memories(Config::memories(), Config::memory_limit()),
+            ),
             metrics: Arc::new(Metrics::new()),
             upstream,
             limiter: Arc::new(RateLimiter::new(RATE_CAPACITY, RATE_WINDOW)),

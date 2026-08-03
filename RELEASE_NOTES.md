@@ -6,6 +6,40 @@ the crate starts publishing releases.
 
 ---
 
+## Memory reaches the live-zone tail
+**2026-08-03** · gap row Y3
+
+- **Added:** `memory::inject_append` and `MemoryStore::from_jsonl_lossy`.
+- **Added:** `HEADROOM_MEMORY` (a JSON-lines file) and `HEADROOM_MEMORY_LIMIT`
+  (default 8), read once at startup.
+- **Changed:** `compress_dialect` appends the `<memory>` block to the newest user
+  message's last text block, merging with a compressor's output rather than replacing it.
+- **Found by an audit, not by a test:** the whole `memory` module had **no reference
+  outside `memory.rs`** — implemented, tested, and unreachable. The gap row said "proxy
+  wiring outstanding" and the sweep counted it as done anyway.
+- **Design note:** gated on `policy.lossy_transforms`, not `lossless_transforms`. The
+  lossless permission is granted on OAuth because a meaning-preserving change cannot
+  exceed a granted scope; injection adds content the client never sent, which plainly
+  can. Only pay-as-you-go traffic gets it. See `DECISIONS.md` D19.
+- **Design note:** memories come from a file rather than an MCP tool. Nothing in this
+  proxy populates a store, and the reference's tool surface has no `remember` — adding
+  one would be inventing surface rather than reaching parity.
+- **Design note:** read once at startup, not per request. A memory set that changed
+  between requests would make the same request produce different bytes depending on when
+  it arrived, and those bytes go upstream — busting the very cache the live-zone
+  placement exists to protect (I4).
+- **Design note:** re-injection is guarded on the `<memory>` opening tag rather than on
+  the whole block, because the memory set grows between turns and matching the full text
+  would re-inject a superset alongside the subset already there.
+- **Verified through the release binary:** with a memory file and `x-api-key`, the block
+  arrives on the newest user message with `system` and both frozen turns untouched;
+  with an `sk-ant-oat` bearer, nothing is injected; with no file configured, the request
+  reaches the provider byte-identical. A malformed line and a line without `content` were
+  skipped with warnings, and a fact recorded by two agents arrived marked
+  `(corroborated)`.
+
+---
+
 ## Each surface is read by its own stream vocabulary; anchors and tags now bind
 **2026-08-03** · gap rows X12, S4, S5 — the last three open rows
 
