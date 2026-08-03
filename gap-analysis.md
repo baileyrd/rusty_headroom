@@ -70,12 +70,18 @@ references *outside the defining file* — found them, and they are now wired:
 | Y1–Y3 (`memory`) | #73 |
 | X15, I7 normalization (`stabilization`) | #75 |
 
-**A blind spot in that audit, found later.** It asked for references *outside the defining
+**Two blind spots in that audit, found later.** It asked for references *outside the defining
 file*, and `CodeCompressor` had them — from the CLI and the MCP server. Reachable from
 *somewhere* is not reachable from the *request path*: the proxy held no code compressor at
 all, so every source file a tool returned was forwarded whole while `headroom compress`
 reported a saving for the same content. Closed by #81, which also collapsed the three
 copies of the routing decision into one.
+
+The same check then found prose in the same state (#83): `TextCrusher` and
+`TextSummarizer` were referenced by nothing but the `lib.rs` re-export. That one also
+invalidated an earlier claim — S4 and S5 had been "closed" by wiring them into
+`TextSummarizer`, a compressor nothing reached, so they never ran on proxied traffic
+until prose routed.
 
 The audit is now clean: every remaining public symbol is either reached from a request,
 dispatched from the CLI (all commands verified against `main.rs`), listed in the MCP tool
@@ -127,8 +133,8 @@ Every row is a gap: the target repo is empty, so all rows are new implementation
 | S1 | line importance scoring | fn | spec | all | `signals/line_importance.rs` | no | M | Drives which lines survive lossy passes. Done. |
 | S2 | keyword / error detector | fn | spec | all | `signals/keyword_detector.rs` | no | S | Error/warning keyword sets; never drop error lines. Done. |
 | S3 | tiered signal aggregation | fn | spec | all | `signals/tiered.rs` | no | S | Combines S1+S2 into keep/drop tiers. Done. |
-| S4 | `AnchorSelector` | fn | spec | all | `transforms/anchor_selector.rs` | no | M | Picks stable anchor points so output stays position-preserving (I6). Done as `signals::anchors::select_anchors` — hunk headers, headings, fences, stack frames, structure opens, boundaries. Consulted by `TextSummarizer` via `signals::keep_with_required`, which treats the anchor set as a floor the line budget cannot cut into. |
-| S5 | `TagProtector` | fn | spec | all | `transforms/tag_protector.rs` | no | S | Never break XML/markup tags mid-compression. Done as `signals::tags::{protected_lines, breaks_markup}`; balance check over tag-shaped tokens, not an XML parser. Unioned with the anchor set in `TextSummarizer`, so a lossy pass cannot drop a tag delimiter. |
+| S4 | `AnchorSelector` | fn | spec | all | `transforms/anchor_selector.rs` | no | M | Picks stable anchor points so output stays position-preserving (I6). Done as `signals::anchors::select_anchors` — hunk headers, headings, fences, stack frames, structure opens, boundaries. Consulted by `TextSummarizer` via `signals::keep_with_required`, which treats the anchor set as a floor the line budget cannot cut into. **Only genuinely reached from a request once C10's prose routing landed** — until then the compressor it was wired into was itself unreachable. |
+| S5 | `TagProtector` | fn | spec | all | `transforms/tag_protector.rs` | no | S | Never break XML/markup tags mid-compression. Done as `signals::tags::{protected_lines, breaks_markup}`; balance check over tag-shaped tokens, not an XML parser. Unioned with the anchor set in `TextSummarizer`, so a lossy pass cannot drop a tag delimiter. Reached from a request only once C10's prose routing landed; verified end to end (`</result>` survives an 80% reduction). |
 
 ### SmartCrusher (JSON) — split into 6 issues to keep them small
 
@@ -148,7 +154,7 @@ Every row is a gap: the target repo is empty, so all rows are new implementation
 | C7 | `LogCompressor` | fn | spec | all | `docs/text-and-logs.mdx` | no | M | Template extraction + repeat collapsing. Done. |
 | C8 | `DiffCompressor` | fn | spec | all | `transforms/diff_compressor.rs` | no | M | Elide unchanged context, keep hunk headers. Depends on D2. Done. |
 | C9 | `SearchCompressor` | fn | spec | all | README "Code search 92%" | no | M | Grep/ripgrep-style result sets — the headline benchmark case. Done. |
-| C10 | `TextCrusher` | fn | spec | all | `docs/text-and-logs.mdx` | no | M | Lossless plain-text pass (whitespace, repetition). Done — `TextCrusher` (lossless) and `TextSummarizer` (lossy), split per I10. |
+| C10 | `TextCrusher` | fn | spec | all | `docs/text-and-logs.mdx` | no | M | Lossless plain-text pass (whitespace, repetition). Done, in two halves. **Lossy:** `TextSummarizer`, registered in `Orchestrator` and reached via `transform_for_block`, which routes prose only for tool-output blocks (D24). **Lossless:** delivered by `pipeline::reformats::tidy_lines` through `Reformatter` on the `Routing::Lossless` branch. `TextCrusher` is a *second implementation* of that same normalization and is routed by nothing — kept as public API, documented as redundant so it is not wired up into a competing lossless path. |
 | C11 | `CodeCompressor` core + Rust/Python | fn | spec | all | `docs/code-compression.mdx` | no | L | AST-aware skeletonization. **Split** — core trait + 2 languages. Done — heuristic skeletonizer, not tree-sitter; see DECISIONS D3. Registered in `Orchestrator` and reached from the request path — it was not, until #81. |
 | C12 | `CodeCompressor` JS/TS + Go | fn | spec | all | `docs/code-compression.mdx` | no | M | Depends on C11. Done — heuristic; see DECISIONS D3. Reached via C11's registration. |
 | C13 | `CodeCompressor` Java + C/C++ + Perl | fn | spec | all | `docs/code-compression.mdx` | no | M | Depends on C11. Perl has no tree-sitter-grade grammar — may degrade to heuristic. Done — heuristic; see DECISIONS D3. Reached via C11's registration. |

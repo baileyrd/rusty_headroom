@@ -73,6 +73,17 @@ pub fn normalize_whitespace(source: &str, config: &TextConfig) -> String {
 /// Lossless plain-text compression.
 ///
 /// Safe on every auth mode, since nothing a reader could use is discarded.
+///
+/// # Not on the request path, and deliberately not wired up
+///
+/// [`crate::pipeline::reformats::tidy_lines`] performs the same normalization — collapse
+/// blank-line runs, strip trailing whitespace — and *is* reached, through `Reformatter`
+/// on the `Routing::Lossless` branch. This type is a second implementation of that
+/// behaviour.
+///
+/// Routing it as well would give prose two lossless paths that could disagree, which is
+/// the drift D23 was written to end. It stays as public API for callers assembling their
+/// own pipeline; anything on the proxy's path should reach for the reformatter.
 pub struct TextCrusher {
     config: TextConfig,
     sizer: AdaptiveSizer,

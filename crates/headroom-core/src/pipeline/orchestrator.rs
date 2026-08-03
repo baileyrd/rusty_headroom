@@ -25,7 +25,9 @@ use crate::telemetry::{AggregationKey, Recommendations, StructureHash};
 use crate::tokenizer::registry::Registry;
 use crate::tokenizer::Tokenizer;
 use crate::transform::Transform;
-use crate::{CodeCompressor, DiffCompressor, LogCompressor, SearchCompressor, SmartCrusher};
+use crate::{
+    CodeCompressor, DiffCompressor, LogCompressor, SearchCompressor, SmartCrusher, TextSummarizer,
+};
 
 /// What the orchestrator decided to do with a block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +106,7 @@ pub struct Orchestrator {
     search: SearchCompressor,
     diff: DiffCompressor,
     code: CodeCompressor,
+    text: TextSummarizer,
     reformatter: Reformatter,
     limits: Limits,
     tokenizers: Registry,
@@ -123,7 +126,8 @@ impl Orchestrator {
             log: LogCompressor::new(store.clone()),
             search: SearchCompressor::new(store.clone()),
             diff: DiffCompressor::new(store.clone()),
-            code: CodeCompressor::new(store),
+            code: CodeCompressor::new(store.clone()),
+            text: TextSummarizer::new(store),
             reformatter: Reformatter::new(),
             limits: Limits::default(),
             // The exact OpenAI counters are registered by default. They are already
@@ -236,11 +240,45 @@ impl Orchestrator {
         }
     }
 
+    /// The transform for `block`, if one applies.
+    ///
+    /// # Use this from a request path, not [`Orchestrator::transform_for`]
+    ///
+    /// The two differ on exactly one thing, and it matters: **prose is compressed only
+    /// when the block is tool output**. `BlockKind::Text` is what a user typed or a model
+    /// wrote, and the prose compressor is lossy — it drops low-importance lines behind a
+    /// CCR marker. Doing that to a directory listing is the product. Doing it to
+    /// somebody's message is rewriting what they said, and no token saving is worth that.
+    ///
+    /// Every other content type is tool-shaped by nature: a user does not type a
+    /// 5 KB unified diff into a chat box, and if they do, compressing it is what they
+    /// were asking for.
+    pub fn transform_for_block(
+        &self,
+        block: &Block,
+        policy: CompressionPolicy,
+        model: &str,
+    ) -> Option<&dyn Transform> {
+        let transform = self.transform_for(block.content(), policy, model)?;
+
+        if transform.name() == self.text.name() && !block.kind().is_tool_output() {
+            return None;
+        }
+        Some(transform)
+    }
+
     /// The transform for `content`, if one applies.
     ///
     /// A thin wrapper over [`Orchestrator::route`] for callers that want the compressor
     /// rather than the reason. Callers recording telemetry should use `route`, since
     /// `None` here collapses three genuinely different outcomes into one.
+    ///
+    /// # This one has no block to inspect
+    ///
+    /// Which makes it right for `headroom compress`, the MCP tool, and the Python
+    /// binding — a caller that handed content over has asked for it to be compressed,
+    /// whatever it is. A request path has a block and should use
+    /// [`Orchestrator::transform_for_block`] instead.
     pub fn transform_for(
         &self,
         content: &str,
@@ -267,6 +305,10 @@ impl Orchestrator {
             // content. Code is the largest category of agent tool-result traffic, so the
             // omission was not a small one.
             ContentType::Code => Some(&self.code),
+            // Prose is routed only through `transform_for_block`, which checks that the
+            // block is tool output. Reaching it by content alone is correct for a caller
+            // that handed content over to be compressed — see `transform_for`.
+            ContentType::Prose => Some(&self.text),
             _ => None,
         }
     }
@@ -416,10 +458,14 @@ mod tests {
         // reading telemetry needs to tell "nothing handles this" from "we were not
         // allowed to" — the fixes are entirely different.
         let orchestrator = orchestrator();
-        let prose = "The quick brown fox jumps over the lazy dog. ".repeat(50);
+
+        // Whitespace only, which detects as `Unknown`. Prose used to be the example
+        // here and is no longer one: it routes to the text compressor as of gap row
+        // C10's wiring, which is the point of that change.
+        let nothing = "   \n\t  \n".repeat(200);
 
         assert!(matches!(
-            orchestrator.route(&prose, payg(), "claude-opus-4"),
+            orchestrator.route(&nothing, payg(), "claude-opus-4"),
             Routing::NoCompressor { .. } | Routing::Unsafe { .. }
         ));
     }
@@ -437,13 +483,62 @@ mod tests {
                 .as_str(),
             orchestrator.route(&deep, payg(), "claude-opus-4").as_str(),
             orchestrator
-                .route("short", payg(), "claude-opus-4")
+                .route("   \n\t  ", payg(), "claude-opus-4")
                 .as_str(),
         ];
 
         assert_eq!(reasons[0], "policy_forbids");
         assert_eq!(reasons[1], "unsafe");
-        assert_ne!(reasons[2], "compress");
+        // Whitespace only, so nothing handles it. `"short"` used to serve here and is
+        // now ordinary prose, which does route.
+        assert_eq!(reasons[2], "no_compressor");
+    }
+
+    #[test]
+    fn prose_from_a_tool_result_is_compressed() {
+        // Gap row C10. `TextSummarizer` existed, was tested, and was referenced by
+        // nothing but the `lib.rs` re-export — so the proxy forwarded every prose tool
+        // result whole. The S4/S5 keep-sets were wired into this compressor, which means
+        // they never ran either until this routing existed.
+        let prose = "The quick brown fox jumps over the lazy dog. ".repeat(400);
+        let block = Block::new(BlockKind::ToolResult, prose);
+
+        assert_eq!(
+            orchestrator()
+                .transform_for_block(&block, payg(), "claude-opus-4")
+                .map(|t| t.name()),
+            Some("text_summarizer")
+        );
+    }
+
+    #[test]
+    fn prose_a_person_wrote_is_never_lossily_rewritten() {
+        // The line this whole entry point exists to draw. `BlockKind::Text` is what a
+        // user typed or a model wrote, and the prose compressor is lossy — it drops
+        // low-importance lines behind a CCR marker. Doing that to a directory listing is
+        // the product. Doing it to somebody's message is rewriting what they said.
+        let prose = "The quick brown fox jumps over the lazy dog. ".repeat(400);
+        let block = Block::new(BlockKind::Text, prose);
+
+        assert!(
+            orchestrator()
+                .transform_for_block(&block, payg(), "claude-opus-4")
+                .is_none(),
+            "a user's own text was routed to a lossy compressor"
+        );
+    }
+
+    #[test]
+    fn the_tool_output_rule_applies_only_to_prose() {
+        // Every other type is tool-shaped by nature: a person does not type a 5 KB
+        // unified diff into a chat box, and if they do, compressing it is what they were
+        // asking for. Narrowing the rule further would exempt content the proxy exists
+        // to compress.
+        let block = Block::new(BlockKind::Text, bulky_json());
+
+        assert!(orchestrator()
+            .transform_for_block(&block, payg(), "claude-opus-4")
+            .is_some());
     }
 
     #[test]

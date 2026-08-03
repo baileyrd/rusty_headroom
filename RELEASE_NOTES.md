@@ -6,6 +6,43 @@ the crate starts publishing releases.
 
 ---
 
+## The proxy compresses prose from tools — and never what a person wrote
+**2026-08-03** · gap row C10, and a correction to S4/S5
+
+- **Fixed:** `Orchestrator` had no arm for `ContentType::Prose`. `TextCrusher` and
+  `TextSummarizer` were referenced by **nothing but the `lib.rs` re-export**, so every
+  prose tool result was forwarded whole. A 22 KB tagged report now compresses to
+  **4,529 bytes**.
+- **Added:** `Orchestrator::transform_for_block`, used by the proxy. Prose routes only
+  when `block.kind().is_tool_output()`.
+- **Correction to an earlier claim.** PR #71 closed **S4** and **S5** by wiring the
+  anchor and tag keep-sets into `TextSummarizer`, and I reported them as reached from the
+  request path. **They were not** — the compressor holding them was itself unreachable,
+  so neither ran on proxied traffic. They only start running here. The wiring was real
+  and tested the whole time; what was wrong was my claim about what reached it.
+- **Design note:** `BlockKind::is_compressible()` includes `Text` — what a user typed or
+  a model wrote — and the prose compressor is lossy. Dropping lines from a directory
+  listing is the product; dropping them from somebody's message is rewriting what they
+  said. Verified end to end: the same prose compresses 22,331 → 4,529 bytes as a tool
+  result and arrives **byte-identical** as a user message.
+- **Design note:** the rule is prose-only on purpose. A person does not type a 5 KB
+  unified diff into a chat box, and if they do, compressing it is what they were asking
+  for. See `DECISIONS.md` D24.
+- **Design note:** this makes the proxy and the content-only callers (CLI, MCP, Python)
+  differ, deliberately. D23 was about ending exactly that kind of divergence, so the
+  difference is two named entry points with the reason in both doc comments, not a flag
+  someone has to remember.
+- **Documented rather than wired:** `TextCrusher` performs the *same* normalization as
+  `pipeline::reformats::tidy_lines`, which is already reached through `Reformatter` on the
+  lossless branch. Routing it too would give prose two lossless paths that could disagree
+  — the drift D23 exists to end. It stays as public API, marked redundant so nobody
+  "fixes" it by wiring it up.
+- **Verified end to end:** the tag keep-set holds `</result>` through an 80% reduction,
+  and the boundary anchor holds the final line of a 21 KB report — the first time either
+  has run against a real request.
+
+---
+
 ## The proxy compresses code, and three routing tables become one
 **2026-08-03** · gap rows C11–C13
 
