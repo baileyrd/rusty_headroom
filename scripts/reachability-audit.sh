@@ -67,6 +67,23 @@ for c in $consts; do
   [ "$n" -gt 0 ] && note "✓ $c" || fail "$c is declared but never read"
 done
 
+echo "== 5. every decline reason can actually be produced"
+# `Declined` variants are telemetry: an operator builds a dashboard from them, and a
+# reason that cannot fire is a panel that stays empty forever while looking like it means
+# something. `OutsideLiveZone` was exactly that — it described a check the transform layer
+# cannot perform, because a Block carries no position.
+#
+# Matched on *construction* (`Error::declined(Declined::X)` / `Error::Declined(Declined::X)`)
+# rather than on any mention. A first attempt counted every `Enum::Variant` occurrence and
+# reported six AnchorKind variants as dead when all six are built inside their own module —
+# the same cry-wolf failure as the env-var check below it.
+for v in $(grep -oP '^\s+\K[A-Z][A-Za-z]+(?=,)' crates/headroom-core/src/error.rs \
+    | awk 'NR<=20' | sort -u); do
+  grep -q "^\s*$v,$" crates/headroom-core/src/error.rs || continue
+  n=$(grep -rEn "Error::[dD]eclined\(Declined::$v\b" --include=*.rs crates | wc -l)
+  [ "$n" -gt 0 ] && note "✓ $v" || fail "Declined::$v is declared but nothing produces it"
+done
+
 echo
 [ "$status" -eq 0 ] && echo "clean" || echo "findings above — see the header for why this matters"
 exit "$status"

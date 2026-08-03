@@ -6,6 +6,28 @@ the crate starts publishing releases.
 
 ---
 
+## A decline reason that could never fire
+**2026-08-03** · dead state removed
+
+- **Removed:** `Declined::OutsideLiveZone`. It appeared only in its own declaration, its
+  message string, and one test — **nothing produced it, and nothing could**. A `Block`
+  carries no position, so the transform layer has no way to know where in a conversation
+  it came from. The frozen prefix is protected *structurally*, by the live-zone
+  dispatcher never offering those blocks to a transform at all.
+- **Why remove rather than document:** these reasons are telemetry. An operator builds a
+  dashboard from them, and a reason that cannot fire is a panel that stays empty forever
+  while looking like it means something.
+- **Added:** check 5 to `scripts/reachability-audit.sh` — every `Declined` variant must
+  appear in an actual `Error::declined(...)` construction. Verified to bite: reinstating
+  the variant makes the script fail.
+- **A false positive, caught while writing it.** The first version counted every
+  `Enum::Variant` mention and reported six `AnchorKind` variants as dead — all six are
+  built inside their own module, which the check excluded. Matching on *construction*
+  rather than mention fixes it. That is the second cry-wolf bug in this script, and both
+  are now recorded in its header as the reason the checks are phrased the way they are.
+
+---
+
 ## The reachability audit becomes a script in CI
 **2026-08-03** · tooling
 
