@@ -44,6 +44,33 @@ pub mod vars {
     pub const REDIS_URL: &str = "HEADROOM_REDIS_URL";
 }
 
+/// Settings that are read once at startup and ignored thereafter.
+///
+/// # Why this list has to exist
+///
+/// Most of `Config` is read per request, which is what makes hot-reload work. These are
+/// not: the CCR store is opened once, memories and recommendations are loaded once
+/// deliberately (a set that changed between requests would make the same request produce
+/// different bytes depending on when it arrived — invariant I4), and the listen socket is
+/// bound once.
+///
+/// `POST /admin/runtime-env` will happily store any of them and previously answered
+/// `applied`, which was false: the value sat in the override map and nothing ever read it
+/// again. An operator retuning a proxy during an incident would believe they had changed
+/// something and move on. The endpoint now names them.
+///
+/// Kept beside the variables themselves so a new startup-only setting is added here in the
+/// same edit rather than discovered later by someone whose change silently did nothing.
+pub const STARTUP_ONLY: [&str; 7] = [
+    vars::HOST,
+    vars::PORT,
+    vars::RECOMMENDATIONS,
+    vars::MEMORY,
+    vars::MEMORY_LIMIT,
+    vars::CCR_DIR,
+    vars::REDIS_URL,
+];
+
 /// Default listen port.
 pub const DEFAULT_PORT: u16 = 8787;
 

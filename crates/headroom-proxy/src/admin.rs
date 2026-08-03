@@ -156,14 +156,39 @@ pub async fn runtime_env(request: Request) -> Response {
     }
 
     let applied = config::set_overrides(requested);
-    tracing::info!(?applied, "runtime overrides applied");
+
+    // Stored is not the same as in effect. These are read once at startup — the CCR
+    // store is opened once, memories and recommendations are loaded once so the same
+    // request cannot compress differently depending on when it arrived (I4), and the
+    // listen socket is bound once. Reporting them as applied and nothing more is a lie an
+    // operator acts on: they believe the change took and move on.
+    let needs_restart: Vec<String> = applied
+        .iter()
+        .filter(|name| config::STARTUP_ONLY.contains(&name.as_str()))
+        .cloned()
+        .collect();
+
+    if needs_restart.is_empty() {
+        tracing::info!(?applied, "runtime overrides applied");
+    } else {
+        tracing::warn!(
+            ?applied,
+            ?needs_restart,
+            "runtime overrides stored; some take effect only after a restart"
+        );
+    }
 
     // The values are echoed back as *names only*. Configuration can carry an upstream
     // URL with credentials in it, and an endpoint that reflects what it was given is
     // the easiest way for one to end up in a log.
     (
         StatusCode::OK,
-        Json(serde_json::json!({ "applied": applied })),
+        Json(serde_json::json!({
+            "applied": applied,
+            // Named explicitly rather than left for the operator to infer. An empty list
+            // is the common case and says "everything you set is live now".
+            "needs_restart": needs_restart,
+        })),
     )
         .into_response()
 }
@@ -345,6 +370,69 @@ mod tests {
             "https://api.anthropic.com"
         );
         config::clear_overrides();
+    }
+
+    #[tokio::test]
+    async fn a_startup_only_override_is_reported_as_needing_a_restart() {
+        // The endpoint used to answer `applied` for these and nothing else, which is a
+        // lie an operator acts on: the value is stored, nothing ever reads it again, and
+        // they believe the change took effect and move on.
+        let _guard = SERIAL.lock().await;
+        config::clear_overrides();
+
+        let response = call(
+            Some("127.0.0.1:5000"),
+            r#"{"HEADROOM_MEMORY":"/tmp/memories.jsonl"}"#,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_of(response).await;
+        assert_eq!(body["applied"], serde_json::json!(["HEADROOM_MEMORY"]));
+        assert_eq!(
+            body["needs_restart"],
+            serde_json::json!(["HEADROOM_MEMORY"])
+        );
+        config::clear_overrides();
+    }
+
+    #[tokio::test]
+    async fn a_live_override_reports_an_empty_restart_list() {
+        // The common case, and it has to be visibly different from the one above or the
+        // field tells an operator nothing.
+        let _guard = SERIAL.lock().await;
+        config::clear_overrides();
+
+        let response = call(Some("127.0.0.1:5000"), r#"{"HEADROOM_COMPRESSION":"0"}"#).await;
+
+        let body = body_of(response).await;
+        assert_eq!(body["applied"], serde_json::json!(["HEADROOM_COMPRESSION"]));
+        assert_eq!(body["needs_restart"], serde_json::json!([]));
+        config::clear_overrides();
+    }
+
+    #[test]
+    fn every_startup_only_name_is_a_real_setting() {
+        // A typo here would silently drop a name from the warning — the value would be
+        // stored, reported as live, and never read. Checked against the `vars` module
+        // rather than trusted.
+        let known = [
+            config::vars::HOST,
+            config::vars::PORT,
+            config::vars::UPSTREAM,
+            config::vars::COMPRESSION,
+            config::vars::OUTPUT_SHAPER,
+            config::vars::RECOMMENDATIONS,
+            config::vars::MEMORY,
+            config::vars::MEMORY_LIMIT,
+            config::vars::STABILIZE,
+            config::vars::CCR_DIR,
+            config::vars::REDIS_URL,
+        ];
+
+        for name in config::STARTUP_ONLY {
+            assert!(known.contains(&name), "{name} is not a known setting");
+        }
     }
 
     #[tokio::test]
