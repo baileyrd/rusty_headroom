@@ -6,6 +6,50 @@ the crate starts publishing releases.
 
 ---
 
+## Streaming traffic is compressed and observed
+**2026-08-03** · gap row X18, completes X19
+
+- **Fixed:** `compress_request` no longer bails out on `"stream": true`. The reasoning
+  behind that bail-out — that compressing a stream would mean buffering it — conflated
+  two different bodies. The *request* body arrives complete before compression runs,
+  whatever the client wants the *response* framing to look like. Streaming is the
+  common agent case, so the bail-out exempted most real traffic from compression while
+  every test kept confirming compression worked.
+- **Added:** `observe::ObservingStream`, wrapping the relayed response so SSE frames are
+  parsed as they pass. Every byte it yields is the byte it received (invariant I9).
+- **Added:** cache usage to `AnthropicEvent::MessageStart`, which is where the provider
+  reports what the prompt cache did. `headroom_cache_hit_rate` now has data.
+- **Verified through the release binary against a streaming provider:** a 10,450-byte
+  `"stream": true` request arrived upstream as **595 bytes** — 94.3% smaller, where
+  before it was forwarded untouched — with frames reaching the client at +0.01s, +0.41s
+  and +0.81s rather than all at once, and `headroom_cache_hit_rate 0.9000` afterwards.
+- **Design note:** observation is a stream wrapper rather than a callback after the
+  fact, because the two numbers that matter sit at opposite ends of the response.
+  `message_start` carries the cache usage and is the *first* frame; `message_delta`
+  carries output tokens and arrives near the last. Waiting for the response to finish
+  before reading either would mean buffering it.
+- **Design note:** telemetry is also recorded on `Drop`, not only on clean termination.
+  A client that cancels mid-generation drops the stream rather than exhausting it, so
+  `poll_next` never returns `None` — and cancellation is routine for an interactive
+  agent, not an edge case. A flag keeps a cleanly-ended stream from being counted twice.
+- **Design note:** `message_start` nests `usage` under `message`, unlike `message_delta`
+  which puts it at the top level. Reading the wrong one yields `None` on every real
+  stream, and a permanently empty cache metric reads as "no traffic" rather than as a
+  defect. There is a test for each nesting, so a lenient reader that accepted either
+  cannot pass.
+- **Design note:** cache tokens accumulate across `message_start` events rather than
+  being assigned. One connection can carry more than one message, and the second frame
+  would otherwise erase what the first reported.
+- **Design note:** the observing stream is boxed internally so it is unconditionally
+  `Unpin`. That keeps `poll_next` free of the unsafe pin projection this crate forbids,
+  at one allocation per response against a network round trip.
+- **Known limitation:** only the Anthropic event vocabulary is modelled, so OpenAI
+  streams (X11, X12) relay correctly but report nothing. Unrecognized event types are
+  logged rather than counted.
+- **Known limitation:** `headroom_cache_hit_rate` is only populated by *streaming*
+  responses. A non-streaming reply carries the same usage block in its JSON body, which
+  nothing currently reads.
+
 ## The proxy actually proxies — upstream relay
 **2026-08-03** · completes gap row X5, and clears the "does not forward upstream yet"
 limitation carried since the `/v1/messages` handler first landed
