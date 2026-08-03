@@ -115,6 +115,10 @@ repository were once shipped, tested, documented as done, and never called by an
 A test proves a function works; it does not prove that anything calls it. The script's
 header records which gap motivated each check.
 
+Its sixth check asks a related question: does anything carry a *second copy* of the
+routing table? Five places did, and each eventually disagreed with the pipeline it was
+describing — including both commands whose whole purpose is to describe it.
+
 ## Layout
 
 ```
@@ -132,9 +136,11 @@ Python toolchain.
 
 ## Where the reasoning lives
 
-[DECISIONS.md](./DECISIONS.md) is the live decision record — 24 entries, each with what
-was decided, why, and what would change it. Two of them reverse earlier decisions whose
-premises turned out never to have been checked.
+[DECISIONS.md](./DECISIONS.md) is the live decision record — each entry has what was
+decided, why, and what would change it. Two of them reverse earlier decisions whose
+premises turned out never to have been checked. (This line used to carry a count of the
+entries. It was wrong by two, which is a small instance of exactly what `scripts/reachability-audit.sh`
+check 6 is about: a second copy of a fact, drifting from the first.)
 
 `docs/adr/` holds an unused ADR template from the repo scaffolding. `DECISIONS.md` is the
 one that is maintained; prefer it.

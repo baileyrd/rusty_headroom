@@ -74,37 +74,105 @@ pub fn compress(dry_run: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `headroom inspect`.
-pub fn inspect() -> anyhow::Result<()> {
-    let content = read_stdin()?;
+/// What `headroom inspect` would report about `content`, one line per line of output.
+///
+/// Separated from the printing so it can be asserted on. The bug this function exists to
+/// prevent is a *disagreement* between what this command claims and what the pipeline
+/// does, and a test that cannot read the claim cannot check it.
+///
+/// # Asked of the orchestrator, never restated here
+///
+/// This used to be a hand-written copy of the routing table inside `inspect`, and it was
+/// already wrong: it mapped prose to "none", which stopped being true the moment the
+/// prose compressors were wired into the request path. The same 18 KB of prose got
+/// `compressor: none` from `headroom inspect` and `would save: 5205 (70%)` from
+/// `headroom compress` in the same shell — the command built to explain routing was the
+/// one contradicting it. That is D23 surviving in the last place it should.
+///
+/// So nothing below decides anything. Every routing line comes from
+/// [`Orchestrator::route`] and [`Orchestrator::transform_for_block`], the two functions
+/// the proxy itself calls.
+fn inspect_report(content: &str) -> Vec<String> {
     let detection = detect(content.as_bytes());
     let sizer = AdaptiveSizer::default();
     let estimator = HeuristicEstimator::new();
+    let above_threshold = sizer.should_attempt(detection.content_type, content.len());
 
-    println!("bytes: {}", content.len());
-    println!("estimated tokens: {}", estimator.count(&content));
-    println!("content type: {}", detection.content_type);
-    println!("confidence: {:.2}", detection.confidence);
-    println!(
-        "size threshold: {} bytes",
-        sizer.threshold(detection.content_type)
-    );
-    println!(
-        "above threshold: {}",
-        sizer.should_attempt(detection.content_type, content.len())
-    );
+    let mut lines = vec![
+        format!("bytes: {}", content.len()),
+        format!("estimated tokens: {}", estimator.count(content)),
+        format!("content type: {}", detection.content_type),
+        format!("confidence: {:.2}", detection.confidence),
+        format!(
+            "size threshold: {} bytes",
+            sizer.threshold(detection.content_type)
+        ),
+        format!("above threshold: {above_threshold}"),
+    ];
 
-    // Naming the compressor makes the routing decision inspectable, which is the
-    // point of the command — "why did this not compress" is otherwise a guess.
-    let compressor = match detection.content_type {
-        ContentType::Json => "smart_crusher",
-        ContentType::Log => "log_compressor",
-        ContentType::SearchResults => "search_compressor",
-        ContentType::Diff => "diff_compressor",
-        ContentType::Code => "code_compressor",
-        ContentType::Prose | ContentType::Unknown => "none",
-    };
-    println!("compressor: {compressor}");
+    let orchestrator = Orchestrator::new(Arc::new(InMemoryCcrStore::new()));
+
+    // The model only matters for the recommendations lookup, and `headroom inspect` reads
+    // no recommendations file — an empty model is the "nothing measured about this shape"
+    // case, which is what an unconfigured inspection should report.
+    let model = "";
+
+    // # Two dimensions, because two things change the answer
+    //
+    // The credential (I10): an API key gets lossy work, an OAuth token lossless only, a
+    // subscription token nothing. And the block kind (D24): prose is compressed from tool
+    // output and never from what a person typed. Reporting one compressor would mean
+    // picking a credential and a block kind on the operator's behalf without saying so —
+    // which is how this command came to be wrong in the first place.
+    lines.push("routing:".to_string());
+    for (label, mode) in [
+        ("api key", AuthMode::PayAsYouGo),
+        ("oauth", AuthMode::OAuth),
+        ("subscription", AuthMode::Subscription),
+    ] {
+        let policy = CompressionPolicy::for_mode(mode);
+        let routing = orchestrator.route(content, policy, model);
+
+        // The reason is `Routing::as_str` — the same identifier the proxy reports under
+        // `headroom_routing_total{reason=...}`, so a `measured_useless` seen on a
+        // dashboard and a `measured_useless` seen here are the same fact.
+        lines.push(format!("  {label}: {}", routing.as_str()));
+
+        for (kind_label, kind) in [
+            ("as tool output", BlockKind::ToolResult),
+            ("as a typed message", BlockKind::Text),
+        ] {
+            let block = Block::new(kind, content.to_string());
+
+            // `route` does not consult the size threshold — each lossy compressor holds
+            // its own `AdaptiveSizer` and declines below it. So on a short payload this
+            // names a compressor that will be offered the content and do nothing with
+            // it, which reads as "this compresses" to anyone who did not also read the
+            // threshold line six lines up. Said here, where it is being read.
+            //
+            // Only when a lossy compressor was actually named: there is nothing for the
+            // note to qualify on a block that is forwarded anyway, and `Reformatter` has
+            // no sizer, so the threshold does not gate it either.
+            let named = match orchestrator.transform_for_block(&block, policy, model) {
+                None => "forwarded unchanged".to_string(),
+                Some(transform) if routing.is_lossy() && !above_threshold => format!(
+                    "{} (below the size threshold — it will decline)",
+                    transform.name()
+                ),
+                Some(transform) => transform.name().to_string(),
+            };
+            lines.push(format!("    {kind_label}: {named}"));
+        }
+    }
+    lines
+}
+
+/// `headroom inspect`.
+pub fn inspect() -> anyhow::Result<()> {
+    let content = read_stdin()?;
+    for line in inspect_report(&content) {
+        println!("{line}");
+    }
     Ok(())
 }
 
@@ -337,6 +405,305 @@ mod tests {
                 .map(|t| t.name()),
             Some("code_compressor"),
             "code reached no compressor"
+        );
+    }
+
+    /// Prose bulky and repetitive enough that the summarizer genuinely shrinks it.
+    ///
+    /// Not one long line, and not one line repeated: the summarizer works on a line
+    /// budget and keeps what scores as notable, so uniform content gives it nothing to
+    /// drop and would make a passing test prove the opposite of what it claims.
+    fn compressible_prose() -> String {
+        (0..220)
+            .map(|i| match i % 37 {
+                0 => {
+                    format!("ERROR: batch {i} failed validation: checksum mismatch, retry queued.")
+                }
+                _ => "The worker acknowledged the message and kept polling without incident."
+                    .to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The value `inspect_report` printed after `label:`, searching from `from`.
+    ///
+    /// Read out of the rendered lines rather than returned from a struct, because the
+    /// rendering is what an operator reads and therefore what has to be right. A test
+    /// against an intermediate value would pass while the printed line said something
+    /// else.
+    fn value_after(lines: &[String], label: &str, from: usize) -> (usize, String) {
+        let prefix = format!("{label}: ");
+        let at = lines[from..]
+            .iter()
+            .position(|line| line.trim_start().starts_with(&prefix))
+            .map(|offset| from + offset)
+            .unwrap_or_else(|| panic!("no `{label}:` line in {lines:#?}"));
+
+        (at, lines[at].trim_start()[prefix.len()..].to_string())
+    }
+
+    /// The reason `inspect_report` gave for `credential`.
+    fn line_reason(lines: &[String], credential: &str) -> String {
+        value_after(lines, credential, 0).1
+    }
+
+    /// The transform `inspect_report` named for one credential and block kind.
+    fn reported(lines: &[String], credential: &str, kind: &str) -> String {
+        let (at, _) = value_after(lines, credential, 0);
+        value_after(lines, kind, at).1
+    }
+
+    #[test]
+    fn inspect_names_the_compressor_that_actually_compresses_the_content() {
+        // The bug, exactly. `inspect` carried its own routing table mapping prose to
+        // "none", and it stayed that way after the prose compressors were wired in — so
+        // this same content got `compressor: none` from `headroom inspect` and a 70%
+        // saving from `headroom compress`, in one shell, seconds apart.
+        //
+        // The assertion is deliberately anchored to a *measured* saving rather than to
+        // the string "text_summarizer": what makes the old output wrong is not the name
+        // it printed, it is that something did compress while it said nothing would.
+        let prose = compressible_prose();
+        let estimator = HeuristicEstimator::new();
+        let before = estimator.count(&prose);
+
+        let mut block = Block::new(BlockKind::ToolResult, prose.clone());
+        let orchestrator = orchestrator();
+        let transform = orchestrator
+            .transform_for_block(&block, payg(), "")
+            .expect("nothing routed this prose, so the fixture proves nothing");
+        let outcome = validated_apply(transform, &mut block, &estimator).expect("apply failed");
+        assert!(
+            outcome.is_compressed() && estimator.count(block.content()) < before,
+            "the fixture did not actually compress, so this test would pass on a stub"
+        );
+
+        // Given that it compresses, the command must not claim otherwise.
+        let lines = inspect_report(&prose);
+        let named = reported(&lines, "api key", "as tool output");
+        assert_eq!(
+            named,
+            transform.name(),
+            "inspect named `{named}` for content the pipeline compresses with `{}`",
+            transform.name()
+        );
+    }
+
+    #[test]
+    fn inspect_agrees_with_the_orchestrator_on_every_content_type() {
+        // The general form: whatever `inspect` prints must be what
+        // `transform_for_block` returns. Re-introducing any hand-written table fails
+        // here as soon as it drifts by one arm — which is the only way this class of bug
+        // has ever appeared.
+        let samples: Vec<(&str, String)> = vec![
+            (
+                "json",
+                format!("[{}]", vec![r#"{"a":1,"b":"x"}"#; 300].join(",")),
+            ),
+            (
+                "code",
+                concat!(
+                    "pub fn handle(input: &str) -> Result<String, Error> {\n",
+                    "    let parsed = parse(input)?;\n",
+                    "    Ok(render(&parsed))\n",
+                    "}\n"
+                )
+                .repeat(80),
+            ),
+            ("prose", compressible_prose()),
+            ("tiny", "hello".to_string()),
+        ];
+
+        for (label, content) in samples {
+            let lines = inspect_report(&content);
+
+            for (credential, mode) in [
+                ("api key", AuthMode::PayAsYouGo),
+                ("oauth", AuthMode::OAuth),
+                ("subscription", AuthMode::Subscription),
+            ] {
+                let policy = CompressionPolicy::for_mode(mode);
+                assert_eq!(
+                    line_reason(&lines, credential),
+                    orchestrator().route(&content, policy, "").as_str(),
+                    "{label}/{credential}: reported reason is not the routed one"
+                );
+
+                for (kind_label, kind) in [
+                    ("as tool output", BlockKind::ToolResult),
+                    ("as a typed message", BlockKind::Text),
+                ] {
+                    let block = Block::new(kind, content.clone());
+                    let expected = orchestrator()
+                        .transform_for_block(&block, policy, "")
+                        .map_or("forwarded unchanged".to_string(), |t| t.name().to_string());
+
+                    // `starts_with` because a below-threshold row carries a trailing
+                    // note; the name itself still has to match.
+                    let reported = reported(&lines, credential, kind_label);
+                    assert!(
+                        reported.starts_with(&expected),
+                        "{label}/{credential}/{kind_label}: inspect said `{reported}`, \
+                         the orchestrator says `{expected}`"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inspect_does_not_promise_to_compress_a_typed_message() {
+        // D24. Prose from a tool is the product; prose a person typed is not ours to
+        // rewrite, and a command that told an operator otherwise would be advertising a
+        // saving the proxy will never take.
+        let lines = inspect_report(&compressible_prose());
+
+        assert_eq!(
+            reported(&lines, "api key", "as a typed message"),
+            "forwarded unchanged"
+        );
+    }
+
+    #[test]
+    fn inspect_answers_for_the_credential_rather_than_assuming_an_api_key() {
+        // I10 is the difference between "this will compress" and "this will not", and
+        // the old single-line output picked pay-as-you-go silently. An operator running
+        // a subscription token and asking why nothing compresses got the answer for
+        // somebody else's credential.
+        let lines = inspect_report(&compressible_prose());
+
+        assert_eq!(line_reason(&lines, "subscription"), "policy_forbids");
+        assert_eq!(
+            reported(&lines, "subscription", "as tool output"),
+            "forwarded unchanged"
+        );
+        assert_eq!(line_reason(&lines, "oauth"), "lossless");
+    }
+
+    #[test]
+    fn inspect_says_so_when_the_size_threshold_will_stop_the_named_compressor() {
+        // `route` does not consult the sizer — each compressor holds its own — so on a
+        // short payload the routing line names a compressor that will decline. Naming it
+        // with no qualification reads as "this compresses".
+        let lines = inspect_report("hello");
+        let named = reported(&lines, "api key", "as tool output");
+
+        assert!(
+            named.contains("below the size threshold"),
+            "no threshold note on a 5-byte payload: `{named}`"
+        );
+        // And the note must not appear where nothing was named to decline.
+        assert_eq!(
+            reported(&lines, "subscription", "as tool output"),
+            "forwarded unchanged"
+        );
+    }
+
+    #[test]
+    fn tools_never_reports_a_compressed_type_as_forwarded() {
+        // The bug. `headroom tools` carried a hand-written pair of lists and the second
+        // one — "detected but not compressed" — named code, prose and unknown. Two of
+        // the three were wrong, and they were the two that matter: source files and
+        // prose tool results are the bulk of agent traffic.
+        //
+        // Checked against the orchestrator for every variant rather than against the two
+        // that were wrong, so a type gaining a compressor cannot reintroduce this.
+        let lines = compressor_table();
+        let split = lines
+            .iter()
+            .position(|line| line == "detected but not compressed")
+            .expect("no forwarded section");
+        let (compressed, forwarded) = lines.split_at(split);
+        let orchestrator = orchestrator();
+
+        for content_type in ContentType::ALL {
+            let name = content_type.as_str();
+            let listed_as = |section: &[String]| {
+                section
+                    .iter()
+                    .any(|line| line.split_whitespace().next() == Some(name))
+            };
+
+            if let Some(transform) = orchestrator.for_type(content_type) {
+                assert!(
+                    listed_as(compressed),
+                    "{name} compresses with {} and is not in the compressors list",
+                    transform.name()
+                );
+                assert!(
+                    !listed_as(forwarded),
+                    "{name} compresses and is reported as forwarded"
+                );
+            } else {
+                assert!(
+                    listed_as(forwarded),
+                    "{name} reaches no compressor and is not reported as forwarded"
+                );
+                assert!(
+                    !listed_as(compressed),
+                    "{name} reaches no compressor and is listed as compressed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tools_names_the_compressor_the_orchestrator_would_use() {
+        // The other half: being in the right section is not enough if the name beside it
+        // is a literal somebody typed.
+        let lines = compressor_table();
+        let orchestrator = orchestrator();
+
+        for content_type in ContentType::ALL {
+            let Some(transform) = orchestrator.for_type(content_type) else {
+                continue;
+            };
+            let line = lines
+                .iter()
+                .find(|line| line.split_whitespace().next() == Some(content_type.as_str()))
+                .unwrap_or_else(|| panic!("no line for {}", content_type.as_str()));
+
+            assert!(
+                line.contains(transform.name()),
+                "`{line}` does not name `{}`",
+                transform.name()
+            );
+        }
+    }
+
+    #[test]
+    fn tools_says_which_compressors_only_see_tool_output() {
+        // D24 in the other direction. Listing prose beside the rest unqualified tells an
+        // operator that what their users type gets rewritten, which is the one thing the
+        // rule exists to prevent — as wrong as the old list's claim that prose is never
+        // compressed, just wrong the other way.
+        let lines = compressor_table();
+        let orchestrator = orchestrator();
+
+        for content_type in ContentType::ALL {
+            if orchestrator.for_type(content_type).is_none() {
+                continue;
+            }
+            let line = lines
+                .iter()
+                .find(|line| line.split_whitespace().next() == Some(content_type.as_str()))
+                .unwrap();
+
+            assert_eq!(
+                line.contains("tool output only"),
+                orchestrator.tool_output_only(content_type),
+                "`{line}` disagrees with the block-kind rule"
+            );
+        }
+
+        // And the rule is not vacuous — something has to be under it, or the assertion
+        // above passes by describing a distinction that does not exist.
+        assert!(
+            ContentType::ALL
+                .iter()
+                .any(|ct| orchestrator.tool_output_only(*ct)),
+            "no content type is tool-output-only, so the check above proves nothing"
         );
     }
 
@@ -899,33 +1266,64 @@ pub fn update(check_only: bool) -> anyhow::Result<()> {
 /// # Errors
 ///
 /// Returns an error if stdout cannot be written.
+/// The compressor section of `headroom tools`, one line per line of output.
+///
+/// # Derived, not stated
+///
+/// This section used to be a hand-written list of four `(ContentType, &str)` pairs, with
+/// a second list below it headed "detected but not compressed" naming code, prose and
+/// unknown. Two of those three were wrong: code has compressed since its wiring was
+/// fixed, and prose since the prose compressors were routed. So the command that exists
+/// to say what this build can do told an operator that source files and prose tool
+/// results are forwarded whole — the single largest category of agent traffic there is.
+///
+/// It is now read out of [`Orchestrator::for_type`] across [`ContentType::ALL`], so the
+/// two lists cannot disagree with the pipeline or with each other: a type is in the
+/// second list exactly when the orchestrator has no compressor for it.
+fn compressor_table() -> Vec<String> {
+    let orchestrator = Orchestrator::new(Arc::new(InMemoryCcrStore::new()));
+    let sizer = AdaptiveSizer::default();
+
+    let mut compressed = vec!["compressors".to_string()];
+    let mut forwarded = Vec::new();
+
+    for content_type in ContentType::ALL {
+        match orchestrator.for_type(content_type) {
+            Some(transform) => {
+                // D24, asked rather than restated. Listing prose next to the others with
+                // no qualification is the same error as the old list made in the other
+                // direction: it would tell an operator their users' messages get
+                // rewritten, which is the one thing this rule exists to prevent.
+                let scope = if orchestrator.tool_output_only(content_type) {
+                    "  tool output only"
+                } else {
+                    ""
+                };
+                compressed.push(format!(
+                    "  {:<16} {:<20} min {} bytes{scope}",
+                    content_type.as_str(),
+                    transform.name(),
+                    sizer.threshold(content_type)
+                ));
+            }
+            // Listed explicitly as unhandled rather than omitted. A content type absent
+            // from the output reads as "not detected"; one listed with no compressor
+            // reads as "detected and forwarded", which is what actually happens.
+            None => forwarded.push(format!("  {}", content_type.as_str())),
+        }
+    }
+
+    compressed.push(String::new());
+    compressed.push("detected but not compressed".to_string());
+    compressed.extend(forwarded);
+    compressed
+}
+
 pub fn tools() -> anyhow::Result<()> {
     let mut stdout = std::io::stdout().lock();
 
-    writeln!(stdout, "compressors")?;
-    for (content_type, compressor) in [
-        (ContentType::Json, "smart_crusher"),
-        (ContentType::Log, "log_compressor"),
-        (ContentType::SearchResults, "search_compressor"),
-        (ContentType::Diff, "diff_compressor"),
-    ] {
-        let sizer = AdaptiveSizer::default();
-        writeln!(
-            stdout,
-            "  {:<16} {:<20} min {} bytes",
-            content_type.as_str(),
-            compressor,
-            sizer.threshold(content_type)
-        )?;
-    }
-
-    // Listed explicitly as unhandled rather than omitted. A content type absent from the
-    // output reads as "not detected"; one listed with no compressor reads as "detected
-    // and forwarded", which is what actually happens.
-    writeln!(stdout)?;
-    writeln!(stdout, "detected but not compressed")?;
-    for content_type in [ContentType::Code, ContentType::Prose, ContentType::Unknown] {
-        writeln!(stdout, "  {}", content_type.as_str())?;
+    for line in compressor_table() {
+        writeln!(stdout, "{line}")?;
     }
 
     writeln!(stdout)?;

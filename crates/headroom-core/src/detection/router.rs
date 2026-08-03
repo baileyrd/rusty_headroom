@@ -22,6 +22,27 @@ pub enum ContentType {
 }
 
 impl ContentType {
+    /// Every variant, in declaration order.
+    ///
+    /// Exists so a caller that wants to say something about all of them — `headroom
+    /// tools` listing what compresses, the reachability audit — enumerates them from
+    /// here instead of writing the list out. A hand-written list is one that silently
+    /// stops being complete: `headroom tools` carried one, and it reported code and
+    /// prose as "detected but not compressed" for as long as it took anyone to notice,
+    /// which was well after both had compressors.
+    ///
+    /// Adding a variant without adding it here is possible, so the exhaustiveness is
+    /// pinned by `every_variant_is_in_all` rather than assumed.
+    pub const ALL: [Self; 7] = [
+        Self::Json,
+        Self::Code,
+        Self::Log,
+        Self::Diff,
+        Self::SearchResults,
+        Self::Prose,
+        Self::Unknown,
+    ];
+
     /// A stable identifier for telemetry and error messages.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -354,6 +375,40 @@ mod tests {
 
     fn ty(bytes: &[u8]) -> ContentType {
         detect(bytes).content_type
+    }
+
+    #[test]
+    fn every_variant_is_in_all() {
+        // Two halves, and both are load-bearing.
+        //
+        // The match below is exhaustive, so adding a variant to the enum stops this file
+        // compiling until somebody comes here — and what they find is this comment
+        // telling them to add it to `ALL` too.
+        //
+        // The assertion then catches the other order: a variant added to the match and
+        // not to `ALL`. Without it, `ALL` could quietly go stale and every caller that
+        // iterates it would go quietly incomplete, which is the failure `headroom tools`
+        // shipped for two content types.
+        let mut seen = Vec::new();
+        for content_type in ContentType::ALL {
+            match content_type {
+                ContentType::Json
+                | ContentType::Code
+                | ContentType::Log
+                | ContentType::Diff
+                | ContentType::SearchResults
+                | ContentType::Prose
+                | ContentType::Unknown => seen.push(content_type.as_str()),
+            }
+        }
+
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            ContentType::ALL.len(),
+            "ALL has a duplicate or a variant is missing: {seen:?}"
+        );
     }
 
     #[test]

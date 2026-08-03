@@ -2,7 +2,7 @@
 #
 # Reachability audit — is every capability actually reached from a request?
 #
-# This exists because four separate gaps in this repository were shipped, tested,
+# This exists because five separate gaps in this repository were shipped, tested,
 # documented as done, and never called:
 #
 #   - the SSE observers      (#71) — every response read with the Anthropic classifier
@@ -13,6 +13,10 @@
 #
 # Every one had passing tests. A test proves a function works, not that anything
 # calls it.
+#
+# Check 6 is a different failure with the same shape: not a capability nothing
+# reaches, but a *second copy* of a decision, which drifts from the real one and
+# then describes the system incorrectly with total confidence.
 #
 # The first version of this check asked "is this symbol referenced outside its own
 # file?" — which #82 and #84 both passed, because the CLI and the MCP server
@@ -82,6 +86,62 @@ for v in $(grep -oP '^\s+\K[A-Z][A-Za-z]+(?=,)' crates/headroom-core/src/error.r
   grep -q "^\s*$v,$" crates/headroom-core/src/error.rs || continue
   n=$(grep -rEn "Error::[dD]eclined\(Declined::$v\b" --include=*.rs crates | wc -l)
   [ "$n" -gt 0 ] && note "✓ $v" || fail "Declined::$v is declared but nothing produces it"
+done
+
+echo "== 6. nothing carries a second routing table"
+# D23 says there is one routing table and `Orchestrator::for_type` is it. Three separate
+# copies have existed — in `headroom compress`, in the MCP server, and in `headroom
+# inspect` — and every one of them eventually disagreed with the pipeline. The last was
+# the worst: `inspect` exists to answer "why did this not compress", and it answered
+# `compressor: none` for prose that `headroom compress` shrank by 70% in the same shell.
+#
+# A copy is recognizable before it drifts: a match on `ContentType` with enough arms to
+# be a table. Two files are allowed one, for different reasons — named here rather than
+# skipped silently, so a third has to be argued for:
+#
+#   orchestrator.rs   the routing table itself
+#   adaptive_sizer.rs a size threshold per type — a different question about the same
+#                     enum, and one that has never had a compressor's name in it
+allowed='pipeline/orchestrator.rs|detection/adaptive_sizer.rs'
+compressors='smart_crusher|log_compressor|search_compressor|diff_compressor|code_compressor|text_summarizer'
+
+# 6a. A content type named on the same line as a compressor's name, as a string literal.
+#
+# This is the shape of a routing-table entry in either form a copy has actually taken:
+#   ContentType::Json => "smart_crusher"     (a match arm)
+#   (ContentType::Json, "smart_crusher"),    (a tuple in an array)
+#
+# The first version of this check counted match arms only, and so missed the second form
+# — which is the form `headroom tools` used. That copy was found by reading the file, not
+# by the check written to find it, which is the whole reason 6a is anchored on the
+# compressor name instead of on the syntax around it. A real compressor name only comes
+# from `Transform::name()`; a string literal of one is somebody restating the table.
+restated=$(grep -rnE "ContentType::[A-Za-z]*.*\"($compressors)\"" --include=*.rs crates \
+  | grep -vE "$allowed" || true)
+if [ -n "$restated" ]; then
+  while IFS= read -r line; do
+    fail "routing table restated: $line"
+  done <<< "$restated"
+else
+  note "✓ no content type is paired with a compressor name literal"
+fi
+
+# 6b. And a match on ContentType with enough arms to be a table, whatever it maps to.
+# Catches a copy that stores compressor *values* rather than names. Two files are
+# allowed one, for different reasons — named here rather than skipped silently, so a
+# third has to be argued for:
+#
+#   orchestrator.rs   the routing table itself
+#   adaptive_sizer.rs a size threshold per type — a different question about the same
+#                     enum, and one that has never had a compressor's name in it
+for f in $(grep -rl "ContentType::" --include=*.rs crates); do
+  n=$(grep -c "ContentType::[A-Za-z]* *=>" "$f")
+  [ "$n" -lt 3 ] && continue
+  if printf '%s' "$f" | grep -qE "$allowed"; then
+    note "✓ $f (allowed)"
+  else
+    fail "$f matches on $n ContentType arms — a second routing table? (D23)"
+  fi
 done
 
 echo
