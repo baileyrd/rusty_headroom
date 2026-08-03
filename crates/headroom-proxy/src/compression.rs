@@ -298,6 +298,7 @@ pub fn compress_dialect<'a>(
             &conversation,
             &compressors.memories,
             compressors.memory_limit,
+            frozen,
         ) {
             match edits
                 .iter_mut()

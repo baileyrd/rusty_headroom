@@ -6,6 +6,31 @@ the crate starts publishing releases.
 
 ---
 
+## Memory injection was kept out of the frozen prefix by accident
+**2026-08-03** · no violation found — the guard was in another crate, for another reason
+
+- `inject_append` appends memories to the newest user text block and had **no frozen-floor
+  check**. Nothing in the rewrite path filtered edits by the floor either.
+- What actually protected I2 was an early return in `compress_dialect`:
+  `if zone.is_empty() { return }` — whose comment says it is there because *there is
+  nothing to compress*. A different reason that happens to cover this one, in a different
+  crate, above the injection site. Moving it, or deciding injection should run on a request
+  with no live zone — both reasonable changes, since injection needs nothing to compress —
+  would have removed the protection with nothing to notice.
+- **Verified with controls rather than by assertion.** Three end-to-end cases: no
+  breakpoint → injected (13 → 857 chars); breakpoint on the newest user block → not
+  injected; breakpoint earlier with the newest turn live → injected. Two further attempts
+  to construct a reachable violation both turned out to hit the early return, which the
+  controls exposed.
+- **Added:** `frozen` is now a parameter of `inject_append`, refusing any message below the
+  floor. Three tests, including that a live message still receives injection — a guard that
+  refuses everything looks exactly like one that works.
+- **Stated honestly in the code:** I could not construct a request that reaches this with a
+  frozen target, because the newest user message is at or after the floor whenever anything
+  else is compressible. That is an argument, not a guarantee, and it is the kind of argument
+  this project has been wrong about before.
+- Verified by removing the guard and watching `injected into a message below a floor of 3`.
+
 ## A request the proxy made larger was counted as a compression
 **2026-08-03** · measured through the release binary: 65 tokens in, 440 out
 
