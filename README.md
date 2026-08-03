@@ -116,8 +116,8 @@ A test proves a function works; it does not prove that anything calls it. The sc
 header records which gap motivated each check.
 
 Its sixth check asks a related question: does anything carry a *second copy* of the
-routing table? Three commands did, and each eventually disagreed with the pipeline it was
-describing.
+routing table? Five places did, and each eventually disagreed with the pipeline it was
+describing — including both commands whose whole purpose is to describe it.
 
 ## Layout
 

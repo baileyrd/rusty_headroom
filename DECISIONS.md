@@ -543,9 +543,10 @@ applies the real policy there.
 **Would change if:** a fourth caller appears. It should take an `Orchestrator` rather
 than build a compressor set, and this entry is the reason why.
 
-**Amended — there was a fourth, and this entry said there were three.** `headroom
-inspect` carried its own table the whole time. Counting the callers by memory rather than
-by search is how it was missed, and the entry above then recorded the sweep as finished.
+**Amended — there were five, and this entry said there were three.** `headroom inspect`
+and `headroom tools` both carried their own table the whole time. Counting the callers by
+memory rather than by search is how they were missed, and the entry above then recorded
+the sweep as finished.
 
 It had drifted in the worst possible direction: it mapped `ContentType::Prose` to
 `"none"`, which stopped being true when the prose compressors were wired in. So the
@@ -557,10 +558,29 @@ It now reports `Orchestrator::route`'s reason and `transform_for_block`'s transf
 each auth mode and each block kind, because those two dimensions are what change the
 answer and picking one silently is what made a single-line report wrong.
 
-Counting from memory is what failed here, so the replacement does not count: check 6 of
-`scripts/reachability-audit.sh` fails the build on any file outside the orchestrator that
-matches on three or more `ContentType` arms. Two files are allowlisted by name, with the
-reason recorded in the script.
+`headroom tools` was worse. Its second list — "detected but not compressed" — named code
+and prose, both of which compress, so the command that exists to say what a build can do
+reported the two largest categories of agent traffic as forwarded whole. It now reads
+`for_type` across `ContentType::ALL`; a type is in the second list exactly when nothing
+compresses it.
+
+**`for_type` is public now, and that is the point.** Keeping the table private did not
+stop anyone needing it; it made five people write it out again. A caller with content
+should still use `route` or `transform_for_block`, which apply policy and the block-kind
+rule as well. `for_type` is for callers that have a *type* and want to report on the
+build. `tool_output_only` exists for the same reason: D24 was being described in prose by
+`tools` while `transform_for_block` enforced it in code, and the two are now one function.
+
+Counting from memory is what failed here, so the replacement does not count. Check 6 of
+`scripts/reachability-audit.sh` fails the build on a content type paired with a
+compressor's name as a string literal (6a), or on a match with three or more
+`ContentType` arms outside two allowlisted files (6b).
+
+**6b was written first, and it does not catch `headroom tools`** — that copy was a tuple
+in an array, not a match arm. It was found by reading the file, not by the check written
+to find it, which is exactly the cry-wolf-in-reverse failure worth recording: a guard that
+passes is not evidence, unless you have watched it fail. 6a anchors on the compressor name
+instead, because a real one only ever comes from `Transform::name()`.
 
 ## D24 — prose is compressed only when it came from a tool
 **2026-08-03**

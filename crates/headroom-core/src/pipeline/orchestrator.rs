@@ -261,10 +261,32 @@ impl Orchestrator {
     ) -> Option<&dyn Transform> {
         let transform = self.transform_for(block.content(), policy, model)?;
 
-        if transform.name() == self.text.name() && !block.kind().is_tool_output() {
+        if self.runs_only_on_tool_output(transform) && !block.kind().is_tool_output() {
             return None;
         }
         Some(transform)
+    }
+
+    /// Whether `transform` is one that may only see tool output.
+    ///
+    /// The D24 rule, in one place. It is asked here by
+    /// [`Orchestrator::transform_for_block`], which enforces it, and by
+    /// [`Orchestrator::tool_output_only`], which reports it — so a command describing the
+    /// rule and the pipeline applying it cannot come apart. `headroom tools` had already
+    /// managed to describe prose wrongly in both directions: first as never compressed,
+    /// then as always compressed.
+    fn runs_only_on_tool_output(&self, transform: &dyn Transform) -> bool {
+        transform.name() == self.text.name()
+    }
+
+    /// Whether the compressor for `content_type` runs only on tool output.
+    ///
+    /// For callers reporting on the build rather than compressing. A caller with an
+    /// actual block should use [`Orchestrator::transform_for_block`], which applies this
+    /// rather than describing it.
+    pub fn tool_output_only(&self, content_type: ContentType) -> bool {
+        self.for_type(content_type)
+            .is_some_and(|transform| self.runs_only_on_tool_output(transform))
     }
 
     /// The transform for `content`, if one applies.
@@ -293,7 +315,20 @@ impl Orchestrator {
     }
 
     /// The compressor registered for `content_type`.
-    fn for_type(&self, content_type: ContentType) -> Option<&dyn Transform> {
+    ///
+    /// # Public so nothing has to write the table out again
+    ///
+    /// This was private, and the cost of that was five hand-written copies of the same
+    /// mapping: in `headroom compress`, in the MCP server, in `headroom inspect`, in
+    /// `headroom tools`, and a second one inside `route`. Every one of them eventually
+    /// disagreed with this function, and each disagreement showed up as a command
+    /// confidently describing behaviour the pipeline does not have.
+    ///
+    /// A caller that has content should use [`Orchestrator::route`] or
+    /// [`Orchestrator::transform_for_block`], which also apply policy, safety limits and
+    /// the block-kind rule. This is for callers that have a *type* and want the table —
+    /// which in practice means reporting on the build rather than compressing anything.
+    pub fn for_type(&self, content_type: ContentType) -> Option<&dyn Transform> {
         match content_type {
             ContentType::Json => Some(&self.smart_crusher),
             ContentType::Log => Some(&self.log),

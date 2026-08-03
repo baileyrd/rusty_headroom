@@ -6,8 +6,8 @@ the crate starts publishing releases.
 
 ---
 
-## `headroom inspect` stops contradicting the pipeline it explains
-**2026-08-03** · the fourth routing table, in the command built to explain routing
+## `headroom inspect` and `headroom tools` stop contradicting the pipeline
+**2026-08-03** · the fourth and fifth routing tables, in the two commands that describe routing
 
 - **Fixed:** `inspect` carried its own copy of the routing table, mapping prose to
   `"none"` — untrue since the prose compressors were wired in. The same 18 KB of prose
@@ -25,10 +25,22 @@ the crate starts publishing releases.
 - **Added:** a note when the size threshold will stop the named compressor. `route` does
   not consult the sizer — each compressor holds its own — so a short payload named a
   compressor that will decline, which reads as "this compresses".
-- **Added:** check 6 of `scripts/reachability-audit.sh` — any file outside the
-  orchestrator matching on three or more `ContentType` arms fails the build. Verified by
-  planting one and watching the script fail; the five new tests were verified the same
-  way, by restoring the old table and watching three of them go red.
+- **Fixed:** `headroom tools` — the command that says what this build can do — carried a
+  **fifth** copy, and its second list, "detected but not compressed", named code and
+  prose. Both compress. So it reported the two largest categories of agent traffic as
+  forwarded whole. It now reads the table out of `Orchestrator::for_type` across
+  `ContentType::ALL`, so a type is in the second list exactly when nothing compresses it.
+- **Added:** `ContentType::ALL`, `Orchestrator::for_type` (made public), and
+  `Orchestrator::tool_output_only` — the D24 rule, now asked rather than restated, so
+  `tools` marks prose `tool output only` instead of implying typed messages get
+  rewritten. That is the same error the old list made, in the other direction.
+- **Added:** check 6 of `scripts/reachability-audit.sh`, in two parts. **6a** fails on any
+  content type paired with a compressor's name as a string literal; **6b** on a match with
+  three or more `ContentType` arms outside two allowlisted files.
+- **Noted:** 6b was written first and alone, and it does *not* catch `headroom tools` —
+  that copy was a tuple in an array, not a match. It was found by reading the file, not by
+  the check written to find it, which is why 6a anchors on the compressor name rather than
+  on syntax. Both were verified by planting a table and watching the script exit 1.
 - **Fixed:** the audit header said "four separate gaps" above a list of five; the README
   said DECISIONS.md had 24 entries when it had 26.
 

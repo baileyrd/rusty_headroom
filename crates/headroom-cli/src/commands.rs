@@ -601,6 +601,113 @@ mod tests {
     }
 
     #[test]
+    fn tools_never_reports_a_compressed_type_as_forwarded() {
+        // The bug. `headroom tools` carried a hand-written pair of lists and the second
+        // one — "detected but not compressed" — named code, prose and unknown. Two of
+        // the three were wrong, and they were the two that matter: source files and
+        // prose tool results are the bulk of agent traffic.
+        //
+        // Checked against the orchestrator for every variant rather than against the two
+        // that were wrong, so a type gaining a compressor cannot reintroduce this.
+        let lines = compressor_table();
+        let split = lines
+            .iter()
+            .position(|line| line == "detected but not compressed")
+            .expect("no forwarded section");
+        let (compressed, forwarded) = lines.split_at(split);
+        let orchestrator = orchestrator();
+
+        for content_type in ContentType::ALL {
+            let name = content_type.as_str();
+            let listed_as = |section: &[String]| {
+                section
+                    .iter()
+                    .any(|line| line.split_whitespace().next() == Some(name))
+            };
+
+            if let Some(transform) = orchestrator.for_type(content_type) {
+                assert!(
+                    listed_as(compressed),
+                    "{name} compresses with {} and is not in the compressors list",
+                    transform.name()
+                );
+                assert!(
+                    !listed_as(forwarded),
+                    "{name} compresses and is reported as forwarded"
+                );
+            } else {
+                assert!(
+                    listed_as(forwarded),
+                    "{name} reaches no compressor and is not reported as forwarded"
+                );
+                assert!(
+                    !listed_as(compressed),
+                    "{name} reaches no compressor and is listed as compressed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tools_names_the_compressor_the_orchestrator_would_use() {
+        // The other half: being in the right section is not enough if the name beside it
+        // is a literal somebody typed.
+        let lines = compressor_table();
+        let orchestrator = orchestrator();
+
+        for content_type in ContentType::ALL {
+            let Some(transform) = orchestrator.for_type(content_type) else {
+                continue;
+            };
+            let line = lines
+                .iter()
+                .find(|line| line.split_whitespace().next() == Some(content_type.as_str()))
+                .unwrap_or_else(|| panic!("no line for {}", content_type.as_str()));
+
+            assert!(
+                line.contains(transform.name()),
+                "`{line}` does not name `{}`",
+                transform.name()
+            );
+        }
+    }
+
+    #[test]
+    fn tools_says_which_compressors_only_see_tool_output() {
+        // D24 in the other direction. Listing prose beside the rest unqualified tells an
+        // operator that what their users type gets rewritten, which is the one thing the
+        // rule exists to prevent — as wrong as the old list's claim that prose is never
+        // compressed, just wrong the other way.
+        let lines = compressor_table();
+        let orchestrator = orchestrator();
+
+        for content_type in ContentType::ALL {
+            if orchestrator.for_type(content_type).is_none() {
+                continue;
+            }
+            let line = lines
+                .iter()
+                .find(|line| line.split_whitespace().next() == Some(content_type.as_str()))
+                .unwrap();
+
+            assert_eq!(
+                line.contains("tool output only"),
+                orchestrator.tool_output_only(content_type),
+                "`{line}` disagrees with the block-kind rule"
+            );
+        }
+
+        // And the rule is not vacuous — something has to be under it, or the assertion
+        // above passes by describing a distinction that does not exist.
+        assert!(
+            ContentType::ALL
+                .iter()
+                .any(|ct| orchestrator.tool_output_only(*ct)),
+            "no content type is tool-output-only, so the check above proves nothing"
+        );
+    }
+
+    #[test]
     fn savings_ignores_labelled_series() {
         // `headroom_routing_total{reason=...}` is the first labelled metric the proxy
         // exposes, and this report predates it. A parser that matched on the bare name
@@ -1159,33 +1266,64 @@ pub fn update(check_only: bool) -> anyhow::Result<()> {
 /// # Errors
 ///
 /// Returns an error if stdout cannot be written.
+/// The compressor section of `headroom tools`, one line per line of output.
+///
+/// # Derived, not stated
+///
+/// This section used to be a hand-written list of four `(ContentType, &str)` pairs, with
+/// a second list below it headed "detected but not compressed" naming code, prose and
+/// unknown. Two of those three were wrong: code has compressed since its wiring was
+/// fixed, and prose since the prose compressors were routed. So the command that exists
+/// to say what this build can do told an operator that source files and prose tool
+/// results are forwarded whole — the single largest category of agent traffic there is.
+///
+/// It is now read out of [`Orchestrator::for_type`] across [`ContentType::ALL`], so the
+/// two lists cannot disagree with the pipeline or with each other: a type is in the
+/// second list exactly when the orchestrator has no compressor for it.
+fn compressor_table() -> Vec<String> {
+    let orchestrator = Orchestrator::new(Arc::new(InMemoryCcrStore::new()));
+    let sizer = AdaptiveSizer::default();
+
+    let mut compressed = vec!["compressors".to_string()];
+    let mut forwarded = Vec::new();
+
+    for content_type in ContentType::ALL {
+        match orchestrator.for_type(content_type) {
+            Some(transform) => {
+                // D24, asked rather than restated. Listing prose next to the others with
+                // no qualification is the same error as the old list made in the other
+                // direction: it would tell an operator their users' messages get
+                // rewritten, which is the one thing this rule exists to prevent.
+                let scope = if orchestrator.tool_output_only(content_type) {
+                    "  tool output only"
+                } else {
+                    ""
+                };
+                compressed.push(format!(
+                    "  {:<16} {:<20} min {} bytes{scope}",
+                    content_type.as_str(),
+                    transform.name(),
+                    sizer.threshold(content_type)
+                ));
+            }
+            // Listed explicitly as unhandled rather than omitted. A content type absent
+            // from the output reads as "not detected"; one listed with no compressor
+            // reads as "detected and forwarded", which is what actually happens.
+            None => forwarded.push(format!("  {}", content_type.as_str())),
+        }
+    }
+
+    compressed.push(String::new());
+    compressed.push("detected but not compressed".to_string());
+    compressed.extend(forwarded);
+    compressed
+}
+
 pub fn tools() -> anyhow::Result<()> {
     let mut stdout = std::io::stdout().lock();
 
-    writeln!(stdout, "compressors")?;
-    for (content_type, compressor) in [
-        (ContentType::Json, "smart_crusher"),
-        (ContentType::Log, "log_compressor"),
-        (ContentType::SearchResults, "search_compressor"),
-        (ContentType::Diff, "diff_compressor"),
-    ] {
-        let sizer = AdaptiveSizer::default();
-        writeln!(
-            stdout,
-            "  {:<16} {:<20} min {} bytes",
-            content_type.as_str(),
-            compressor,
-            sizer.threshold(content_type)
-        )?;
-    }
-
-    // Listed explicitly as unhandled rather than omitted. A content type absent from the
-    // output reads as "not detected"; one listed with no compressor reads as "detected
-    // and forwarded", which is what actually happens.
-    writeln!(stdout)?;
-    writeln!(stdout, "detected but not compressed")?;
-    for content_type in [ContentType::Code, ContentType::Prose, ContentType::Unknown] {
-        writeln!(stdout, "  {}", content_type.as_str())?;
+    for line in compressor_table() {
+        writeln!(stdout, "{line}")?;
     }
 
     writeln!(stdout)?;
