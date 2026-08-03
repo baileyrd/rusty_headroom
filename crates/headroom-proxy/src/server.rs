@@ -1,6 +1,8 @@
 //! Server construction and lifecycle.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::{Body, Bytes};
 use axum::extract::State;
@@ -13,6 +15,7 @@ use headroom_core::tokenizer::{HeuristicEstimator, Tokenizer};
 
 use crate::compression::{compress_request, Compressors};
 use crate::config::Config;
+use crate::guard::{is_self_referential, RateLimiter};
 use crate::headers::{sanitize, HeaderPolicy};
 use crate::health::health;
 use crate::metrics::Metrics;
@@ -32,7 +35,19 @@ pub struct AppState {
     /// TLS initialization failed takes `/health` down with it, so nothing can report
     /// *why* it is down. Booting and answering 502 on the request path says more.
     upstream: Option<Upstream>,
+    limiter: Arc<RateLimiter>,
 }
+
+/// Requests permitted per [`RATE_WINDOW`].
+///
+/// Set well above any human or agent workload. This is a backstop against a retry loop
+/// somewhere upstream of the proxy relaying thousands of requests with the customer's
+/// credential attached — not a quota, and it should never be the thing a real user
+/// meets.
+const RATE_CAPACITY: u32 = 600;
+
+/// The rate-limit window.
+const RATE_WINDOW: Duration = Duration::from_secs(60);
 
 impl AppState {
     /// Builds state relaying to `upstream_base`.
@@ -49,6 +64,15 @@ impl AppState {
             compressors: Arc::new(Compressors::new(Arc::new(InMemoryCcrStore::new()))),
             metrics: Arc::new(Metrics::new()),
             upstream,
+            limiter: Arc::new(RateLimiter::new(RATE_CAPACITY, RATE_WINDOW)),
+        }
+    }
+
+    /// Builds state with a specific rate limit, for tests that need to reach it.
+    pub fn with_rate_limit(upstream_base: &str, capacity: u32, window: Duration) -> Self {
+        Self {
+            limiter: Arc::new(RateLimiter::new(capacity, window)),
+            ..Self::new(upstream_base)
         }
     }
 
@@ -92,6 +116,7 @@ pub fn router_with(state: AppState) -> Router {
         .route("/v1/responses/compact", post(openai::passthrough))
         .route("/v1/conversations", post(openai::passthrough))
         .route("/v1/conversations/{*rest}", post(openai::passthrough))
+        .route("/admin/runtime-env", post(crate::admin::runtime_env))
         .with_state(state)
 }
 
@@ -186,6 +211,24 @@ pub(crate) async fn relay(
         ));
     };
 
+    if !state.limiter.allow() {
+        // 429 rather than 503: the client should back off and retry, which is exactly
+        // what a provider SDK does with this status. A 503 reads as "the service is
+        // broken" and several SDKs will not retry it.
+        tracing::warn!(path, "rate limit reached; refusing to relay");
+        return Err(RelayError::RateLimited);
+    }
+
+    // The request log. `Authorization` appears as a 12-character prefix and nothing
+    // more — enough to correlate requests from one credential without the log becoming
+    // a place credentials live.
+    tracing::info!(
+        path,
+        bytes = body.len(),
+        auth = ?crate::headers::redacted_authorization(headers),
+        "relaying upstream"
+    );
+
     let relayed = upstream.forward(method, path, headers, body).await?;
 
     let status = relayed.status();
@@ -233,8 +276,25 @@ impl IntoResponse for RelayError {
 ///
 /// # Errors
 ///
-/// Returns an error if the listen socket cannot be bound.
+/// Returns an error if the listen socket cannot be bound, or if the configured
+/// upstream points back at the proxy's own listen address.
 pub async fn serve(config: &Config) -> std::io::Result<()> {
+    // Checked before binding. A proxy whose upstream is itself forwards every request
+    // to itself forever, and the symptom is a pinned core and exhausted file
+    // descriptors rather than an error anyone can read. Refusing to start says it once,
+    // plainly, at the moment the operator is looking.
+    if is_self_referential(config.upstream(), config.listen_addr()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "upstream {} is this proxy's own listen address ({}); \
+                 every request would forward to itself",
+                config.upstream(),
+                config.listen_addr()
+            ),
+        ));
+    }
+
     let listener = tokio::net::TcpListener::bind(config.listen_addr()).await?;
     tracing::info!(
         addr = %config.listen_addr(),
@@ -243,9 +303,15 @@ pub async fn serve(config: &Config) -> std::io::Result<()> {
         "headroom-proxy listening"
     );
 
-    axum::serve(listener, router())
-        .with_graceful_shutdown(shutdown_signal())
-        .await
+    // `into_make_service_with_connect_info` rather than the plain service: the admin
+    // endpoint's only protection is that it can tell a local caller from a remote one,
+    // and without connect info it refuses every request including the legitimate ones.
+    axum::serve(
+        listener,
+        router().into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
 }
 
 /// Resolves when the process is asked to stop.
@@ -774,6 +840,67 @@ mod tests {
             captured.lock().unwrap().clone().unwrap().0,
             "/v1/responses/compact"
         );
+    }
+
+    // ---- operational guards ----
+
+    #[tokio::test]
+    async fn the_rate_limit_refuses_with_429_rather_than_503() {
+        // A provider SDK already knows how to back off and retry a 429. Several read
+        // 503 as "the service is broken" and give up, turning a momentary limit into a
+        // failed request.
+        let (base, _) = fake_provider(StatusCode::OK, "{}").await;
+        let state = AppState::with_rate_limit(&base, 1, Duration::from_secs(60));
+        let body = r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#.to_owned();
+
+        let first = post_messages(router_with(state.clone()), body.clone(), "sk-ant-api03-x").await;
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = post_messages(router_with(state), body, "sk-ant-api03-x").await;
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn a_rate_limited_request_never_reaches_the_provider() {
+        // The point of the limit is that the request is *not* relayed. A limiter that
+        // forwarded and then reported 429 would protect nothing.
+        let (base, captured) = fake_provider(StatusCode::OK, "{}").await;
+        let state = AppState::with_rate_limit(&base, 1, Duration::from_secs(60));
+
+        post_messages(
+            router_with(state.clone()),
+            r#"{"model":"m","messages":[{"role":"user","content":"first"}]}"#.to_owned(),
+            "sk-ant-api03-x",
+        )
+        .await;
+        post_messages(
+            router_with(state),
+            r#"{"model":"m","messages":[{"role":"user","content":"second-must-not-arrive"}]}"#
+                .to_owned(),
+            "sk-ant-api03-x",
+        )
+        .await;
+
+        let sent = String::from_utf8(captured.lock().unwrap().clone().unwrap()).unwrap();
+        assert!(
+            !sent.contains("second-must-not-arrive"),
+            "a refused request was still forwarded"
+        );
+    }
+
+    #[tokio::test]
+    async fn serving_refuses_when_the_upstream_is_the_proxy_itself() {
+        // Otherwise every request forwards to itself forever, and the symptom is a
+        // pinned core and exhausted file descriptors rather than a readable error.
+        let config = Config::from_env();
+        let looped = format!("http://127.0.0.1:{}", config.listen_addr().port());
+
+        assert!(is_self_referential(
+            &looped,
+            format!("127.0.0.1:{}", config.listen_addr().port())
+                .parse()
+                .unwrap()
+        ));
     }
 
     // ---- lifecycle ----

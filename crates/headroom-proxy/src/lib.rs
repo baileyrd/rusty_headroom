@@ -14,10 +14,12 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod admin;
 pub mod body;
 pub mod compression;
 pub mod config;
 pub mod frozen;
+pub mod guard;
 pub mod headers;
 pub mod health;
 pub mod metrics;

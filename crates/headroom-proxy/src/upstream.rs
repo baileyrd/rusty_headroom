@@ -55,6 +55,9 @@ pub enum RelayError {
     /// The configured upstream is not a usable URL.
     #[error("invalid upstream url: {0}")]
     InvalidUrl(String),
+    /// The proxy's own rate limit refused the request before it reached the provider.
+    #[error("rate limit reached; the request was not forwarded")]
+    RateLimited,
 }
 
 impl RelayError {
@@ -71,6 +74,10 @@ impl RelayError {
             // panic — 502 keeps every relay failure in one bucket for alerting, and
             // the message says which kind it was.
             Self::InvalidUrl(_) => StatusCode::BAD_GATEWAY,
+            // 429 rather than 503, because a provider SDK already knows how to back off
+            // and retry a 429. Several read 503 as "the service is broken" and give up,
+            // which turns a momentary rate limit into a failed request.
+            Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
         }
     }
 }

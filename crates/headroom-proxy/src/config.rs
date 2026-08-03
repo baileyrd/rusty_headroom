@@ -10,8 +10,10 @@
 //! The reads are cheap relative to a network round trip to a model provider, which
 //! is what every request costs anyway.
 
+use std::collections::BTreeMap;
 use std::env;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::RwLock;
 
 /// Environment variable names, in one place so they can be documented and tested
 /// rather than scattered as string literals.
@@ -31,6 +33,66 @@ pub const DEFAULT_PORT: u16 = 8787;
 
 /// Default upstream provider.
 pub const DEFAULT_UPSTREAM: &str = "https://api.anthropic.com";
+
+/// Runtime overrides, consulted ahead of the process environment.
+///
+/// # Why an override map rather than `std::env::set_var`
+///
+/// Hot-reload could be implemented by writing the process environment directly, and
+/// that would be a bug rather than a shortcut. `setenv` is not safe to call while
+/// another thread may be in `getenv`, and this proxy reads its configuration on every
+/// request from a thread pool — so a hot-reload would be racing every in-flight
+/// request, with undefined behavior rather than a stale read as the failure mode.
+///
+/// An `RwLock` map costs an uncontended read lock per lookup and is simply correct.
+static OVERRIDES: RwLock<Option<BTreeMap<String, String>>> = RwLock::new(None);
+
+/// Reads a setting, preferring a runtime override over the process environment.
+fn setting(name: &str) -> Option<String> {
+    // A poisoned lock falls through to the environment rather than propagating. A
+    // panic in an unrelated admin request should not take configuration reads with it.
+    if let Ok(guard) = OVERRIDES.read() {
+        if let Some(value) = guard.as_ref().and_then(|map| map.get(name)) {
+            return Some(value.clone());
+        }
+    }
+    env::var(name).ok()
+}
+
+/// Applies runtime overrides, replacing any previously set.
+///
+/// Returns the names that were accepted. Names outside the `HEADROOM_` namespace are
+/// rejected: this endpoint exists to retune the proxy, and letting it set arbitrary
+/// environment names would make it a general-purpose lever on the process for anyone
+/// who can reach it.
+pub fn set_overrides(values: BTreeMap<String, String>) -> Vec<String> {
+    let accepted: BTreeMap<String, String> = values
+        .into_iter()
+        .filter(|(name, _)| name.starts_with("HEADROOM_"))
+        .collect();
+    let names = accepted.keys().cloned().collect();
+
+    if let Ok(mut guard) = OVERRIDES.write() {
+        *guard = Some(accepted);
+    }
+    names
+}
+
+/// Clears every runtime override, restoring the process environment.
+pub fn clear_overrides() {
+    if let Ok(mut guard) = OVERRIDES.write() {
+        *guard = None;
+    }
+}
+
+/// The overrides currently in force.
+pub fn overrides() -> BTreeMap<String, String> {
+    OVERRIDES
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .unwrap_or_default()
+}
 
 /// Runtime configuration.
 ///
@@ -75,21 +137,17 @@ impl Config {
         let defaults = Self::default();
 
         Self {
-            host: env::var(vars::HOST)
-                .ok()
+            host: setting(vars::HOST)
                 .and_then(|raw| raw.parse().ok())
                 .unwrap_or(defaults.host),
-            port: env::var(vars::PORT)
-                .ok()
+            port: setting(vars::PORT)
                 .and_then(|raw| raw.parse().ok())
                 .unwrap_or(defaults.port),
-            upstream: env::var(vars::UPSTREAM)
-                .ok()
+            upstream: setting(vars::UPSTREAM)
                 .filter(|raw| !raw.trim().is_empty())
                 .map(|raw| raw.trim_end_matches('/').to_owned())
                 .unwrap_or(defaults.upstream),
-            compression_enabled: env::var(vars::COMPRESSION)
-                .ok()
+            compression_enabled: setting(vars::COMPRESSION)
                 .map(|raw| !matches!(raw.trim(), "0" | "false" | "off" | "no"))
                 .unwrap_or(defaults.compression_enabled),
         }
