@@ -26,10 +26,13 @@
 - Never commit or log secrets/credentials. Validate external input at the boundary.
 - Never silently swallow exceptions — handle, propagate with context, or log.
 
-## Two things this codebase has been bitten by
+## What this codebase has been bitten by
 
-Both were found by mutation testing — changing the code to break a guarantee and checking
-whether anything failed. Both had passing tests throughout.
+Every one below was found by mutation testing — changing the code to break a guarantee and
+checking whether anything failed. Every one had passing tests throughout.
+
+(This heading counted the entries until the count was wrong. Prose that restates something
+countable goes stale silently, which is the third entry's subject in miniature.)
 
 ### A test proves a function works, not that anything calls it
 
@@ -61,6 +64,41 @@ Anything written by one process and read by another must be **pinned to a litera
 
 The failures these prevent are silent. Nothing errors; a lookup simply stops matching,
 and the loop it feeds quietly stops working while every dashboard looks healthy.
+
+### Assert that the behaviour happened, before asserting anything about it
+
+Most of this project's guarantees are of the form *"X was not changed"*. Every one of them
+is satisfied by changing nothing at all, so the assertion is empty unless something would
+otherwise have changed it. A sweep found this everywhere:
+
+| test | why it passed | what it needed |
+| --- | --- | --- |
+| I4, I5, I10 property tests | the generator made random ASCII too short to clear any threshold, so **nothing ever compressed** | content sized past each compressor's threshold, and a count of how many cases actually changed |
+| I7 | the protected system block was 29 bytes — below every threshold | a hot zone big enough that leaving it alone is a decision |
+| I3, I6, both I4 gates | a passthrough is a fixed point, is deterministic, and preserves every position | the "compression actually happened" guard I2 and I9 already had |
+| `headroom doctor` | had no diff or search sample, and printed `all checks passed` | a sample per compressor, plus a test that every compressor has one |
+
+The pattern to copy is the one I2 carried from the start: assert the precondition first,
+with a message saying what it is for.
+
+```rust
+assert!(
+    received.body.len() < source.len(),
+    "nothing was compressed, so this assertion proves nothing"
+);
+```
+
+Two specific traps, both of which cost a wrong fixture here:
+
+- **Prose is compressed on a line budget.** The same words joined with spaces are one
+  line, and one line is never reduced. A 19 KB single-line sample compressed to 19 KB.
+- **Every compressor has a size threshold** — 1 KB for JSON, 2 KB for code, 5 KB for
+  prose, 500 bytes for the rest. Fixtures below it decline for a reason that has nothing
+  to do with what the test is about.
+
+A decline test is exempt only when it asserts the *specific* reason. `Declined::Sacrosanct`
+distinguishes "refused because signed" from "refused because small"; a bare `is_err()`
+does not.
 
 ## Review & merge
 - Every change lands through a PR — no direct pushes to the default branch.
