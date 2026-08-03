@@ -6,6 +6,26 @@ the crate starts publishing releases.
 
 ---
 
+## Signals and the diff compressor
+**2026-08-03** · gap rows S1-S3, C8
+
+- **Added:** `signals` — keyword scoring and tiered line importance, factored out so
+  every line-oriented compressor makes the same keep/drop judgment rather than
+  re-inventing it slightly differently.
+- **Added:** `DiffCompressor` — elides unchanged context, keeping hunk headers, every
+  changed line, and two lines of surrounding context.
+- **Design note:** every signal heuristic leans toward keeping a line. One wrongly kept
+  costs a few tokens; one wrongly dropped may be the error being looked for.
+- **Design note:** hunk headers are never elided. They carry the line numbers, and a
+  diff without them cannot be located against a file.
+- **Design note:** `keep_most_important` breaks ties on source index, so an all-routine
+  input produces the same selection every run rather than depending on sort stability.
+- **Added:** `DECISIONS.md`, logging choices taken autonomously — batching gap rows into
+  PRs, skipping the Redis backend, heuristic rather than tree-sitter code compression,
+  and deferring the Python bindings.
+- **Known limitation:** signals are English-keyword based. A non-English log gets no
+  keyword signal and falls back to structural cues alone.
+
 ## Live-zone compression on the wire — /v1/messages
 **2026-08-03** · closes [#35](https://github.com/baileyrd/rusty_headroom/issues/35), [#36](https://github.com/baileyrd/rusty_headroom/issues/36)
 
