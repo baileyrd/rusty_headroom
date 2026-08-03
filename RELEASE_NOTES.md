@@ -39,6 +39,28 @@ the crate starts publishing releases.
 
 ---
 
+## The credential reaching the provider was never checked end to end
+**2026-08-03** · 871 tests pass with `x-api-key` stripped from every request
+
+- **The hole:** nothing asserted that a client's credential arrives at the provider. The
+  existing header tests use `headers_seen_by_provider`, which returns header *names* — so
+  they check what the proxy **adds**, not that what matters **survives**. The one unit test
+  covers `authorization` only, against the pure `sanitize`, with header rebuilding, hyper's
+  framing and the relay all sitting between it and the provider.
+- **Consequence if it broke:** every request 401s. A total outage, not a degradation — and
+  the three auth modes take different paths through the header policy, so one can break
+  while the others work.
+- **Checked, and correct today.** All three credentials arrive byte-identical through the
+  release binary.
+- **Added:** `the_credential_reaches_the_provider_intact_in_every_auth_mode`, asserting
+  byte-equality rather than presence — a truncated or re-cased credential is as useless as
+  an absent one, and `redacted_authorization` lives nearby, which is a plausible way for a
+  redaction to leak into the forwarded copy.
+- **Verified by mutation:** dropping `x-api-key` in `sanitize` leaves **871 tests passing**
+  and fails only this one.
+
+---
+
 ## Every relaying route is checked to forward its own path
 **2026-08-03** · no bug found — three of five routes were guarded, now all five
 
