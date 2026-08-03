@@ -543,6 +543,25 @@ applies the real policy there.
 **Would change if:** a fourth caller appears. It should take an `Orchestrator` rather
 than build a compressor set, and this entry is the reason why.
 
+**Amended — there was a fourth, and this entry said there were three.** `headroom
+inspect` carried its own table the whole time. Counting the callers by memory rather than
+by search is how it was missed, and the entry above then recorded the sweep as finished.
+
+It had drifted in the worst possible direction: it mapped `ContentType::Prose` to
+`"none"`, which stopped being true when the prose compressors were wired in. So the
+command whose one purpose is to answer *"why did this not compress"* answered
+`compressor: none` for 18 KB of prose that `headroom compress` shrank by 70% — same
+content, same shell, seconds apart.
+
+It now reports `Orchestrator::route`'s reason and `transform_for_block`'s transform, for
+each auth mode and each block kind, because those two dimensions are what change the
+answer and picking one silently is what made a single-line report wrong.
+
+Counting from memory is what failed here, so the replacement does not count: check 6 of
+`scripts/reachability-audit.sh` fails the build on any file outside the orchestrator that
+matches on three or more `ContentType` arms. Two files are allowlisted by name, with the
+reason recorded in the script.
+
 ## D24 — prose is compressed only when it came from a tool
 **2026-08-03**
 

@@ -6,6 +6,34 @@ the crate starts publishing releases.
 
 ---
 
+## `headroom inspect` stops contradicting the pipeline it explains
+**2026-08-03** · the fourth routing table, in the command built to explain routing
+
+- **Fixed:** `inspect` carried its own copy of the routing table, mapping prose to
+  `"none"` — untrue since the prose compressors were wired in. The same 18 KB of prose
+  got `compressor: none` from `headroom inspect` and `would save: 5205 (70%)` from
+  `headroom compress`, in one shell, seconds apart.
+- **Why it matters:** this is the command an operator runs when they are already
+  confused about why something did not compress. Being wrong here sends them looking in
+  the wrong place with a confident answer in hand.
+- **Changed:** every routing line now comes from `Orchestrator::route` and
+  `Orchestrator::transform_for_block` — the two functions the proxy itself calls.
+- **Added:** the report now names the credential (I10) and the block kind (D24), because
+  both change the answer and the old single line picked pay-as-you-go silently. An
+  operator on a subscription token asking why nothing compresses was reading somebody
+  else's answer.
+- **Added:** a note when the size threshold will stop the named compressor. `route` does
+  not consult the sizer — each compressor holds its own — so a short payload named a
+  compressor that will decline, which reads as "this compresses".
+- **Added:** check 6 of `scripts/reachability-audit.sh` — any file outside the
+  orchestrator matching on three or more `ContentType` arms fails the build. Verified by
+  planting one and watching the script fail; the five new tests were verified the same
+  way, by restoring the old table and watching three of them go red.
+- **Fixed:** the audit header said "four separate gaps" above a list of five; the README
+  said DECISIONS.md had 24 entries when it had 26.
+
+---
+
 ## `/health` stops reporting `ok` on a proxy that cannot relay
 **2026-08-03** · the self-report with the widest blast radius
 
