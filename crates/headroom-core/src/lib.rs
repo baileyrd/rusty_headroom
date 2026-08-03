@@ -46,8 +46,10 @@ pub mod detection;
 pub mod error;
 pub mod tokenizer;
 pub mod transform;
+pub mod validate;
 
 pub use block::{Block, BlockKind};
 pub use ccr::{CcrStore, ContentHash};
 pub use error::{Declined, Error, Result};
 pub use transform::{LosslessTransform, LossyTransform, Transform};
+pub use validate::{validated_apply, Outcome};
