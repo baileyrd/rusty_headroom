@@ -169,7 +169,7 @@ Every row is a gap: the target repo is empty, so all rows are new implementation
 | X10 | SSE Anthropic events | fn | spec | all | REALIGNMENT Phase C | no | M | All delta types incl. `thinking_delta`, `signature_delta`, `citations_delta`. Depends on X9. |
 | X11 | SSE OpenAI chat events | fn | spec | all | REALIGNMENT Phase C | no | M | `tool_call` accumulation across chunks. Depends on X9. |
 | X12 | SSE OpenAI responses events | fn | spec | all | REALIGNMENT Phase C | no | M | Output items + reasoning summary. Depends on X9. Done as `sse::responses`; stem/suffix split so future event types stay classifiable. Not yet attached to the relayed stream. |
-| X13 | WebSocket flow | fn | spec | all | `crates/headroom-proxy/src/websocket.rs` (name only) | no | M | Codex WS transport. |
+| X13 | WebSocket flow | fn | spec | all | `crates/headroom-proxy/src/websocket.rs` (name only) | no | M | Codex WS transport. Done as `websocket::relay_socket` — bidirectional faithful relay, frame kinds preserved. **Deliberately does not compress**; see DECISIONS D15. |
 | X14 | tool array sort + JSON Schema key sort | fn | spec | all | REALIGNMENT I7 | no | M | Deterministic recursive sort. Normalize, never compress. |
 | X15 | `cache_control` auto-placement | fn | spec | all | REALIGNMENT Phase E | no | M | Anthropic, ≤4 ephemeral breakpoints. PAYG only per I10. |
 | X16 | `prompt_cache_key` injection | fn | spec | all | REALIGNMENT Phase E | no | S | OpenAI, only when not customer-set. PAYG only. Done via `body::insert_top_level_member` — byte-faithful, key derived from every message but the newest. |

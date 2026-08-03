@@ -117,6 +117,10 @@ pub fn router_with(state: AppState) -> Router {
         .route("/v1/conversations", post(openai::passthrough))
         .route("/v1/conversations/{*rest}", post(openai::passthrough))
         .route("/admin/runtime-env", post(crate::admin::runtime_env))
+        // Codex uses a WebSocket transport, and a proxy that only speaks HTTP silently
+        // drops that client to whatever fallback it has, or breaks it.
+        .route("/v1/realtime", get(crate::websocket::relay_socket))
+        .route("/ws", get(crate::websocket::relay_socket))
         .with_state(state)
 }
 
