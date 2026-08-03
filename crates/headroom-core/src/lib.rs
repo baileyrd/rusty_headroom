@@ -40,8 +40,10 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod ccr;
 pub mod detection;
 pub mod error;
 pub mod tokenizer;
 
+pub use ccr::{CcrStore, ContentHash};
 pub use error::{Declined, Error, Result};
