@@ -418,9 +418,15 @@ async fn i4_the_same_request_produces_byte_equal_output_every_time() {
 
 #[tokio::test]
 async fn i4_holds_across_separate_proxy_instances() {
-    // A fresh process must agree with a warm one. If it does not, the CCR store or some
+    // A cold `AppState` must agree with a warm one. If it does not, the CCR store or some
     // other accumulated state is leaking into the output, and the recorded hash of a
     // request stops being a property of that request.
+    //
+    // Both instances live in *this* process, so this cannot speak to cross-process
+    // determinism — the comment used to say "a fresh process" and claimed more than the
+    // test can check. What guards that is pinning the hashes to literals:
+    // `ContentHash` in `ccr::hash` and `StructureHash` in `telemetry`. A per-process
+    // seeded hasher passes everything here and fails those.
     let source = compressible_request();
 
     let warm = Simulator::anthropic().await.unwrap();

@@ -467,6 +467,31 @@ mod tests {
     }
 
     #[test]
+    fn the_fingerprint_is_pinned_to_a_literal() {
+        // Self-consistency and distinctness are not enough. A hasher seeded once per
+        // process satisfies both — `of(x) == of(x)` every time within a run — and still
+        // produces a different value in the next process. That was verified by swapping
+        // FNV-1a for a `OnceLock<RandomState>`: the entire workspace test suite passed.
+        //
+        // The consequence is silent and total. `headroom learn` writes recommendations in
+        // one process and the proxy reads them in another; the key contains this hash. If
+        // it varied across processes every lookup would miss, and the measure-then-skip
+        // loop would quietly stop working while looking healthy — compression re-attempted
+        // forever on shapes already measured as useless.
+        //
+        // Pinning to a literal is what makes that a build failure instead. `ContentHash`
+        // is pinned the same way and for the same reason.
+        assert_eq!(
+            StructureHash::of(r#"{"a":1,"b":[2,3]}"#, ContentType::Json).as_hex(),
+            "b937411607289da4"
+        );
+        assert_eq!(
+            StructureHash::of("not json at all", ContentType::Log).as_hex(),
+            "125073191daf5431"
+        );
+    }
+
+    #[test]
     fn deep_nesting_terminates() {
         let deep = format!("{}1{}", "[".repeat(200), "]".repeat(200));
         let _ = StructureHash::of(&deep, ContentType::Json);

@@ -6,6 +6,31 @@ the crate starts publishing releases.
 
 ---
 
+## `StructureHash` pinned, closing a silent cross-process failure
+**2026-08-03** · mutation-testing determinism
+
+- **Added:** `the_fingerprint_is_pinned_to_a_literal`. `StructureHash` was tested only for
+  self-consistency (`of(x) == of(x)`) and distinctness (`of(a) != of(b)`) — **both of
+  which a per-process seeded hasher satisfies.**
+- **Verified by mutation:** swapping FNV-1a for a `OnceLock<RandomState>` — stable within
+  a run, different in the next process — **passed the entire workspace suite**. With the
+  pin in place it fails immediately.
+- **The failure it would have caused is silent and total.** `headroom learn` writes
+  recommendations in one process and the proxy reads them in another; the aggregation key
+  contains this hash. If it varied across processes every lookup would miss, and the
+  measure-then-skip loop would quietly stop working while looking healthy — compression
+  re-attempted forever on shapes already measured as useless. `DECISIONS.md` D12 gives
+  cross-build stability as the reason FNV-1a was chosen; nothing enforced it.
+- **`ContentHash` was already pinned** the same way (`000f01ff`), which is what made the
+  omission visible by comparison.
+- **Corrected a comment that claimed more than its test checks.**
+  `i4_holds_across_separate_proxy_instances` said "a fresh process must agree with a warm
+  one" — both instances live in the same process. It compares warm-vs-cold *state*, which
+  is worth checking; cross-process determinism is guarded by the pinned hashes instead,
+  and the comment now says so.
+
+---
+
 ## I1 now gates whitespace, which nothing did
 **2026-08-03** · mutation-testing the headline invariant
 
