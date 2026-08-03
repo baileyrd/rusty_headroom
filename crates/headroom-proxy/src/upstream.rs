@@ -180,19 +180,33 @@ impl Upstream {
     ) -> Result<RelayedResponse, RelayError> {
         let url = format!("{}/{}", self.base, path.trim_start_matches('/'));
 
-        let response = self
+        // Built rather than sent directly so the outgoing header map is inspectable.
+        //
+        // # A header this proxy cannot remove
+        //
+        // When the client sends no `accept`, the provider still receives `accept: */*`.
+        // It is not added here and it is not on the built request — reqwest's client stack
+        // injects it below this layer, and there is no builder option to suppress it.
+        //
+        // That is a real fingerprint leak of the class D14 refuses to pay: traffic
+        // distinguishable from the same client running unproxied. It is one very common
+        // header rather than a proxy-identifying one, which is why this ships rather than
+        // blocking, and `the_proxy_adds_no_header_the_client_did_not_send` pins the leak
+        // to exactly this header so it cannot quietly grow.
+        let request = self
             .client
             .request(method, &url)
             .headers(relay_headers(headers))
             .body(body)
-            .send()
-            .await
-            .map_err(|err| {
-                // The URL is echoed but the headers are not — they carry the
-                // customer's provider credential, and an error string is the least
-                // controlled place in the system for one to end up.
-                RelayError::Transport(format!("{url}: {err}"))
-            })?;
+            .build()
+            .map_err(|err| RelayError::Transport(format!("{url}: {err}")))?;
+
+        let response = self.client.execute(request).await.map_err(|err| {
+            // The URL is echoed but the headers are not — they carry the
+            // customer's provider credential, and an error string is the least
+            // controlled place in the system for one to end up.
+            RelayError::Transport(format!("{url}: {err}"))
+        })?;
 
         Ok(RelayedResponse {
             status: response.status(),

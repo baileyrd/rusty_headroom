@@ -729,3 +729,109 @@ async fn a_stream_that_pauses_mid_generation_still_arrives_whole() {
         "the stream arrived altered or incomplete"
     );
 }
+
+// ---- the proxy must be invisible on the wire ----
+
+/// Sends `body` with exactly `headers` and returns what the provider received.
+async fn headers_seen_by_provider(simulator: &Simulator, headers: &[(&str, &str)]) -> Vec<String> {
+    let mut builder = Request::builder().method("POST").uri("/v1/messages");
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+
+    let app = router_with(AppState::new(simulator.base_url()));
+    let response = app
+        .oneshot(
+            builder
+                .body(Body::from(r#"{"model":"claude-opus-4","messages":[]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let _ = axum::body::to_bytes(response.into_body(), 65536).await;
+
+    let mut names: Vec<String> = simulator
+        .recorder()
+        .last()
+        .expect("nothing arrived")
+        .headers
+        .keys()
+        .map(|k| k.to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn the_proxy_adds_no_header_the_client_did_not_send() {
+    // The subscription hazard, end to end. `headers::sanitize` is unit-tested, but it
+    // governs only the headers *this code* forwards — the HTTP client underneath adds its
+    // own, and nothing checked what actually reaches the provider.
+    //
+    // It found one, and the finding stands: when the client sends no `accept`, the
+    // provider receives `accept: */*`. That is not added by this crate and is not on the
+    // request reqwest builds — the client stack injects it below that layer, and there is
+    // no option to suppress it.
+    //
+    // So this test pins the leak rather than asserting it is absent. One very common
+    // header is a weak signal; a second one, or a proxy-identifying one, is a different
+    // matter, and that is what this catches. A subscription account is revoked over
+    // evidence like this, so the cost of being wrong is not a slower request.
+    let simulator = Simulator::anthropic().await.unwrap();
+    let seen = headers_seen_by_provider(
+        &simulator,
+        &[
+            ("authorization", "Bearer session-token-subscription"),
+            ("content-type", "application/json"),
+        ],
+    )
+    .await;
+
+    // `host` and `content-length` are framing: HTTP requires them and every client sends
+    // them, so their presence reveals nothing. Anything else must have come from the
+    // client.
+    // `host` and `content-length` are framing: HTTP requires them and every client sends
+    // them, so their presence reveals nothing. `accept` is the known leak described above.
+    let accounted: Vec<&str> = vec![
+        "authorization",
+        "content-type",
+        "host",
+        "content-length",
+        "accept",
+    ];
+    let unexpected: Vec<&String> = seen
+        .iter()
+        .filter(|n| !accounted.contains(&n.as_str()))
+        .collect();
+
+    assert!(
+        unexpected.is_empty(),
+        "the proxy added headers beyond the known `accept` leak: {unexpected:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_client_supplied_accept_still_reaches_the_provider() {
+    // The other half. Stripping the added header must not strip a real one — a client
+    // that asks for `text/event-stream` and does not get it is a client whose streaming
+    // silently stops working.
+    let simulator = Simulator::anthropic().await.unwrap();
+    let seen = headers_seen_by_provider(
+        &simulator,
+        &[
+            ("x-api-key", "sk-ant-api03-x"),
+            ("content-type", "application/json"),
+            ("accept", "text/event-stream"),
+        ],
+    )
+    .await;
+
+    assert!(
+        seen.contains(&"accept".to_owned()),
+        "a real accept was dropped"
+    );
+    assert_eq!(
+        simulator.recorder().last().unwrap().header("accept"),
+        Some("text/event-stream")
+    );
+}

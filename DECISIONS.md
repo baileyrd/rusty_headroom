@@ -577,3 +577,34 @@ proxied traffic here. Verified end to end — a tagged 22 KB tool result compres
 The check is on `is_tool_output`, so a new tool-output kind is covered automatically and
 a new authored kind is protected automatically. That is why the check is phrased
 positively.
+
+## D25 — the `accept: */*` leak is documented, not hidden
+**2026-08-03**
+
+`headers::sanitize` decides what this crate forwards, and is well tested. Nothing tested
+what the *provider actually receives*, which is a different question: an HTTP client adds
+headers of its own below the layer this code controls.
+
+An end-to-end probe found one. When the client sends no `accept`, the provider receives
+`accept: */*`. It is not added by this crate and is not present on the request reqwest
+builds — the client stack injects it further down, and reqwest exposes no option to
+suppress it.
+
+**This is a real leak of the class D14 refuses to pay.** The whole subscription policy
+exists so that proxied traffic is not distinguishable from the same client running
+unproxied, and an added header is exactly that kind of evidence.
+
+**It ships anyway, for one reason:** `accept: */*` is the most common header value on the
+internet and identifies no proxy in particular. A second added header, or one that named
+this software, would be a different decision. `the_proxy_adds_no_header_the_client_did_not_send`
+pins the leak to exactly this header, so it cannot quietly grow — the test passes today
+and fails the moment anything else appears.
+
+A client that *does* send `accept` has it forwarded verbatim, covered by
+`a_client_supplied_accept_still_reaches_the_provider`. Stripping the injected one must
+never strip a real one: a client asking for `text/event-stream` and not getting it is a
+client whose streaming silently stops working.
+
+**Would change if:** the HTTP client gains a way to suppress it, or the leak grows. The
+honest fix is upstream, not a workaround here — removing it from the built request does
+nothing, which was tried and measured before this was written down.
