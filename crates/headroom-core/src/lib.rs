@@ -52,6 +52,7 @@ pub mod live_zone;
 pub mod log_compressor;
 pub mod memory;
 pub mod output_shaping;
+pub mod pipeline;
 pub mod search_compressor;
 pub mod signals;
 pub mod smart_crusher;
