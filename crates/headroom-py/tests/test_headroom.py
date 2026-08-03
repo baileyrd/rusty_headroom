@@ -67,7 +67,7 @@ def test_subscription_mode_forbids_compression():
 
     assert not result.compressed
     assert result.content == source
-    assert result.reason == "policy-forbids"
+    assert result.reason == "policy_forbids"
 
 
 def test_an_unknown_auth_mode_is_rejected_rather_than_defaulted():
@@ -99,9 +99,9 @@ def test_the_reason_distinguishes_why_nothing_happened():
     # this": prose routes to the text compressor as of gap row C10's wiring, and then
     # declines because it is far below the size threshold. That distinction is the
     # reason this test exists rather than an inconvenience to it.
-    assert headroom.compress("   \n\t  \n").reason == "no-compressor"
-    assert headroom.compress("short prose").reason == "not-smaller"
-    assert headroom.compress(a_log(), auth_mode="subscription").reason == "policy-forbids"
+    assert headroom.compress("   \n\t  \n").reason == "no_compressor"
+    assert headroom.compress("short prose").reason == "not_smaller"
+    assert headroom.compress(a_log(), auth_mode="subscription").reason == "policy_forbids"
 
 
 def test_token_counting_matches_what_compression_used():
@@ -124,3 +124,28 @@ def test_multibyte_content_survives_the_boundary():
     result = headroom.compress(source)
 
     assert result.content == source
+
+
+def test_every_reason_is_one_the_module_declares():
+    # `reason` is only useful if a caller can enumerate what it might be, and this module
+    # used to map the routing variants itself — spelling three of six with hyphens, so a
+    # Python result read `policy-forbids` while the proxy's
+    # `headroom_routing_total{reason="policy_forbids"}` and `headroom inspect` both said
+    # otherwise. Anyone correlating the two matched nothing.
+    #
+    # REASONS is built from Routing::REASONS in Rust. Asserting every observed reason is
+    # in it ties this surface to core across the FFI boundary, where no compiler looks.
+    observed = {
+        headroom.compress(records()).reason,
+        headroom.compress("   \n\t  \n").reason,
+        headroom.compress("short prose").reason,
+        headroom.compress(a_log(), auth_mode="subscription").reason,
+        headroom.compress(a_log(), auth_mode="oauth").reason,
+    }
+
+    assert observed <= set(headroom.REASONS), observed - set(headroom.REASONS)
+    # Not vacuous: the calls above have to actually produce distinct reasons, or an
+    # empty-ish set would satisfy the subset check while proving nothing.
+    assert len(observed) >= 4, observed
+    # And the vocabulary is underscored throughout, which is what the drift was about.
+    assert not any("-" in reason for reason in headroom.REASONS), headroom.REASONS

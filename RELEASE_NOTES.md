@@ -6,6 +6,30 @@ the crate starts publishing releases.
 
 ---
 
+## The Python binding's reasons match the rest of the project
+**2026-08-03** · the eighth copy, across an FFI boundary, already wrong
+
+- **Fixed:** `headroom-py` mapped the `Routing` variants itself and spelled three of six
+  with hyphens — `policy-forbids`, `no-compressor`, `measured-useless` — where the proxy
+  reports `policy_forbids` under `headroom_routing_total{reason=...}` and `headroom
+  inspect` prints the same. The `reason` field exists to be correlated, and a caller
+  correlating it matched nothing.
+- **Changed:** `compress()` reports `Routing::as_str()` directly. `"not-smaller"`, the one
+  outcome routing cannot produce, becomes `not_smaller`.
+- **Added:** `headroom.REASONS`, built from `Routing::REASONS`, so a caller can enumerate
+  the vocabulary instead of writing it down a ninth time.
+- **Added:** `test_every_reason_is_one_the_module_declares` — asserts every observed reason
+  is in `REASONS`, that at least four distinct reasons were actually produced so the
+  subset check is not vacuous, and that nothing in the vocabulary contains a hyphen.
+  Verified by putting a hyphen back and watching two tests fail.
+- **Logged as D27**, not asked about: this changes values a public API returns. The package
+  has never been published — no tags, outside `default-members`, wheel built in CI and
+  discarded — so there is no caller to break. Had it shipped, it would have been a
+  stop-and-ask.
+- **Removed:** a tracked `__pycache__/*.pyc`, and added Python bytecode to `.gitignore`.
+
+---
+
 ## The routing-reason list stops being copied across the crate boundary
 **2026-08-03** · a telemetry panel that could have gone permanently empty
 

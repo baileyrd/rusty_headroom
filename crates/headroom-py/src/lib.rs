@@ -45,8 +45,16 @@ pub struct CompressionResult {
     pub tokens_after: usize,
     /// What the content was detected as.
     pub content_type: String,
-    /// Why it was routed as it was — `"compress"`, `"lossless"`, `"policy-forbids"`,
-    /// `"unsafe"`, `"no-compressor"`, `"measured-useless"`, or `"not-smaller"`.
+    /// Why it was routed as it was.
+    ///
+    /// One of `Routing::REASONS` — `"compress"`, `"lossless"`, `"policy_forbids"`,
+    /// `"unsafe"`, `"no_compressor"`, `"measured_useless"` — or [`NOT_SMALLER`], the one
+    /// outcome this module can report that routing cannot.
+    ///
+    /// These are the identifiers the proxy uses for the same decisions, under
+    /// `headroom_routing_total{reason=...}` and in `headroom inspect`. They were spelled
+    /// with hyphens here, so a caller correlating a result against a dashboard matched
+    /// nothing.
     ///
     /// Reported rather than collapsed into the boolean above, because "nothing handles
     /// this content type" and "policy forbids it" are opposite problems with opposite
@@ -96,17 +104,11 @@ fn auth_mode_from(name: &str) -> PyResult<AuthMode> {
     }
 }
 
-/// A stable name for a routing decision.
-fn reason_of(routing: &Routing) -> &'static str {
-    match routing {
-        Routing::Compress { .. } => "compress",
-        Routing::Lossless => "lossless",
-        Routing::PolicyForbids => "policy-forbids",
-        Routing::Unsafe { .. } => "unsafe",
-        Routing::NoCompressor { .. } => "no-compressor",
-        Routing::MeasuredUseless { .. } => "measured-useless",
-    }
-}
+/// The one reason this module reports that routing cannot: a transform ran and its
+/// output was not smaller, so the original stands.
+///
+/// Underscored to match [`Routing::as_str`], which every other reason comes from.
+const NOT_SMALLER: &str = "not_smaller";
 
 /// Compresses one blob of content.
 ///
@@ -142,7 +144,12 @@ fn compress(content: &str, model: &str, auth_mode: &str) -> PyResult<Compression
     let content_type = detect(content.as_bytes()).content_type.to_string();
 
     let routing = orchestrator.route(content, policy, model);
-    let mut reason = reason_of(&routing).to_owned();
+    // `Routing::as_str`, not a name chosen here. This module used to map the variants
+    // itself and spelled three of the six with hyphens — `policy-forbids` where the
+    // proxy's `headroom_routing_total{reason="policy_forbids"}` and `headroom inspect`
+    // both say `policy_forbids`. Reporting the reason is only useful if it is the same
+    // reason, and a caller correlating a Python result against a dashboard got no match.
+    let mut reason = routing.as_str().to_owned();
 
     let mut block = Block::new(BlockKind::Text, content);
     let compressed = match orchestrator.transform_for(content, policy, model) {
@@ -153,7 +160,7 @@ fn compress(content: &str, model: &str, auth_mode: &str) -> PyResult<Compression
             // such — a caller tuning content wants to know their input reached a
             // compressor and did not benefit.
             Ok(_) => {
-                reason = "not-smaller".to_owned();
+                reason = NOT_SMALLER.to_owned();
                 false
             }
             // An invariant violation is a bug. Surfaced as an exception rather than
@@ -214,6 +221,18 @@ fn headroom(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(count_tokens, module)?)?;
     module.add_function(wrap_pyfunction!(detect_content_type, module)?)?;
     module.add_class::<CompressionResult>()?;
+
+    // Every value `CompressionResult.reason` can take, so a caller can branch on it
+    // without reading Rust or writing the list down a ninth time. Built from
+    // `Routing::REASONS` rather than typed here — this module already spelled three of
+    // those six with hyphens, and nothing noticed because nothing compared them.
+    let reasons: Vec<&str> = Routing::REASONS
+        .iter()
+        .copied()
+        .chain(std::iter::once(NOT_SMALLER))
+        .collect();
+    module.add("REASONS", reasons)?;
+
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

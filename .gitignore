@@ -3,3 +3,10 @@
 
 # maturin build output
 crates/headroom-py/dist/
+
+# Python bytecode and virtualenvs, from running the binding's tests locally.
+# A .pyc was committed once: it is machine- and interpreter-specific, so it churns
+# on every contributor's first `pytest` and is never what anyone meant to review.
+__pycache__/
+*.py[cod]
+.venv/
