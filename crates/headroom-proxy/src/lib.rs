@@ -14,7 +14,9 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod body;
 pub mod config;
+pub mod headers;
 pub mod health;
 pub mod server;
 

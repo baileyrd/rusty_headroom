@@ -6,6 +6,37 @@ the crate starts publishing releases.
 
 ---
 
+## Byte-faithful bodies and header hygiene
+**2026-08-03** · closes [#33](https://github.com/baileyrd/rusty_headroom/issues/33), [#34](https://github.com/baileyrd/rusty_headroom/issues/34)
+
+- **Added (#33):** `FaithfulBody` — parses a request while retaining the original
+  bytes, so untouched `messages[*]` forward as exact copies. Passthrough returns
+  `Cow::Borrowed`: the original bytes are handed back, not rebuilt and hoped to match.
+- **Added (#34):** `sanitize` for upstream-bound headers, `HeaderPolicy`, and
+  `Redacted` for credentials.
+- **Invariant I1 is now testable and tested.** SHA-256 round-trip across
+  pretty-printed input, unusual key order, `1.0`, integers past 2^53, CJK and emoji,
+  and escaped strings.
+- **Design note:** the workspace's `preserve_order` and `arbitrary_precision` flags
+  are necessary but not sufficient. A `Value` round trip still normalizes whitespace
+  and may differ on escapes, so untouched content is never round-tripped at all.
+- **Design note:** `serde_json` cannot deserialize an object into an ordered sequence
+  of raw pairs — `Vec<(K,V)>` wants an array, and `serde_json::Map` is fixed to
+  `Value` and would re-serialize everything. A small `Deserialize` visitor collects
+  members in document order with values left as `RawValue`.
+- **Design note:** `Redacted` implements `Debug` *and* `Display` identically, both
+  truncating. A `Debug` that dumped the full value would make `tracing::debug!(?x)` on
+  any containing struct a credential leak on some error path nobody exercised.
+- **Design note:** a client-supplied `X-Forwarded-For` is stripped when the policy
+  forbids adding one — forwarding it would defeat the policy while technically
+  honoring it.
+- **Known limitation:** a body with an escaped top-level key cannot be borrowed and
+  routes to verbatim passthrough. Safe direction, but such requests are never
+  compressed.
+- **Known limitation:** `HeaderPolicy` is supplied by the caller. Auth-mode
+  classification, which decides it, is a separate unimplemented row (A1), so
+  everything currently gets the quiet default.
+
 ## Proxy skeleton — config, /health, graceful shutdown
 **2026-08-03** · closes [#32](https://github.com/baileyrd/rusty_headroom/issues/32)
 
