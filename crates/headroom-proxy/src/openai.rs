@@ -19,12 +19,17 @@ use axum::extract::State;
 use axum::http::{HeaderMap, Method, Uri};
 use axum::response::Response;
 
+use crate::body::{insert_top_level_member, FaithfulBody};
 use crate::compression::{compress_dialect, Dialect};
 use crate::config::Config;
 use crate::headers::{sanitize, HeaderPolicy};
 use crate::server::{relay, AppState};
 use crate::upstream::RelayError;
 use headroom_core::auth_mode::{classify_auth_mode, CompressionPolicy};
+use headroom_core::block::{Block, BlockKind};
+use headroom_core::ccr::ContentHash;
+use headroom_core::conversation::{Conversation, Message, Role};
+use headroom_core::output_shaping::{route_effort, Effort};
 use headroom_core::tokenizer::{HeuristicEstimator, Tokenizer};
 
 /// `POST /v1/chat/completions`.
@@ -63,20 +68,97 @@ pub async fn chat_completions(
         );
     }
 
-    // `prompt_cache_key` injection (gap row X16) is deliberately not applied here.
-    // `stabilization::inject_prompt_cache_key` operates on a `serde_json::Value`, so
-    // using it means re-serializing the whole body — and re-serializing a body to add
-    // one member is the exact thing invariant I1 forbids, since it rewrites every byte
-    // the customer sent in order to change none of them. Doing it faithfully needs a
-    // surgical insert against the raw bytes, which is its own change.
-    relay_to(
-        &state,
-        &headers,
-        "/v1/chat/completions",
-        compressed.into_owned(),
-        policy,
-    )
-    .await
+    let outgoing = shape_openai(&compressed, policy);
+
+    relay_to(&state, &headers, "/v1/chat/completions", outgoing, policy).await
+}
+
+/// Adds `prompt_cache_key` and `reasoning_effort` where policy permits.
+///
+/// Both go in through [`insert_top_level_member`], so every byte the customer sent
+/// survives and only the new members are added — a `Value` round-trip to append one
+/// field would rewrite the whole body and cost the cache miss this proxy exists to
+/// avoid.
+fn shape_openai(body: &[u8], policy: CompressionPolicy) -> Vec<u8> {
+    let mut outgoing = body.to_vec();
+
+    if policy.auto_prompt_cache_key {
+        if let Some(key) = cache_key_for(&outgoing) {
+            if let Some(with_key) =
+                insert_top_level_member(&outgoing, "prompt_cache_key", &format!("\"{key}\""))
+            {
+                outgoing = with_key;
+            }
+        }
+    }
+
+    // Effort routing (gap row O2). Only ever *added*, never adjusted — a
+    // customer-supplied `reasoning_effort` is a deliberate choice about answer quality,
+    // and overriding it is not a compression decision.
+    if policy.lossy_transforms {
+        if let Some(effort) = effort_for(&outgoing) {
+            if let Some(with_effort) = insert_top_level_member(
+                &outgoing,
+                "reasoning_effort",
+                &format!("\"{}\"", effort.as_openai()),
+            ) {
+                outgoing = with_effort;
+            }
+        }
+    }
+
+    outgoing
+}
+
+/// Derives a stable cache key from everything but the newest message.
+///
+/// # Why the newest message is excluded
+///
+/// The key names a cache *partition*. It has to be identical across the turns of one
+/// conversation or every turn lands in a fresh partition and nothing is ever reused —
+/// which is worse than sending no key at all, because it also fragments the provider's
+/// own automatic prefix cache. The newest message is the one thing that changes every
+/// turn, so including it guarantees the key never repeats.
+fn cache_key_for(body: &[u8]) -> Option<String> {
+    let faithful = FaithfulBody::parse(body);
+    if !faithful.is_understood() || faithful.message_count() < 2 {
+        // One message is not yet a conversation, and there is no prefix to partition.
+        return None;
+    }
+
+    let mut prefix = String::new();
+    for index in 0..faithful.message_count() - 1 {
+        prefix.push_str(faithful.message(index)?);
+    }
+
+    // 32 hex characters of a 16-byte hash: enough that two distinct
+    // conversations colliding is not a practical concern, and short enough to read
+    // in a log line.
+    Some(ContentHash::of(prefix.as_bytes()).to_hex())
+}
+
+/// The effort level for a request body, if one can be read from it.
+fn effort_for(body: &[u8]) -> Option<Effort> {
+    let faithful = FaithfulBody::parse(body);
+    if !faithful.is_understood() {
+        return None;
+    }
+
+    let mut messages = Vec::with_capacity(faithful.message_count());
+    for index in 0..faithful.message_count() {
+        let value: serde_json::Value = serde_json::from_str(faithful.message(index)?).ok()?;
+        let role = match value.get("role").and_then(serde_json::Value::as_str) {
+            Some("assistant") => Role::Assistant,
+            _ => Role::User,
+        };
+        let text = value
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        messages.push(Message::new(role, vec![Block::new(BlockKind::Text, text)]));
+    }
+
+    Some(route_effort(&Conversation::new(None, Vec::new(), messages)))
 }
 
 /// `POST /v1/responses`.
@@ -319,6 +401,128 @@ mod tests {
             )
             .into_owned();
             assert_eq!(again, first);
+        }
+    }
+
+    // ---- cache key and effort ----
+
+    /// A two-turn conversation with a replaceable newest message.
+    fn convo(newest: &str) -> String {
+        format!(
+            r#"{{"model":"gpt-4o","messages":[{{"role":"user","content":"build the parser"}},{{"role":"assistant","content":"done"}},{{"role":"user","content":"{newest}"}}]}}"#
+        )
+    }
+
+    #[test]
+    fn the_cache_key_is_stable_across_turns_of_one_conversation() {
+        // The property that makes the key worth sending at all. A key that changes
+        // every turn lands each turn in a fresh partition and reuses nothing — worse
+        // than sending no key, since it also fragments the provider's own automatic
+        // prefix cache.
+        let first = cache_key_for(convo("what about errors?").as_bytes()).unwrap();
+        let second = cache_key_for(convo("and timeouts?").as_bytes()).unwrap();
+
+        assert_eq!(
+            first, second,
+            "the key changed when only the newest turn did"
+        );
+    }
+
+    #[test]
+    fn different_conversations_get_different_keys() {
+        // The over-correction to guard against: a key stable enough to be useless,
+        // pooling unrelated conversations into one partition.
+        let a = cache_key_for(convo("x").as_bytes()).unwrap();
+        let b = cache_key_for(
+            r#"{"model":"gpt-4o","messages":[{"role":"user","content":"something else entirely"},{"role":"assistant","content":"ok"},{"role":"user","content":"x"}]}"#
+                .as_bytes(),
+        )
+        .unwrap();
+
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn a_single_message_request_gets_no_cache_key() {
+        // One message is not yet a conversation, and there is no prefix to partition.
+        assert_eq!(
+            cache_key_for(
+                r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#.as_bytes()
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn shaping_adds_both_members_and_leaves_the_rest_byte_identical() {
+        let source = convo("what about errors?");
+        let out = shape_openai(source.as_bytes(), payg());
+        let rendered = String::from_utf8(out).unwrap();
+
+        assert!(rendered.contains("prompt_cache_key"));
+        assert!(rendered.contains("reasoning_effort"));
+        // Every original byte after the opening brace survives, in order.
+        assert!(
+            rendered.ends_with(&source[1..]),
+            "the original body was rewritten"
+        );
+    }
+
+    #[test]
+    fn a_customer_supplied_cache_key_is_never_replaced() {
+        // The key partitions the customer's cache. Overwriting one silently moves
+        // their traffic to a different partition and cold-starts it.
+        let source = r#"{"prompt_cache_key":"theirs","model":"gpt-4o","messages":[{"role":"user","content":"a"},{"role":"assistant","content":"b"},{"role":"user","content":"c"}]}"#;
+        let out = shape_openai(source.as_bytes(), payg());
+        let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+
+        assert_eq!(parsed["prompt_cache_key"], "theirs");
+    }
+
+    #[test]
+    fn a_customer_supplied_reasoning_effort_is_never_replaced() {
+        // A deliberate choice about answer quality. Overriding it is not a compression
+        // decision.
+        let source = r#"{"reasoning_effort":"low","model":"gpt-4o","messages":[{"role":"user","content":"it errors"},{"role":"assistant","content":"b"},{"role":"user","content":"still errors"}]}"#;
+        let out = shape_openai(source.as_bytes(), payg());
+        let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+
+        assert_eq!(parsed["reasoning_effort"], "low");
+    }
+
+    #[test]
+    fn a_restricted_policy_adds_neither_member() {
+        // Invariant I10. Both are proxy-visible modifications.
+        let source = convo("what about errors?");
+        let restricted = CompressionPolicy::for_mode(headroom_core::AuthMode::Subscription);
+        let out = shape_openai(source.as_bytes(), restricted);
+
+        assert_eq!(out, source.as_bytes(), "a restricted request was modified");
+    }
+
+    #[test]
+    fn an_error_turn_routes_high_effort() {
+        let source = convo("it still panics with an index error");
+        let out = shape_openai(source.as_bytes(), payg());
+        let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+
+        assert_eq!(parsed["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn shaping_is_deterministic() {
+        // Invariant I4, including the hash that feeds the cache key.
+        let source = convo("what about errors?");
+        let first = shape_openai(source.as_bytes(), payg());
+        for _ in 0..20 {
+            assert_eq!(shape_openai(source.as_bytes(), payg()), first);
+        }
+    }
+
+    #[test]
+    fn shaping_a_malformed_body_returns_it_unchanged() {
+        for source in [&b"{not json"[..], &b""[..], &b"[1,2,3]"[..]] {
+            assert_eq!(shape_openai(source, payg()), source);
         }
     }
 

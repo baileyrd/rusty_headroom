@@ -183,3 +183,22 @@ which is equally readable either way.
 
 **Would change if:** the file becomes something an operator hand-edits regularly, where
 TOML's comment support and friendlier syntax would start to earn the dependency.
+
+## D13 — Effort routing does not enable Anthropic extended thinking
+**2026-08-03**
+
+Gap row O2 names both `reasoning_effort` (OpenAI) and `thinking.budget_tokens`
+(Anthropic). Only the first is injected.
+
+Adding `reasoning_effort` to an OpenAI request changes how hard the model thinks and
+nothing about the response shape. Adding a `thinking` block to an Anthropic request that
+did not have one turns extended thinking *on*, and the response then carries thinking
+blocks the client never asked for and may not parse. That is not a compression decision
+being made on the customer's behalf; it is a change to their application's contract with
+the provider.
+
+Taken: inject `reasoning_effort` on the OpenAI route only. Adjusting an existing
+`thinking.budget_tokens` would be safe and is the obvious next step; creating one is not.
+
+**Would change if:** the budget adjustment is implemented for requests that already
+enable thinking, which is a strictly additive follow-up.

@@ -6,6 +6,40 @@ the crate starts publishing releases.
 
 ---
 
+## Byte-faithful member insertion — cache key and effort now reach the provider
+**2026-08-03** · closes gap row X16, completes O2
+
+- **Added:** `body::insert_top_level_member`, which adds a member to a JSON object
+  while preserving every existing byte in its original order.
+- **Wired:** `prompt_cache_key` (X16) and `reasoning_effort` (O2) into
+  `POST /v1/chat/completions`, both through the new primitive.
+- **Design note, and the reason the primitive exists:** adding one member via
+  `serde_json::Value` means deserializing and re-serializing the whole body — rewriting
+  every byte the customer sent in order to change none of them. Even with
+  `preserve_order` and `arbitrary_precision` set, whitespace and string-escape choices
+  become the serializer's rather than the customer's. That is what invariant I1 forbids,
+  and it costs a cache miss on every request. Inserting immediately after the opening
+  brace preserves the original bytes exactly. Tested against a pretty-printed body, a
+  body containing `1.0` and an integer past 2^53, and by asserting the tail of the
+  output is literally the tail of the input.
+- **Design note:** the cache key is derived from every message *but the newest*. The key
+  names a cache partition and has to be identical across the turns of one conversation,
+  or every turn lands in a fresh partition and nothing is reused — worse than sending no
+  key at all, since it also fragments the provider's own automatic prefix cache. The
+  newest message is the one thing that changes every turn. Two tests: one that the key
+  survives a changing newest turn, one that different conversations still differ.
+- **Design note:** neither member is ever replaced when the customer set it. A
+  `prompt_cache_key` partitions their cache deliberately; a `reasoning_effort` is a
+  deliberate choice about answer quality, and overriding it is not a compression
+  decision.
+- **Design note:** an empty object gains no trailing comma. `{"k":v,}` is not JSON, and
+  the naive implementation produces exactly that.
+- **Known limitation:** effort is injected on the OpenAI route only. Anthropic's
+  equivalent is `thinking.budget_tokens`, and *enabling* extended thinking on a request
+  that did not ask for it changes the response shape — the client starts receiving
+  thinking blocks it does not expect. Adjusting an existing `thinking` block would be
+  safe; adding one is not, so neither is done yet.
+
 ## Output shaping and observation-only telemetry
 **2026-08-03** · gap rows O1, O2, N1, N2, N3
 

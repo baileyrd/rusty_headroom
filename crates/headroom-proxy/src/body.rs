@@ -196,6 +196,62 @@ impl<'a> FaithfulBody<'a> {
     }
 }
 
+/// Inserts a top-level member into a JSON object, preserving every existing byte.
+///
+/// # Why this exists rather than a `Value` round-trip
+///
+/// Adding one member via `serde_json::Value` means deserializing and re-serializing
+/// the whole body — rewriting every byte the customer sent in order to change none of
+/// them. Even with `preserve_order` and `arbitrary_precision` set, whitespace and
+/// string-escape choices are the serializer's, not the customer's, and the result is a
+/// different byte sequence for the same JSON. That is exactly what invariant I1
+/// forbids, and it costs a cache miss on every request.
+///
+/// This inserts immediately after the opening brace, so every original byte survives
+/// in its original order and only the new member is added.
+///
+/// Returns `None` when nothing should change: the body is not a JSON object, or the
+/// key is already present. **Never overwrites an existing member** — a caller-supplied
+/// `prompt_cache_key` or `reasoning_effort` is a deliberate choice, and silently
+/// replacing one changes behavior the customer configured.
+///
+/// # Example
+///
+/// ```
+/// use headroom_proxy::body::insert_top_level_member;
+///
+/// let out = insert_top_level_member(br#"{"model":"gpt-4o"}"#, "reasoning_effort", "\"high\"")
+///     .unwrap();
+/// assert_eq!(out, br#"{"reasoning_effort":"high","model":"gpt-4o"}"#);
+///
+/// // Already present — left alone.
+/// assert!(insert_top_level_member(br#"{"a":1}"#, "a", "2").is_none());
+/// ```
+pub fn insert_top_level_member(body: &[u8], key: &str, value_json: &str) -> Option<Vec<u8>> {
+    // Parsed only to answer two questions: is this an object, and does the key already
+    // exist. The bytes written below come from the original slice regardless.
+    let members = serde_json::from_slice::<OrderedMembers>(body).ok()?;
+    if members.0.iter().any(|(existing, _)| *existing == key) {
+        return None;
+    }
+
+    let brace = body.iter().position(|byte| *byte == b'{')?;
+
+    let encoded_key = serde_json::to_string(key).ok()?;
+    let mut out = Vec::with_capacity(body.len() + encoded_key.len() + value_json.len() + 2);
+    out.extend_from_slice(&body[..=brace]);
+    out.extend_from_slice(encoded_key.as_bytes());
+    out.push(b':');
+    out.extend_from_slice(value_json.as_bytes());
+    // No separator for an object that had no members, or the result is `{"k":v,}`.
+    if !members.0.is_empty() {
+        out.push(b',');
+    }
+    out.extend_from_slice(&body[brace + 1..]);
+
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,5 +412,129 @@ mod tests {
             let again = body.rebuild(&[(1, r#"{"role":"assistant","content":"z"}"#.to_owned())]);
             assert_eq!(once, again);
         }
+    }
+}
+
+#[cfg(test)]
+mod insert_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    fn sha(bytes: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        format!("{:x}", hasher.finalize())
+    }
+
+    #[test]
+    fn every_original_byte_survives_in_order() {
+        // The property that makes this usable at all. A `Value` round-trip produces
+        // equivalent JSON; this produces the *same bytes* plus one member.
+        let source = br#"{"model":"gpt-4o", "temperature": 1.0, "messages":[{"role":"user","content":"hi"}]}"#;
+        let out = insert_top_level_member(source, "reasoning_effort", "\"high\"").unwrap();
+
+        let tail = &out[out.len() - (source.len() - 1)..];
+        assert_eq!(tail, &source[1..], "the original bytes were rewritten");
+    }
+
+    #[test]
+    fn the_result_is_valid_json_carrying_the_new_member() {
+        let source = br#"{"model":"gpt-4o","messages":[]}"#;
+        let out = insert_top_level_member(source, "prompt_cache_key", "\"abc123\"").unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(parsed["prompt_cache_key"], "abc123");
+        assert_eq!(parsed["model"], "gpt-4o");
+    }
+
+    #[test]
+    fn an_existing_member_is_never_overwritten() {
+        // A customer-supplied `prompt_cache_key` partitions their cache deliberately.
+        // Overwriting one silently moves their traffic to a different partition and
+        // cold-starts it.
+        assert_eq!(
+            insert_top_level_member(
+                br#"{"prompt_cache_key":"theirs"}"#,
+                "prompt_cache_key",
+                "\"ours\""
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn an_empty_object_does_not_gain_a_trailing_comma() {
+        // `{"k":v,}` is not JSON, and the naive implementation produces exactly that.
+        let out = insert_top_level_member(b"{}", "a", "1").unwrap();
+        assert_eq!(out, b"{\"a\":1}");
+        let _: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    }
+
+    #[test]
+    fn leading_whitespace_before_the_brace_is_preserved() {
+        let out = insert_top_level_member(b"  \n{\"a\":1}", "b", "2").unwrap();
+        assert!(out.starts_with(b"  \n{"));
+        let _: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    }
+
+    #[test]
+    fn a_pretty_printed_body_stays_pretty_printed() {
+        // Whitespace is the customer's, not the serializer's. A round-trip would
+        // silently reflow it and change the bytes that reach the provider.
+        let source = b"{\n  \"model\": \"gpt-4o\",\n  \"messages\": []\n}";
+        let out = insert_top_level_member(source, "a", "1").unwrap();
+
+        assert!(String::from_utf8(out.clone())
+            .unwrap()
+            .contains("\n  \"model\": \"gpt-4o\""));
+        let _: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    }
+
+    #[test]
+    fn a_non_object_body_is_left_alone() {
+        for source in [
+            &b"[1,2,3]"[..],
+            &b"\"a string\""[..],
+            &b"not json"[..],
+            &b""[..],
+        ] {
+            assert_eq!(
+                insert_top_level_member(source, "a", "1"),
+                None,
+                "{source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_exotic_key_is_escaped_correctly() {
+        let out = insert_top_level_member(br#"{"a":1}"#, "we\"ird\n", "2").unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(parsed["we\"ird\n"], 2);
+    }
+
+    #[test]
+    fn insertion_is_deterministic() {
+        // Invariant I4.
+        let source = br#"{"model":"gpt-4o","messages":[]}"#;
+        let first = insert_top_level_member(source, "a", "1").unwrap();
+        for _ in 0..25 {
+            assert_eq!(
+                sha(&insert_top_level_member(source, "a", "1").unwrap()),
+                sha(&first)
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_literals_elsewhere_in_the_body_are_untouched() {
+        // The regression a `Value` round-trip causes even with `arbitrary_precision`
+        // off: `1.0` collapses to `1` and integers past 2^53 lose precision.
+        let source = br#"{"a":1.0,"b":9007199254740993,"messages":[]}"#;
+        let out = insert_top_level_member(source, "z", "0").unwrap();
+        let rendered = String::from_utf8(out).unwrap();
+
+        assert!(rendered.contains("1.0"), "{rendered}");
+        assert!(rendered.contains("9007199254740993"), "{rendered}");
     }
 }
