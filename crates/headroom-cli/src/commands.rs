@@ -324,12 +324,56 @@ pub fn doctor() -> anyhow::Result<()> {
     }
 }
 
+/// Every variable any supported agent needs, deduplicated, in first-seen order.
+///
+/// # Not written out again
+///
+/// `headroom env` printed `ANTHROPIC_BASE_URL={proxy}` and `OPENAI_BASE_URL={proxy}/v1`
+/// as format strings, restating what `Agent::env` already knows. It had drifted in the
+/// small way a copy does: `Agent::env` trims a trailing slash and this did not, so the
+/// same input produced different output from two commands that do the same job —
+///
+/// ```text
+/// $ headroom env  --proxy http://127.0.0.1:8787/
+/// export OPENAI_BASE_URL=http://127.0.0.1:8787//v1
+/// $ headroom wrap aider --proxy http://127.0.0.1:8787/
+/// export OPENAI_BASE_URL=http://127.0.0.1:8787/v1
+/// ```
+///
+/// `wrap` has a test for that exact input. `env` did not, because it did not share the
+/// code the test covers.
+///
+/// The union rather than one representative agent: `headroom env` names no agent, so its
+/// answer is "whatever any of them might read". An agent added with a new variable then
+/// appears here without anyone remembering to come back.
+fn agent_env(proxy: &str) -> Vec<(&'static str, String)> {
+    let mut vars: Vec<(&'static str, String)> = Vec::new();
+
+    for agent in crate::wrap::Agent::ALL {
+        for (name, value) in agent.env(proxy) {
+            match vars.iter().find(|(known, _)| *known == name) {
+                // Two agents disagreeing on a variable would make a single `eval` wrong
+                // for one of them, and silently picking the first is how it would stay
+                // unnoticed. Nothing disagrees today; `agents_do_not_disagree_about_a_variable`
+                // is what keeps that true.
+                Some((_, first)) => debug_assert_eq!(
+                    *first, value,
+                    "agents disagree about {name}: `{first}` and `{value}`"
+                ),
+                None => vars.push((name, value)),
+            }
+        }
+    }
+    vars
+}
+
 /// `headroom env`.
 pub fn env(proxy: &str) -> anyhow::Result<()> {
     // Emitted as shell exports so this can be `eval`'d, which is how the reference's
     // wrap command is meant to be used.
-    println!("export ANTHROPIC_BASE_URL={proxy}");
-    println!("export OPENAI_BASE_URL={proxy}/v1");
+    for (name, value) in agent_env(proxy) {
+        println!("export {name}={value}");
+    }
     println!("# eval \"$(headroom env)\" then run your agent as usual");
     Ok(())
 }
@@ -705,6 +749,80 @@ mod tests {
                 .iter()
                 .any(|ct| orchestrator.tool_output_only(*ct)),
             "no content type is tool-output-only, so the check above proves nothing"
+        );
+    }
+
+    #[test]
+    fn env_and_wrap_agree_on_a_proxy_with_a_trailing_slash() {
+        // The bug. `Agent::env` trims the slash and `headroom env` restated the format
+        // strings without it, so `headroom env --proxy http://x:8787/` emitted
+        // `OPENAI_BASE_URL=http://x:8787//v1` while `headroom wrap aider` with the same
+        // input emitted `/v1`. Two commands doing one job, disagreeing.
+        for proxy in [
+            "http://127.0.0.1:8787/",
+            "http://127.0.0.1:8787",
+            "http://x/y//",
+        ] {
+            let from_env = agent_env(proxy);
+
+            for agent in crate::wrap::Agent::ALL {
+                for (name, wrapped) in agent.env(proxy) {
+                    let (_, printed) = from_env
+                        .iter()
+                        .find(|(known, _)| *known == name)
+                        .unwrap_or_else(|| panic!("`headroom env` omits {name} for {agent}"));
+                    assert_eq!(
+                        printed, &wrapped,
+                        "{proxy}: env says {name}={printed}, wrap {agent} says {wrapped}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn env_emits_no_variable_twice() {
+        // Five agents ask for `ANTHROPIC_BASE_URL`. A duplicated export is harmless to
+        // `eval` and reads as a bug to whoever runs the command without one.
+        let vars = agent_env("http://127.0.0.1:8787");
+        let mut names: Vec<_> = vars.iter().map(|(name, _)| *name).collect();
+        let before = names.len();
+
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), before, "duplicate export in {vars:?}");
+    }
+
+    #[test]
+    fn agents_do_not_disagree_about_a_variable() {
+        // `agent_env` takes the first value for a name. That is only safe while no two
+        // agents want different values, and this is what makes the assumption visible
+        // rather than latent: an agent needing `OPENAI_BASE_URL` without the `/v1`
+        // suffix would make one `eval` wrong for somebody, silently.
+        let mut claimed: Vec<(&str, String)> = Vec::new();
+
+        for agent in crate::wrap::Agent::ALL {
+            for (name, value) in agent.env("http://127.0.0.1:8787") {
+                if let Some((_, first)) = claimed.iter().find(|(known, _)| *known == name) {
+                    assert_eq!(first, &value, "{agent} disagrees about {name}");
+                } else {
+                    claimed.push((name, value));
+                }
+            }
+        }
+
+        // Not vacuous: something has to be claimed twice, or the loop above proves
+        // nothing about agreement.
+        assert!(
+            crate::wrap::Agent::ALL
+                .iter()
+                .filter(|a| a
+                    .env("http://x")
+                    .iter()
+                    .any(|(n, _)| *n == "ANTHROPIC_BASE_URL"))
+                .count()
+                > 1,
+            "no variable is claimed by two agents, so this test checks nothing"
         );
     }
 
