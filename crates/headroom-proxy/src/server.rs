@@ -948,6 +948,56 @@ mod tests {
         format!("http://{addr}")
     }
 
+    /// The routes that relay to the provider, and therefore have a path to preserve.
+    ///
+    /// A subset of [`ROUTES`], checked to be one by
+    /// `every_relaying_route_forwards_its_own_path` — the rest either answer locally
+    /// (`/health`, `/metrics`, `/admin/runtime-env`) or upgrade to a socket.
+    const RELAYING: [&str; 5] = [
+        "/v1/messages",
+        "/v1/chat/completions",
+        "/v1/responses",
+        "/v1/responses/compact",
+        "/v1/conversations",
+    ];
+
+    #[tokio::test]
+    async fn every_relaying_route_forwards_its_own_path() {
+        // Each OpenAI handler hands `relay` a hardcoded upstream path —
+        // `"/v1/chat/completions"` in `chat_completions`, `"/v1/responses"` in
+        // `responses`. A literal that drifted from its route would send the provider a
+        // path it does not serve, and the client would get the provider's 404 for a
+        // request the proxy accepted.
+        //
+        // Three of these five were checked individually. This covers all of them, and
+        // covers a route added later without anyone remembering to write the assertion.
+        //
+        // The path also picks the SSE vocabulary: `Observer::for_path` falls back to the
+        // Anthropic classifier, so an OpenAI path arriving misspelled would be read with
+        // the wrong grammar and report a healthy stream as unfinished (D18).
+        for path in RELAYING {
+            assert!(
+                ROUTES.iter().any(|(_, declared)| *declared == path),
+                "{path} relays and is not a registered route"
+            );
+
+            let (base, captured) = fake_any_path().await;
+            post_to(
+                router_with(AppState::new(&base)),
+                path,
+                r#"{"model":"m","messages":[]}"#.to_owned(),
+            )
+            .await;
+
+            let (seen, _) = captured
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| panic!("{path} forwarded nothing"));
+            assert_eq!(seen, path, "{path} reached the provider as {seen}");
+        }
+    }
+
     #[tokio::test]
     async fn every_declared_route_is_actually_reachable() {
         // A route registered and never requested is a route a typo silently disables.
