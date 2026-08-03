@@ -98,8 +98,8 @@ Every row is a gap: the target repo is empty, so all rows are new implementation
 | S1 | line importance scoring | fn | spec | all | `signals/line_importance.rs` | no | M | Drives which lines survive lossy passes. |
 | S2 | keyword / error detector | fn | spec | all | `signals/keyword_detector.rs` | no | S | Error/warning keyword sets; never drop error lines. |
 | S3 | tiered signal aggregation | fn | spec | all | `signals/tiered.rs` | no | S | Combines S1+S2 into keep/drop tiers. |
-| S4 | `AnchorSelector` | fn | spec | all | `transforms/anchor_selector.rs` | no | M | Picks stable anchor points so output stays position-preserving (I6). |
-| S5 | `TagProtector` | fn | spec | all | `transforms/tag_protector.rs` | no | S | Never break XML/markup tags mid-compression. |
+| S4 | `AnchorSelector` | fn | spec | all | `transforms/anchor_selector.rs` | no | M | Picks stable anchor points so output stays position-preserving (I6). Done as `signals::anchors::select_anchors` — hunk headers, headings, fences, stack frames, structure opens, boundaries. Not yet consulted by a compressor. |
+| S5 | `TagProtector` | fn | spec | all | `transforms/tag_protector.rs` | no | S | Never break XML/markup tags mid-compression. Done as `signals::tags::{protected_lines, breaks_markup}`; balance check over tag-shaped tokens, not an XML parser. Not yet consulted by a compressor. |
 
 ### SmartCrusher (JSON) — split into 6 issues to keep them small
 

@@ -11,8 +11,12 @@
 //! tokens; a line wrongly dropped may be the error the user is looking for. That
 //! asymmetry decides every threshold below.
 
+pub mod anchors;
 mod keywords;
+pub mod tags;
 mod tiered;
 
+pub use anchors::{is_removable, select_anchors, Anchor, AnchorKind};
 pub use keywords::{is_error_line, keyword_score, ERROR_KEYWORDS};
+pub use tags::{breaks_markup, find_tags, protected_lines, Tag};
 pub use tiered::{keep_most_important, score_lines, Importance, ScoredLine};
