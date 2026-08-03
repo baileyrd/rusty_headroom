@@ -325,7 +325,7 @@ pub fn compress_dialect<'a>(
     // the note must survive into the bytes that go out, and a compressor running over a
     // block that already carries it could summarize the instruction away.
     if let Some((message, block, shaped)) =
-        output_shaping::verbosity_append(&conversation, verbosity)
+        output_shaping::verbosity_append(&conversation, verbosity, frozen)
     {
         match edits
             .iter_mut()
