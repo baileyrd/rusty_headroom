@@ -693,3 +693,31 @@ for an access problem during the incident they are already trying to fix.
 
 **Would change if:** loops through an *intermediate* hop become a concern, which neither
 check can see.
+
+## D27 — the Python binding's reason strings change to match the rest
+**2026-08-03**
+
+`headroom-py` mapped the `Routing` variants itself and spelled three of the six with
+hyphens: `policy-forbids`, `no-compressor`, `measured-useless`. The proxy reports the same
+decisions as `policy_forbids` under `headroom_routing_total{reason=...}`, and `headroom
+inspect` prints the same. So a caller correlating a Python result against a dashboard
+matched nothing — and the reason field exists precisely so it can be correlated.
+
+The underscored spelling wins: it is `Routing::as_str`, it is the Prometheus label, it is
+what every other surface already says. Nothing forces hyphens on the Python side.
+
+`compress()` now reports `routing.as_str()` directly. The one reason routing cannot
+produce — a transform ran and its output was not smaller — becomes `not_smaller`, and the
+module exports `headroom.REASONS`, built from `Routing::REASONS`, so a caller can
+enumerate the vocabulary rather than write it down a ninth time.
+
+**This changes values a published package returns, and is logged rather than asked
+about.** The standing instruction is to decide and log. The package has never been
+published — no version tags, `headroom-py` is outside `default-members`, and the wheel is
+built in CI and thrown away — so there is no caller to break. Had it shipped, this would
+have been a stop-and-ask, and the right fix then would have been to report both spellings
+for a release before removing one.
+
+**Would change if:** the module is published. After that, a value in `REASONS` is a
+compatibility surface, and the exhaustiveness test in core is what tells you a change is
+about to reach it.
