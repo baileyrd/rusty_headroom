@@ -257,3 +257,27 @@ both already in the tree transitively via axum.
 
 **Would change if:** the transport gains a request-boundary marker, or the reference
 demonstrates a safe way to identify a frozen prefix inside a socket conversation.
+
+## D16 — tiktoken shipped, HuggingFace tokenizers deferred
+**2026-08-03**
+
+Gap rows T2 and T3 both ask for exact tokenizers. They are not comparable in cost.
+
+**T2 (tiktoken) is shipped.** `tiktoken-rs` embeds the BPE vocabularies, so the counter
+is exact offline with no downloads and no runtime configuration. Version 0.11 rather than
+0.12 — the newer one requires Rust 1.85 and this workspace declares 1.80 (D7), and Cargo
+selected the older release on its own.
+
+**T3 (HuggingFace) is deferred.** The `tokenizers` crate does not embed vocabularies: it
+loads a `tokenizer.json` per model, fetched from the Hub at runtime. That makes the
+tokenizer a *network dependency of the request path* — the one place this project has
+been careful to keep free of them — and it cannot be tested in this environment at all,
+so it would ship unexercised.
+
+It is also worth less than it looks. The models T3 would cover are Anthropic's, and
+Anthropic does not publish a tokenizer; a HuggingFace tokenizer for `claude-*` would be
+somebody's approximation with `is_exact()` returning `true`. That is worse than the
+heuristic, which is honest about being an upper bound.
+
+**Would change if:** vocabularies can be vendored at build time rather than fetched, or
+a provider publishes an authoritative tokenizer worth registering as exact.

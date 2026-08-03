@@ -16,3 +16,4 @@ bytes.workspace = true
 tracing.workspace = true
 blake3.workspace = true
 http.workspace = true
+tiktoken-rs = "0.11.0"
