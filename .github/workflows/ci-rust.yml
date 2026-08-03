@@ -1,0 +1,42 @@
+name: CI
+
+# Runs on every PR and on pushes to the default branch. The "on green CI, merge"
+# rule depends on this workflow being the required status check — set it as required
+# under branch protection (see references/ci-and-branch-protection.md).
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup component add rustfmt clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        # Warnings fail the build, matching the "no unwrap/expect outside tests,
+        # clippy clean" standard.
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --all-features
