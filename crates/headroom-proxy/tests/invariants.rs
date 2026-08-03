@@ -95,6 +95,108 @@ fn compressible_request() -> String {
     )
 }
 
+/// A request with a **real** frozen prefix: a `cache_control` breakpoint, and bulky
+/// compressible content sitting behind it.
+///
+/// # Why the marker and the bulk are both required
+///
+/// Without a `cache_control` marker there is no frozen prefix at all — Anthropic caches
+/// what the customer marks, so `frozen_message_count` returns zero and every message is
+/// live. And without compressible content behind the marker, disabling the floor entirely
+/// changes nothing observable, because a compressor would decline those messages anyway.
+///
+/// # What mutation testing actually revealed here
+///
+/// Replacing the frozen floor with a constant `0` leaves the entire end-to-end suite
+/// green — including this test. That is not a hole; it is a *second* protection. The live
+/// zone also applies a newest-claims rule: the newest message holding a category owns it,
+/// and older messages holding the same category are skipped. For the common agent shape —
+/// several tool results, the newest one bulky — that rule alone confines compression to
+/// the newest turn, and the frozen floor is defence in depth over it.
+///
+/// So this test does not gate the frozen floor, and saying it did would be the same error
+/// as calling a module done because its tests pass. What it gates is the end-to-end
+/// outcome: bulky content behind a breakpoint arrives byte-identical while bulky content
+/// in front of it is compressed. Both halves are asserted, so it cannot be satisfied by a
+/// proxy that compresses nothing.
+fn frozen_prefix_request() -> String {
+    let records = |tag: &str| -> String {
+        let items: Vec<String> = (0..120)
+            .map(|i| {
+                format!(
+                    r#"{{"path":"src/{tag}_{i}.rs","kind":"file","status":"ok","size":{}}}"#,
+                    1000 + i
+                )
+            })
+            .collect();
+        format!("[{}]", items.join(","))
+    };
+
+    serde_json::json!({
+        "model": "claude-opus-4",
+        "max_tokens": 4096,
+        "system": "You are a careful assistant.",
+        "tools": [{"name": "read_file", "input_schema": {"type": "object"}}],
+        "messages": [
+            {"role": "user", "content": "turn one"},
+            // Bulky, and behind the breakpoint below — so a correct proxy leaves it
+            // alone and a broken floor rewrites it.
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t_frozen", "content": records("frozen")}
+            ]},
+            // The breakpoint. Everything up to and including this message is frozen.
+            {"role": "assistant", "content": "answer one", "cache_control": {"type": "ephemeral"}},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t_live", "content": records("live")}
+            ]}
+        ]
+    })
+    .to_string()
+}
+
+#[tokio::test]
+async fn i2_bulky_content_behind_a_breakpoint_is_left_alone() {
+    // The gate the previous I2 tests could not provide. Both tool results are equally
+    // compressible; the only thing distinguishing them is which side of the
+    // `cache_control` breakpoint they sit on.
+    let simulator = Simulator::anthropic().await.unwrap();
+    let source = frozen_prefix_request();
+
+    through_proxy(&simulator, &source, "sk-ant-api03-x").await;
+    let received = simulator.recorder().last().expect("nothing arrived");
+
+    assert!(
+        received.body.len() < source.len(),
+        "nothing was compressed, so this assertion proves nothing"
+    );
+
+    let before: serde_json::Value = serde_json::from_str(&source).unwrap();
+    let after: serde_json::Value = serde_json::from_slice(&received.body).unwrap();
+
+    // The frozen tool result must survive byte for byte.
+    assert_eq!(
+        sha(serde_json::to_string(&before["messages"][1])
+            .unwrap()
+            .as_bytes()),
+        sha(serde_json::to_string(&after["messages"][1])
+            .unwrap()
+            .as_bytes()),
+        "compressible content in the frozen prefix was rewritten"
+    );
+
+    // And the live one must actually have been compressed, or the two assertions above
+    // are satisfied by a proxy that compresses nothing at all.
+    assert_ne!(
+        sha(serde_json::to_string(&before["messages"][3])
+            .unwrap()
+            .as_bytes()),
+        sha(serde_json::to_string(&after["messages"][3])
+            .unwrap()
+            .as_bytes()),
+        "the live tool result was not compressed"
+    );
+}
+
 // ---- I1 ----
 
 #[tokio::test]
