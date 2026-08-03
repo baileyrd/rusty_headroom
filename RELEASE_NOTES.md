@@ -6,6 +6,38 @@ the crate starts publishing releases.
 
 ---
 
+## A CCR store that failed to open was invisible outside the logs
+**2026-08-03** · the proxy reported itself healthy while handing out markers it could not redeem
+
+- `Config::ccr_store` falls back to memory on any failure and warns. Right trade, wrong
+  reporting: `/health` answered `"status":"ok"` and named no store at all.
+- Measured, with `HEADROOM_CCR_DIR` pointed at a path that cannot be opened:
+
+  | configuration | value survives a store rebuild |
+  | --- | --- |
+  | unopenable directory | **no** |
+  | usable directory | yes |
+  | unset | no |
+
+- So the proxy kept relaying, kept compressing, and kept handing the model `<<ccr:HASH>>`
+  markers that stop resolving the moment the process restarts. README's promise for CCR is
+  that compression is "a bet that can be unwound" — in that state it quietly is not.
+- `/health` gains **`ccr_store`** (`memory`/`file`/`redis`) and **`ccr_store_persistent`**.
+  Two fields because `"memory"` is the correct answer for a default install and a silent
+  failure for a configured one; the boolean is what to alert on.
+- The kind travels from `AppState` as a value rather than being re-read from configuration
+  downstream — the lesson `Health::upstream` already carries, and re-deriving it would have
+  reproduced the bug being fixed.
+- `Health::current` gained a parameter. A public-signature change, logged rather than
+  asked, under the standing instruction; six call sites, all in-repo, five of them tests.
+- Verified by mutation three ways: mislabelling the fallback, hardwiring
+  `survives_restart` true, and dropping `CCR_DIR` from the request check.
+- The new test binary serializes its cases — `set_overrides` writes one process-global map,
+  and under default threading two of three failed about half the time (measured across five
+  runs: 2, 1, 1, 1, 2 failures) before the lock went in.
+
+---
+
 ## The one-surface-of-three pattern gets written down, and two more features get checked
 **2026-08-03** · a fourth lesson, after the same gap shipped four times
 

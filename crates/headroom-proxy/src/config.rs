@@ -83,6 +83,41 @@ pub const STARTUP_ONLY: [&str; 8] = [
     vars::REDIS_URL,
 ];
 
+/// Which CCR store the proxy actually built.
+///
+/// Reported by `/health` because the configured store and the built one are not the same
+/// thing, and the gap is silent: a `HEADROOM_CCR_DIR` the process cannot open falls back
+/// to memory with a startup warning, and every marker handed to the model from then on is
+/// unredeemable across a restart while the proxy reports itself healthy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CcrStoreKind {
+    /// Nothing survives a restart, and nothing is shared between workers. The default.
+    Memory,
+    /// A local directory. Survives a restart; not shared between hosts.
+    File,
+    /// Shared between workers.
+    Redis,
+}
+
+impl CcrStoreKind {
+    /// A stable identifier, for `/health` and for logs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::File => "file",
+            Self::Redis => "redis",
+        }
+    }
+
+    /// Whether a marker written now can still be redeemed after a restart.
+    ///
+    /// The question an operator is actually asking. `memory` is a correct answer to it
+    /// when nobody configured anything, and a silent failure when somebody did.
+    pub fn survives_restart(self) -> bool {
+        !matches!(self, Self::Memory)
+    }
+}
+
 /// Default listen port.
 pub const DEFAULT_PORT: u16 = 8787;
 
@@ -391,11 +426,30 @@ impl Config {
     ///
     /// [`InMemoryCcrStore`]: headroom_core::ccr::InMemoryCcrStore
     pub fn ccr_store() -> std::sync::Arc<dyn headroom_core::ccr::CcrStore> {
+        Self::ccr_store_with_kind().0
+    }
+
+    /// The same store, with the kind that was actually built.
+    ///
+    /// Separate from [`Self::ccr_store`] because the two answers differ, and the
+    /// difference is invisible: a `HEADROOM_CCR_DIR` that cannot be opened falls back to
+    /// memory and logs a warning, after which the proxy relays, compresses, and hands the
+    /// model `<<ccr:...>>` markers that no longer survive a restart. Measured — put a
+    /// value, rebuild the store from the same configuration, and it is gone.
+    ///
+    /// The kind travels as a return value rather than being re-derived downstream for the
+    /// reason [`crate::health::Health::upstream`] records: a second reader of the
+    /// *configuration* reports what was asked for, which is exactly the case where the
+    /// operator needs to be told it did not happen.
+    pub fn ccr_store_with_kind() -> (
+        std::sync::Arc<dyn headroom_core::ccr::CcrStore>,
+        CcrStoreKind,
+    ) {
         use headroom_core::ccr::{FileCcrStore, InMemoryCcrStore};
 
         if let Some(url) = setting(vars::REDIS_URL).filter(|raw| !raw.trim().is_empty()) {
             match connect_redis(url.trim()) {
-                Ok(store) => return store,
+                Ok(store) => return (store, CcrStoreKind::Redis),
                 Err(err) => {
                     tracing::warn!(%err, "could not use the redis CCR store; falling back");
                 }
@@ -406,7 +460,7 @@ impl Config {
             match FileCcrStore::open(dir.trim()) {
                 Ok(store) => {
                     tracing::info!(dir = %dir.trim(), "using a file-backed CCR store");
-                    return std::sync::Arc::new(store);
+                    return (std::sync::Arc::new(store), CcrStoreKind::File);
                 }
                 Err(err) => {
                     tracing::warn!(dir = %dir.trim(), %err, "could not open the CCR directory; using memory");
@@ -414,7 +468,20 @@ impl Config {
             }
         }
 
-        std::sync::Arc::new(InMemoryCcrStore::new())
+        (
+            std::sync::Arc::new(InMemoryCcrStore::new()),
+            CcrStoreKind::Memory,
+        )
+    }
+
+    /// Whether the operator asked for a store that outlives the process.
+    ///
+    /// Read from configuration deliberately — this is the *request*, and comparing it
+    /// against what [`Self::ccr_store_with_kind`] actually built is the whole point.
+    pub fn persistent_store_requested() -> bool {
+        [vars::REDIS_URL, vars::CCR_DIR]
+            .iter()
+            .any(|name| setting(name).is_some_and(|raw| !raw.trim().is_empty()))
     }
 
     /// Whether cache stabilization may rewrite the hot zone.

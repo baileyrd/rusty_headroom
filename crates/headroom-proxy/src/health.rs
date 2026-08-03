@@ -61,15 +61,40 @@ pub struct Health {
     /// Named rather than folded into `status`, because "degraded" tells an operator to
     /// look and this tells them where.
     pub relay_available: bool,
+    /// Which CCR store was built — `"memory"`, `"file"` or `"redis"`.
+    ///
+    /// Reported for the same reason as `upstream`, and discovered the same way. A
+    /// `HEADROOM_CCR_DIR` the process cannot open falls back to memory and logs a
+    /// warning; from then on the proxy relays, compresses, and hands the model
+    /// `<<ccr:...>>` markers that will not survive a restart — while this endpoint said
+    /// `"ok"` and named no store at all. Measured: put a value, rebuild the store from
+    /// the same configuration, and it is gone.
+    ///
+    /// `"memory"` is the correct answer when nobody configured anything, so this field
+    /// alone does not say whether something is wrong. `ccr_store_persistent` is what
+    /// answers that.
+    pub ccr_store: &'static str,
+    /// Whether a marker written now is still redeemable after a restart.
+    ///
+    /// Separate from `ccr_store` because "memory" means two different things: the default
+    /// nobody changed, and a configured store that failed to open. This is the field to
+    /// alert on.
+    pub ccr_store_persistent: bool,
 }
 
 impl Health {
     /// Builds the current health report.
     ///
     /// `relay_base` is where the built relay forwards, or `None` when none was built.
-    /// Taken as a parameter rather than read from `config` so this cannot drift back to
-    /// reporting an upstream that nothing uses.
-    pub fn current(config: &Config, relay_base: Option<&str>) -> Self {
+    /// `store` is the CCR store that was actually constructed. Both are taken as
+    /// parameters rather than read from `config` so this cannot drift back to reporting
+    /// what was asked for instead of what happened — the failure `upstream` records, and
+    /// the one `ccr_store` was added for.
+    pub fn current(
+        config: &Config,
+        relay_base: Option<&str>,
+        store: crate::config::CcrStoreKind,
+    ) -> Self {
         Self {
             status: if relay_base.is_some() {
                 "ok"
@@ -80,6 +105,8 @@ impl Health {
             upstream: relay_base.unwrap_or("none").to_owned(),
             compression_enabled: config.compression_enabled(),
             relay_available: relay_base.is_some(),
+            ccr_store: store.as_str(),
+            ccr_store_persistent: store.survives_restart(),
         }
     }
 
@@ -99,13 +126,18 @@ impl Health {
 
 /// `GET /health`.
 pub async fn health(State(state): State<AppState>) -> (StatusCode, Json<Health>) {
-    let report = Health::current(&Config::from_env(), state.upstream_base());
+    let report = Health::current(
+        &Config::from_env(),
+        state.upstream_base(),
+        state.ccr_store_kind(),
+    );
     (report.status_code(), Json(report))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::CcrStoreKind;
 
     #[test]
     fn health_reports_the_relays_upstream_not_the_configured_one() {
@@ -114,7 +146,7 @@ mod tests {
         // relay. Reporting the configured value confirmed a change that had not
         // happened, so the fields are deliberately driven from different sources here.
         let config = Config::default();
-        let health = Health::current(&config, Some("http://relay.example"));
+        let health = Health::current(&config, Some("http://relay.example"), CcrStoreKind::Memory);
 
         assert_eq!(health.status, "ok");
         assert_eq!(health.upstream, "http://relay.example");
@@ -134,21 +166,27 @@ mod tests {
     fn a_proxy_with_no_relay_names_no_upstream() {
         // Better than reporting a URL nothing will use. The status and code already say
         // degraded; this stops the body from contradicting them.
-        let degraded = Health::current(&Config::default(), None);
+        let degraded = Health::current(&Config::default(), None, CcrStoreKind::Memory);
 
         assert_eq!(degraded.upstream, "none");
     }
 
     #[test]
     fn health_serializes_to_the_documented_shape() {
-        let json =
-            serde_json::to_value(Health::current(&Config::default(), Some("http://x"))).unwrap();
+        let json = serde_json::to_value(Health::current(
+            &Config::default(),
+            Some("http://x"),
+            CcrStoreKind::Memory,
+        ))
+        .unwrap();
         for key in [
             "status",
             "version",
             "upstream",
             "compression_enabled",
             "relay_available",
+            "ccr_store",
+            "ccr_store_persistent",
         ] {
             assert!(json.get(key).is_some(), "missing {key}");
         }
@@ -162,7 +200,7 @@ mod tests {
         // Load balancers and orchestrators route traffic on this signal, so a proxy that
         // cannot serve a single request would keep being handed them, and the operator
         // debugging it would have a health check pointing them elsewhere.
-        let degraded = Health::current(&Config::default(), None);
+        let degraded = Health::current(&Config::default(), None, CcrStoreKind::Memory);
 
         assert_eq!(degraded.status, "degraded");
         assert!(!degraded.relay_available);
@@ -173,7 +211,7 @@ mod tests {
     fn a_working_proxy_still_reports_ok_with_a_200() {
         // The other half: a status that is always "degraded" is as useless as one that is
         // always "ok".
-        let healthy = Health::current(&Config::default(), Some("http://x"));
+        let healthy = Health::current(&Config::default(), Some("http://x"), CcrStoreKind::Memory);
 
         assert_eq!(healthy.status, "ok");
         assert_eq!(healthy.status_code(), StatusCode::OK);

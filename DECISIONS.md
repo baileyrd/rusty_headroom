@@ -974,3 +974,52 @@ mutation reads exactly like a passing one if only the test result is checked.
 **Would change if:** the enrichment moves ahead of the compression decision, at which point
 an enriched request is no longer a passthrough in any sense and the counter needs splitting
 rather than relabelling.
+
+---
+
+## D33 — `/health` reports the CCR store that was built, not the one configured
+
+**Decision:** add `ccr_store` and `ccr_store_persistent` to `/health`, sourced from the
+store `AppState` actually constructed. This changes `Health::current`'s signature — see
+"the public-signature call" below.
+
+`Config::ccr_store` falls back to memory on any failure and logs a warning. That trade is
+right and is not what changed: CCR is a recovery path, and refusing to start costs the
+customer their whole service rather than one retrievable block. What was missing is the
+*report*.
+
+Measured, with `HEADROOM_CCR_DIR` pointed at a path that cannot be opened:
+
+| configuration | value survives a store rebuild |
+| --- | --- |
+| unopenable directory | **no** |
+| usable directory | yes |
+| unset | no |
+
+`/health` in the first case answered
+`{"status":"ok","version":"0.1.0","upstream":"http://x","compression_enabled":true,"relay_available":true}`
+— no mention of a store at all. So the proxy relays, compresses, and hands the model
+`<<ccr:HASH>>` markers that stop resolving the moment the process restarts, while every
+self-report says it is healthy. README.md's promise for CCR is that compression is "a bet
+that can be unwound"; in that state it quietly is not.
+
+**Two fields, not one.** `"memory"` is the correct answer for a default install and a
+silent failure for a configured one, and a single field cannot separate them.
+`ccr_store_persistent` is the one to alert on, and `Config::persistent_store_requested`
+records the *request* so the mismatch is expressible at all.
+
+**The kind travels as a value, not as a second read of the configuration.** That is the
+lesson `Health::upstream` already carries in its own doc — a downstream reader of the
+config reports what was asked for, which is precisely the case where the operator needs to
+be told it did not happen. Re-deriving it in `health.rs` would have reproduced the exact
+bug being fixed.
+
+**The public-signature call.** `Health::current` gained a third parameter, which the parity
+loop's own rules say to stop and ask about. Logged rather than asked, under the standing
+instruction to keep going and record decisions. The blast radius is small and was checked
+first: six call sites, all in this repository, five of them tests. The alternatives were
+worse — a second constructor leaves `current` reporting `"unknown"` forever, and a
+process-global set at construction hides the dependency the parameter makes obvious.
+
+**Would change if:** a caller outside this repository turns up using `Health::current`. It
+would want the old signature back and a builder instead.

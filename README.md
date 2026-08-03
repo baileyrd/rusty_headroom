@@ -126,6 +126,14 @@ said zero*, and the metric cannot tell them apart:
 Neither is something a proxy can fix from where it sits, and substituting a guess for
 either would corrupt the one number the whole thing exists to move.
 
+`GET /health` reports `ccr_store` (`memory`, `file` or `redis`) and
+`ccr_store_persistent`. Two fields rather than one because `memory` means two different
+things: the default nobody changed, and a configured store that could not be opened. The
+second case is the one worth alerting on — a `HEADROOM_CCR_DIR` the process cannot open
+falls back to memory and logs a warning, after which the proxy keeps relaying, keeps
+compressing, and keeps handing the model `<<ccr:HASH>>` markers that no longer survive a
+restart. Compression is a bet that can be unwound; in that state it quietly is not.
+
 `POST /admin/runtime-env` (loopback only) retunes a running proxy. Settings marked **no**
 above take effect on the next request; the rest are stored and named under `needs_restart`
 rather than letting you believe the change took.
