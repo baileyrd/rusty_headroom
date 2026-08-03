@@ -70,6 +70,13 @@ references *outside the defining file* — found them, and they are now wired:
 | Y1–Y3 (`memory`) | #73 |
 | X15, I7 normalization (`stabilization`) | #75 |
 
+**A blind spot in that audit, found later.** It asked for references *outside the defining
+file*, and `CodeCompressor` had them — from the CLI and the MCP server. Reachable from
+*somewhere* is not reachable from the *request path*: the proxy held no code compressor at
+all, so every source file a tool returned was forwarded whole while `headroom compress`
+reported a saving for the same content. Closed by #81, which also collapsed the three
+copies of the routing decision into one.
+
 The audit is now clean: every remaining public symbol is either reached from a request,
 dispatched from the CLI (all commands verified against `main.rs`), listed in the MCP tool
 table (all three), used internally by a compressor that is itself reached, or documented
@@ -142,9 +149,9 @@ Every row is a gap: the target repo is empty, so all rows are new implementation
 | C8 | `DiffCompressor` | fn | spec | all | `transforms/diff_compressor.rs` | no | M | Elide unchanged context, keep hunk headers. Depends on D2. Done. |
 | C9 | `SearchCompressor` | fn | spec | all | README "Code search 92%" | no | M | Grep/ripgrep-style result sets — the headline benchmark case. Done. |
 | C10 | `TextCrusher` | fn | spec | all | `docs/text-and-logs.mdx` | no | M | Lossless plain-text pass (whitespace, repetition). Done — `TextCrusher` (lossless) and `TextSummarizer` (lossy), split per I10. |
-| C11 | `CodeCompressor` core + Rust/Python | fn | spec | all | `docs/code-compression.mdx` | no | L | AST-aware skeletonization. **Split** — core trait + 2 languages. Done — heuristic skeletonizer, not tree-sitter; see DECISIONS D3. |
-| C12 | `CodeCompressor` JS/TS + Go | fn | spec | all | `docs/code-compression.mdx` | no | M | Depends on C11. Done — heuristic; see DECISIONS D3. |
-| C13 | `CodeCompressor` Java + C/C++ + Perl | fn | spec | all | `docs/code-compression.mdx` | no | M | Depends on C11. Perl has no tree-sitter-grade grammar — may degrade to heuristic. Done — heuristic; see DECISIONS D3. |
+| C11 | `CodeCompressor` core + Rust/Python | fn | spec | all | `docs/code-compression.mdx` | no | L | AST-aware skeletonization. **Split** — core trait + 2 languages. Done — heuristic skeletonizer, not tree-sitter; see DECISIONS D3. Registered in `Orchestrator` and reached from the request path — it was not, until #81. |
+| C12 | `CodeCompressor` JS/TS + Go | fn | spec | all | `docs/code-compression.mdx` | no | M | Depends on C11. Done — heuristic; see DECISIONS D3. Reached via C11's registration. |
+| C13 | `CodeCompressor` Java + C/C++ + Perl | fn | spec | all | `docs/code-compression.mdx` | no | M | Depends on C11. Perl has no tree-sitter-grade grammar — may degrade to heuristic. Done — heuristic; see DECISIONS D3. Reached via C11's registration. |
 
 ### Pipeline
 

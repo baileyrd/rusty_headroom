@@ -13,11 +13,7 @@ use headroom_core::detection::{detect, AdaptiveSizer, ContentType};
 use headroom_core::pipeline::Orchestrator;
 use headroom_core::telemetry::{AggregationKey, Aggregator, StructureHash, Telemetry};
 use headroom_core::tokenizer::{HeuristicEstimator, Tokenizer};
-use headroom_core::transform::Transform;
-use headroom_core::{
-    validated_apply, Block, BlockKind, CodeCompressor, DiffCompressor, LogCompressor,
-    SearchCompressor, SmartCrusher,
-};
+use headroom_core::{validated_apply, Block, BlockKind, SmartCrusher};
 
 /// Reads all of stdin.
 fn read_stdin() -> anyhow::Result<String> {
@@ -26,42 +22,28 @@ fn read_stdin() -> anyhow::Result<String> {
     Ok(buffer)
 }
 
-/// Picks the compressor for `content`, if any handles it.
-fn route<'a>(
-    content: &str,
-    smart: &'a SmartCrusher,
-    log: &'a LogCompressor,
-    search: &'a SearchCompressor,
-    diff: &'a DiffCompressor,
-    code: &'a CodeCompressor,
-) -> Option<&'a dyn Transform> {
-    match detect(content.as_bytes()).content_type {
-        ContentType::Json => Some(smart),
-        ContentType::Log => Some(log),
-        ContentType::SearchResults => Some(search),
-        ContentType::Diff => Some(diff),
-        ContentType::Code => Some(code),
-        _ => None,
-    }
-}
-
 /// `headroom compress`.
 pub fn compress(dry_run: bool) -> anyhow::Result<()> {
     let content = read_stdin()?;
-    let store = Arc::new(InMemoryCcrStore::new());
 
-    let smart = SmartCrusher::new(store.clone());
-    let log = LogCompressor::new(store.clone());
-    let search = SearchCompressor::new(store.clone());
-    let diff = DiffCompressor::new(store.clone());
-    let code = CodeCompressor::new(store);
+    // Routed through the same `Orchestrator` the proxy uses. This command used to carry
+    // its own routing table, and the two drifted: the orchestrator had no code arm, so
+    // `--dry-run` reported a saving on source files that the proxy would never deliver.
+    // A prediction that disagrees with the thing it predicts is worse than no prediction.
+    let orchestrator = Orchestrator::new(Arc::new(InMemoryCcrStore::new()));
+
+    // Pay-as-you-go: this is the operator compressing their own content on their own
+    // machine, not a customer's credential deciding what is permitted. The proxy applies
+    // the real policy to real traffic.
+    let policy = CompressionPolicy::for_mode(AuthMode::PayAsYouGo);
+    let model = "";
 
     let estimator = HeuristicEstimator::new();
     let before = estimator.count(&content);
     let detection = detect(content.as_bytes());
 
     let mut block = Block::new(BlockKind::Text, content.clone());
-    let compressed = match route(&content, &smart, &log, &search, &diff, &code) {
+    let compressed = match orchestrator.transform_for(&content, policy, model) {
         Some(transform) => validated_apply(transform, &mut block, &estimator)
             .map(|outcome| outcome.is_compressed())
             .unwrap_or(false),
@@ -203,23 +185,55 @@ pub fn env(proxy: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    /// The orchestrator this command routes through, as `compress` builds it.
+    fn orchestrator() -> Orchestrator {
+        Orchestrator::new(Arc::new(InMemoryCcrStore::new()))
+    }
+
+    fn payg() -> CompressionPolicy {
+        CompressionPolicy::for_mode(AuthMode::PayAsYouGo)
+    }
+
     #[test]
     fn routing_matches_the_detected_type() {
-        let store = Arc::new(InMemoryCcrStore::new());
-        let smart = SmartCrusher::new(store.clone());
-        let log = LogCompressor::new(store.clone());
-        let search = SearchCompressor::new(store.clone());
-        let diff = DiffCompressor::new(store.clone());
-        let code = CodeCompressor::new(store);
-
         let json = r#"[{"a":1},{"a":2}]"#;
         assert_eq!(
-            route(json, &smart, &log, &search, &diff, &code).map(|t| t.name()),
+            orchestrator()
+                .transform_for(json, payg(), "")
+                .map(|t| t.name()),
             Some("smart_crusher")
         );
 
         let prose = "just some ordinary words with nothing structural about them";
-        assert!(route(prose, &smart, &log, &search, &diff, &code).is_none());
+        assert!(orchestrator().transform_for(prose, payg(), "").is_none());
+    }
+
+    #[test]
+    fn code_routes_to_a_compressor_here_exactly_as_it_does_in_the_proxy() {
+        // This command exists to predict what the proxy will do. It used to carry its
+        // own routing table, which had a code arm the orchestrator did not — so
+        // `--dry-run` reported a saving on source files that the proxy never delivered.
+        // A prediction that disagrees with the thing it predicts is worse than none.
+        let code = concat!(
+            "pub fn handle(input: &str) -> Result<String, Error> {\n",
+            "    let parsed = parse(input)?;\n",
+            "    Ok(render(&parsed))\n",
+            "}\n"
+        )
+        .repeat(80);
+
+        assert_eq!(
+            detect(code.as_bytes()).content_type,
+            ContentType::Code,
+            "the fixture is not detected as code, so this proves nothing"
+        );
+        assert_eq!(
+            orchestrator()
+                .transform_for(&code, payg(), "")
+                .map(|t| t.name()),
+            Some("code_compressor"),
+            "code reached no compressor"
+        );
     }
 
     #[test]

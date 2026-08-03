@@ -22,13 +22,10 @@ use std::sync::Arc;
 /// command confidently reporting a tool that no longer exists.
 pub const TOOL_NAMES: [&str; 3] = ["headroom_compress", "headroom_retrieve", "headroom_stats"];
 
+use headroom_core::auth_mode::{AuthMode, CompressionPolicy};
 use headroom_core::ccr::{handle_retrieve, CcrStore, Retrieval};
-use headroom_core::detection::{detect, ContentType};
+use headroom_core::pipeline::Orchestrator;
 use headroom_core::tokenizer::{HeuristicEstimator, Tokenizer};
-use headroom_core::transform::Transform;
-use headroom_core::{
-    CodeCompressor, DiffCompressor, LogCompressor, SearchCompressor, SmartCrusher,
-};
 use serde_json::{json, Value};
 
 use crate::protocol::{failure, success, tool_result, ErrorCode, Request, PROTOCOL_VERSION};
@@ -49,11 +46,15 @@ struct Stats {
 /// An MCP server over the Headroom compressors.
 pub struct McpServer {
     store: Arc<dyn CcrStore>,
-    smart_crusher: SmartCrusher,
-    log: LogCompressor,
-    search: SearchCompressor,
-    diff: DiffCompressor,
-    code: CodeCompressor,
+    /// The same routing brain the proxy uses.
+    ///
+    /// This server used to hold its own compressor set and its own content-type match.
+    /// Three copies of that decision existed — here, in the CLI, and in `headroom-core`
+    /// — and they drifted: the core's table had no code arm, so the proxy forwarded
+    /// source files uncompressed while this tool compressed them. A model asking
+    /// `headroom_compress` what it would save should get the number the proxy would
+    /// actually deliver.
+    orchestrator: Orchestrator,
     stats: Stats,
 }
 
@@ -61,11 +62,7 @@ impl McpServer {
     /// Creates a server backed by `store`.
     pub fn new(store: Arc<dyn CcrStore>) -> Self {
         Self {
-            smart_crusher: SmartCrusher::new(store.clone()),
-            log: LogCompressor::new(store.clone()),
-            search: SearchCompressor::new(store.clone()),
-            diff: DiffCompressor::new(store.clone()),
-            code: CodeCompressor::new(store.clone()),
+            orchestrator: Orchestrator::new(store.clone()),
             store,
             stats: Stats::default(),
         }
@@ -163,14 +160,11 @@ impl McpServer {
 
     /// Compresses `content`, or explains why it was left alone.
     fn compress(&self, content: &str) -> Value {
-        let transform: Option<&dyn Transform> = match detect(content.as_bytes()).content_type {
-            ContentType::Json => Some(&self.smart_crusher),
-            ContentType::Log => Some(&self.log),
-            ContentType::SearchResults => Some(&self.search),
-            ContentType::Diff => Some(&self.diff),
-            ContentType::Code => Some(&self.code),
-            _ => None,
-        };
+        // Pay-as-you-go: a tool call is the caller compressing their own content
+        // deliberately, not a relayed request whose credential decides what is
+        // permitted. The proxy applies the real policy to real traffic.
+        let policy = CompressionPolicy::for_mode(AuthMode::PayAsYouGo);
+        let transform = self.orchestrator.transform_for(content, policy, "");
 
         let estimator = HeuristicEstimator::new();
         let before = estimator.count(content);

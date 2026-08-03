@@ -25,7 +25,7 @@ use crate::telemetry::{AggregationKey, Recommendations, StructureHash};
 use crate::tokenizer::registry::Registry;
 use crate::tokenizer::Tokenizer;
 use crate::transform::Transform;
-use crate::{DiffCompressor, LogCompressor, SearchCompressor, SmartCrusher};
+use crate::{CodeCompressor, DiffCompressor, LogCompressor, SearchCompressor, SmartCrusher};
 
 /// What the orchestrator decided to do with a block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +103,7 @@ pub struct Orchestrator {
     log: LogCompressor,
     search: SearchCompressor,
     diff: DiffCompressor,
+    code: CodeCompressor,
     reformatter: Reformatter,
     limits: Limits,
     tokenizers: Registry,
@@ -121,7 +122,8 @@ impl Orchestrator {
             smart_crusher: SmartCrusher::new(store.clone()),
             log: LogCompressor::new(store.clone()),
             search: SearchCompressor::new(store.clone()),
-            diff: DiffCompressor::new(store),
+            diff: DiffCompressor::new(store.clone()),
+            code: CodeCompressor::new(store),
             reformatter: Reformatter::new(),
             limits: Limits::default(),
             // The exact OpenAI counters are registered by default. They are already
@@ -211,29 +213,26 @@ impl Orchestrator {
             };
         }
 
-        match content_type {
-            ContentType::Json
-            | ContentType::Log
-            | ContentType::SearchResults
-            | ContentType::Diff => {
-                // Checked last, so a shape only reaches this gate if a compressor would
-                // otherwise have run. An unmeasured shape is always attempted: skipping
-                // it would never gather the data that would let it be skipped for a
-                // reason.
-                let key = AggregationKey::new(
-                    AuthMode::PayAsYouGo,
-                    model,
-                    StructureHash::of(content, content_type),
-                );
-                if self.recommendations.worth_compressing(&key) {
-                    Routing::Compress { content_type }
-                } else {
-                    Routing::MeasuredUseless { content_type }
-                }
-            }
-            other => Routing::NoCompressor {
-                content_type: other,
-            },
+        // Asked of `for_type` rather than restated here. This used to be a second list
+        // of compressible content types, and the two drifted the moment one gained an
+        // arm the other did not — which is how the proxy came to forward every source
+        // file uncompressed while still detecting it as code. One list, one answer.
+        if self.for_type(content_type).is_none() {
+            return Routing::NoCompressor { content_type };
+        }
+
+        // Checked last, so a shape only reaches this gate if a compressor would
+        // otherwise have run. An unmeasured shape is always attempted: skipping it
+        // would never gather the data that would let it be skipped for a reason.
+        let key = AggregationKey::new(
+            AuthMode::PayAsYouGo,
+            model,
+            StructureHash::of(content, content_type),
+        );
+        if self.recommendations.worth_compressing(&key) {
+            Routing::Compress { content_type }
+        } else {
+            Routing::MeasuredUseless { content_type }
         }
     }
 
@@ -262,6 +261,12 @@ impl Orchestrator {
             ContentType::Log => Some(&self.log),
             ContentType::SearchResults => Some(&self.search),
             ContentType::Diff => Some(&self.diff),
+            // Code was missing here until gap row C11-C13's wiring was checked, so the
+            // proxy forwarded every source file uncompressed while `headroom compress`
+            // — which carried its own routing table — reported a saving for the same
+            // content. Code is the largest category of agent tool-result traffic, so the
+            // omission was not a small one.
+            ContentType::Code => Some(&self.code),
             _ => None,
         }
     }
