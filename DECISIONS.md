@@ -763,3 +763,54 @@ dropping connections. Then `forward` takes the base per request, `AppState` keep
 explicit override for tests rather than an implicit one, and the self-referential check in
 `admin` becomes the only thing standing between a live change and a proxy pointed at
 itself — which is worth designing deliberately rather than inheriting.
+
+## D29 — the estimator's "never under-counts" claim is corrected, not rescued
+**2026-08-03**
+
+Four files stated that `HeuristicEstimator` never under-counts, and invariant I5's safety
+rested on it: `validated_apply` discards a compression whose result is not smaller *in
+estimated tokens*, so an estimator that under-counts the compressed form forwards a
+"compression" that grew the prompt. The module's own header called that failure "much
+worse" than the alternative, and silent.
+
+It had never been checked against the tokenizer it approximates. Measured against
+`gpt-4o`, it under-counted four realistic content classes:
+
+| content | heuristic | tiktoken | ratio |
+| --- | --- | --- | --- |
+| log lines | 1051 | 1139 | 0.92 |
+| hex digests | 183 | 220 | 0.83 |
+| base64 | 220 | 421 | 0.52 |
+| whitespace runs | 1 | 501 | 0.00 |
+
+Logs mattered most: a first-class content type with its own compressor, under-counted by
+8%, so a log compression measuring a 5% saving could have grown the real prompt and been
+forwarded anyway.
+
+**Fixed, for realistic content.** Digits are charged separately (they group in threes at
+most, and timestamps make a log line mostly digits); alphanumeric runs longer than a word
+are charged at the dense rate measured for base64; whitespace runs are sized rather than
+counted, splitting uniform runs — which merge, 64 spaces being one token — from mixed
+runs, which do not.
+
+**Not fixed, and not fixable this way.** Random alphanumeric strings still under-count:
+25.8% of 12,000 generated inputs, worst `"EYM3Dgnc6"` at 3 estimated against 7 actual.
+`"Dgnc"` and `"Word"` are the same string to a classifier that cannot consult the merge
+tables, and they cost 4 tokens and 1. Charging every short run at the dense rate would put
+ordinary prose at roughly eight times its true count and suppress compression everywhere,
+which is the failure the estimator exists to avoid in the other direction.
+
+So the claim is corrected in all four places rather than softened, the realistic property
+is pinned by a differential test, and the remaining exposure is pinned by a bound that can
+only be tightened. A caller needing a true bound wants an exact tokenizer — every OpenAI
+family resolves to one, and `is_exact_for` reports which it got.
+
+**A first attempt over-corrected**, and the second test caught it: charging whitespace by
+length alone put 24 spaces of indentation at 12 tokens against an actual 1, a 3.3x
+over-count on exactly the content this proxy compresses. A safety fix that suppresses
+compression everywhere is not a safety fix.
+
+**Would change if:** an exact tokenizer for the Anthropic families becomes available, at
+which point the fallback stops carrying I5 for the traffic this proxy mostly sees. Failing
+that, the honest next step is measuring how often real agent traffic contains the shapes
+that under-count, rather than assuming it does not.

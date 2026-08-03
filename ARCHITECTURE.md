@@ -30,7 +30,7 @@ The proxy, the CLI, the MCP server and the Python module are adapters over it.
 | --- | --- | --- |
 | `Transform` | `SmartCrusher`, `LogCompressor`, `SearchCompressor`, `DiffCompressor`, `CodeCompressor`, `TextSummarizer`, `Reformatter` | Split into `LossyTransform` and `LosslessTransform` so I10 can gate them separately |
 | `CcrStore` | `InMemoryCcrStore`, `FileCcrStore`, `RedisCcrStore` (feature-gated) | Chosen by configuration; Redis exists for multi-worker retrieval (D22) |
-| `Tokenizer` | `HeuristicEstimator`, `TiktokenCounter` | Resolved per model by `tokenizer::Registry`; the heuristic never under-counts |
+| `Tokenizer` | `HeuristicEstimator`, `TiktokenCounter` | Resolved per model by `tokenizer::Registry`. The heuristic over-counts on realistic content, pinned by a differential test against `gpt-4o`; it under-counts random alphanumeric strings, which no character-class heuristic can fix (D29) |
 | `Telemetry` | the proxy's `Metrics` | Every method returns `()` — observation cannot influence a decision (I9) |
 
 **One routing table.** `pipeline::Orchestrator` owns the decision of what compresses what.

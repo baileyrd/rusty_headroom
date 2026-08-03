@@ -11,14 +11,22 @@
 //! compression against a token count, so a caller with no tokenizer has no way to
 //! check that compression helped, and the honest options are to skip compression
 //! entirely or to skip the check. Both are worse than counting with an approximation
-//! that is documented never to under-count.
+//! that over-counts on the content this proxy actually sees.
 //!
-//! # Never under-count
+//! # Which direction to be wrong in
 //!
 //! [`HeuristicEstimator`] over-counts by design. Over-counting costs a missed
 //! compression — visible, cheap, and self-correcting. Under-counting means a payload
 //! that grew is measured as having shrunk, so I5's safety net passes something that
 //! made the request *more* expensive. That failure is silent and compounds.
+//!
+//! This module used to claim the fallback never under-counts. Measured against `gpt-4o`,
+//! that is false for random alphanumeric strings, and cannot be fixed by a character-class
+//! heuristic — see [`HeuristicEstimator`] for the numbers and D29 for the decision. It
+//! holds on every realistic content class, which is pinned by a differential test.
+//!
+//! `is_exact_for` is how a caller finds out which it got. Every OpenAI family resolves to
+//! a real tokenizer; everything else, Anthropic included, gets the estimate.
 //!
 //! Any tokenizer added here has to hold the same line, which is why
 //! [`Tokenizer::is_exact`] exists: it lets a caller tell "this is the real count" from
