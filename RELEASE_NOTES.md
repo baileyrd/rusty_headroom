@@ -6,6 +6,29 @@ the crate starts publishing releases.
 
 ---
 
+## An edit below the frozen floor cannot reach the rewriter, whoever made it
+**2026-08-03** · I2 made structural rather than distributed across three call sites
+
+- Three things write into `edits`: the live-zone loop, memory injection and the verbosity
+  note. The first is bounded by `live_zone`; the other two check the floor **because two
+  separate commits went and added it**, after both were found relying on an early return in
+  another crate that exists for an unrelated reason.
+- A fourth producer would arrive with the same gap and nothing to catch it.
+- **Added:** one `retain` before the rewrite loop. An edit below the floor is dropped and
+  logged at `error` — reaching there means a producer has a bug, and a silently discarded
+  edit would present as compression mysteriously not happening. Not a panic: this is a
+  customer's request, and refusing to serve it is worse than forwarding it uncompressed.
+- Same shape as I8, which `live_zone` and `apply_guarded` both enforce — removing either
+  alone still leaves signed content protected.
+- **Verified by making a producer misbehave**, not by inspection. A mutated `inject_append`
+  that ignores the floor and targets message 0 produced the bad edit, and the proxy logged
+  `an edit targeted a frozen message and was discarded … dropped=1 frozen=1` with the
+  cached block byte-identical.
+- **My first two attempts at that verification proved nothing** and I nearly reported them
+  as success. The forced edit sat after an early `?` that fired first, so the producer never
+  reached it — "frozen block unchanged" was true for a reason that had nothing to do with
+  the backstop. A probe at the function entry is what showed the difference.
+
 ## The output shaper had the same missing frozen check
 **2026-08-03** · found by looking for the sibling, not by a failure
 

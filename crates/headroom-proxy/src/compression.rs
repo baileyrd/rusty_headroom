@@ -342,6 +342,36 @@ pub fn compress_dialect<'a>(
         }
     }
 
+    // Invariant I2, checked once for every edit regardless of which producer made it.
+    //
+    // # Why this is here as well as at each call site
+    //
+    // Three things write into `edits`: the live-zone loop, memory injection and the
+    // verbosity note. The first is bounded by `live_zone` and the other two now check the
+    // floor themselves — but they check it because two separate commits went and added it,
+    // after both were found relying on the `zone.is_empty()` early return above, which
+    // exists for an unrelated reason.
+    //
+    // A fourth producer would arrive with the same gap and nothing to catch it. This makes
+    // the invariant structural: an edit below the floor cannot reach the rewriter, whoever
+    // produced it. Same shape as I8, which `live_zone` and `apply_guarded` both enforce —
+    // removing either alone still leaves signed content protected.
+    //
+    // Logged at `error` rather than dropped quietly: reaching here means a producer has a
+    // bug, and a silently discarded edit would present as compression mysteriously not
+    // happening. Not a panic — this is a customer's request, and refusing to serve it is a
+    // worse outcome than forwarding it uncompressed.
+    let before_floor = edits.len();
+    edits.retain(|(message, _, _)| *message >= frozen);
+    if edits.len() != before_floor {
+        tracing::error!(
+            dropped = before_floor - edits.len(),
+            frozen,
+            "an edit targeted a frozen message and was discarded; this is a bug in \
+             whatever produced it, not in the request"
+        );
+    }
+
     if edits.is_empty() {
         return Cow::Borrowed(body);
     }
