@@ -46,6 +46,7 @@ pub mod conversation;
 pub mod detection;
 pub mod error;
 pub mod live_zone;
+pub mod smart_crusher;
 pub mod tokenizer;
 pub mod transform;
 pub mod validate;

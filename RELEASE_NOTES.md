@@ -6,6 +6,35 @@ the crate starts publishing releases.
 
 ---
 
+## SmartCrusher foundations — config and structural IR
+**2026-08-03** · closes [#15](https://github.com/baileyrd/rusty_headroom/issues/15)
+
+- **Added:** `CrushConfig` — tuning for JSON compression, with documented defaults
+  aimed at the shape that dominates agent tool output: an array of many
+  near-identical records.
+- **Added:** `Document` and `Shape` — the IR that analysis, planning, and formatting
+  share. The document is order- and literal-preserving `serde_json::Value`; the shape
+  is a structural summary derived from it. Keeping them separate means a planning bug
+  cannot corrupt data.
+- **Design note:** object fields are held in `Vec<(String, Shape)>`, not a
+  `BTreeMap`. A `BTreeMap` would be deterministic but would silently sort keys,
+  changing the bytes sent upstream. The `Vec` is deterministic *and* order-preserving.
+  No `HashMap` appears on any path influencing output (invariant I4).
+- **Design note:** an array with one odd record out is treated as heterogeneous.
+  Calling it homogeneous would let the record that differs be summarized away as
+  ordinary — and that record is usually the one worth reading.
+- **Design note:** `CrushConfig::max_depth` bounds analysis recursion. Tool output is
+  not trusted input, and unbounded recursion over it is a stack overflow waiting to
+  happen.
+- **Known limitation:** compact JSON round-trips byte-exactly, but insignificant
+  whitespace does not — pretty-printed input comes back compact. Safe, because this
+  path is only reached for documents SmartCrusher is actually rewriting; a declined
+  document is restored from the caller's untouched original by the I5 fallback, which
+  never re-serializes.
+- **Known limitation:** foundations only. Analysis, statistics, outlier detection,
+  anchor selection, and the compaction formatter are still open, so no JSON is
+  actually compressed yet.
+
 ## Live-zone dispatcher (invariants I2, I3)
 **2026-08-03** · closes [#14](https://github.com/baileyrd/rusty_headroom/issues/14)
 
