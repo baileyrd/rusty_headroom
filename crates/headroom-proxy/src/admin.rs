@@ -330,6 +330,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retuning_one_setting_leaves_the_others_alone() {
+        let _guard = SERIAL.lock().await;
+        config::clear_overrides();
+
+        // The scenario this module opens by naming: "turning compression off during an
+        // incident should not cost" a restart. While `set_overrides` replaced rather than
+        // merged, any later retune of anything else silently turned it back on, and the
+        // response said only which name it had just applied.
+        //
+        // Measured against a running proxy before the fix: compression off forwarded
+        // 19500 bytes, then `{"HEADROOM_STABILIZE":"1"}` forwarded 1895 — compression
+        // back on, unasked, with `applied: ["HEADROOM_STABILIZE"]` as the only report.
+        call(Some("127.0.0.1:5555"), r#"{"HEADROOM_COMPRESSION":"0"}"#).await;
+        assert!(
+            !crate::Config::from_env().compression_enabled(),
+            "compression did not go off, so nothing below is being tested"
+        );
+
+        call(Some("127.0.0.1:5555"), r#"{"HEADROOM_STABILIZE":"1"}"#).await;
+
+        assert!(
+            !crate::Config::from_env().compression_enabled(),
+            "an unrelated retune silently re-enabled compression"
+        );
+        assert!(
+            config::overrides().contains_key(config::vars::STABILIZE),
+            "the new setting was lost instead, which is the same bug mirrored"
+        );
+
+        config::clear_overrides();
+    }
+
+    #[tokio::test]
+    async fn an_override_is_removed_by_sending_it_empty() {
+        let _guard = SERIAL.lock().await;
+        config::clear_overrides();
+
+        // The control for the test above, and the replacement for what `{}` used to do.
+        // Without a way to take one back, merging would be a trap rather than a fix.
+        call(
+            Some("127.0.0.1:5555"),
+            r#"{"HEADROOM_UPSTREAM":"http://example.invalid"}"#,
+        )
+        .await;
+        assert_eq!(
+            crate::Config::from_env().upstream(),
+            "http://example.invalid",
+            "the override never took, so clearing it proves nothing"
+        );
+
+        call(Some("127.0.0.1:5555"), r#"{"HEADROOM_UPSTREAM":""}"#).await;
+        assert_eq!(
+            crate::Config::from_env().upstream(),
+            config::DEFAULT_UPSTREAM,
+            "an emptied override did not fall back to the default"
+        );
+
+        config::clear_overrides();
+    }
+
+    #[tokio::test]
     async fn a_change_that_would_point_the_proxy_at_itself_is_refused() {
         let _guard = SERIAL.lock().await;
         // Through the handler, not through `preview_overrides` — the three unit tests

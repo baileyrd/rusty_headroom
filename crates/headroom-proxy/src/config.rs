@@ -155,12 +155,33 @@ fn setting(name: &str) -> Option<String> {
     env::var(name).ok()
 }
 
-/// Applies runtime overrides, replacing any previously set.
+/// Applies runtime overrides, merging them over any already in force.
 ///
 /// Returns the names that were accepted. Names outside the `HEADROOM_` namespace are
 /// rejected: this endpoint exists to retune the proxy, and letting it set arbitrary
 /// environment names would make it a general-purpose lever on the process for anyone
 /// who can reach it.
+///
+/// # Why merge, when this used to replace
+///
+/// [`preview_overrides`] merges — deliberately, and its doc says why: *"a call that sets
+/// only the upstream still has to be judged against whatever listen address is currently
+/// overridden."* While this replaced, the two modelled different configurations, so the
+/// check that runs before every apply was validating a configuration that never existed.
+///
+/// The operator-visible half was worse. Measured against a running proxy:
+///
+/// | step | response | forwarded |
+/// | --- | --- | --- |
+/// | `{"HEADROOM_COMPRESSION":"0"}` | `applied: [HEADROOM_COMPRESSION]` | 19500 bytes, compression off |
+/// | `{"HEADROOM_STABILIZE":"1"}` | `applied: [HEADROOM_STABILIZE]` | 1895 bytes, **compression back on** |
+///
+/// Nothing in the second response mentions that the first setting was dropped. That is
+/// the scenario [`crate::admin`] opens by naming — *"turning compression off during an
+/// incident should not cost"* a restart — undone by any later retune of anything else.
+///
+/// To remove one override, send it as an empty value; to drop all of them, use
+/// [`clear_overrides`]. Sending `{}` is now a no-op rather than an undocumented wipe.
 pub fn set_overrides(values: BTreeMap<String, String>) -> Vec<String> {
     let accepted: BTreeMap<String, String> = values
         .into_iter()
@@ -169,7 +190,7 @@ pub fn set_overrides(values: BTreeMap<String, String>) -> Vec<String> {
     let names = accepted.keys().cloned().collect();
 
     if let Ok(mut guard) = OVERRIDES.write() {
-        *guard = Some(accepted);
+        guard.get_or_insert_with(BTreeMap::new).extend(accepted);
     }
     names
 }

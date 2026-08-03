@@ -6,6 +6,37 @@ the crate starts publishing releases.
 
 ---
 
+## Retuning one setting silently reverted every other one
+**2026-08-03** · the admin endpoint's validator and its applier disagreed about what a call means
+
+- `preview_overrides` merges over the overrides in force — deliberately; its doc explains
+  that a call setting only the upstream must still be judged against the current listen
+  address. `set_overrides` **replaced**. The check that runs before every apply was
+  validating a configuration that would never exist.
+- Measured against a running proxy forwarding to a loopback capture upstream:
+
+  | step | response | forwarded |
+  | --- | --- | --- |
+  | `{"HEADROOM_COMPRESSION":"0"}` | `applied: [HEADROOM_COMPRESSION]` | 19500 bytes, compression off |
+  | `{"HEADROOM_STABILIZE":"1"}` | `applied: [HEADROOM_STABILIZE]` | 1895 bytes, **compression back on** |
+
+- That is the scenario `admin.rs` opens by naming — *"turning compression off during an
+  incident should not cost"* a restart — undone by the operator's next retune of anything
+  else, with no mention of it in the response. `/health` then said `compression_enabled:
+  true`, accurate and unasked for.
+- **Overrides now merge.** Send a setting as an empty value to take it back;
+  `clear_overrides` drops everything; `{}` is a no-op rather than an undocumented wipe.
+  Nothing depended on the old behaviour — one non-test caller, and the tests reset with
+  `clear_overrides`.
+- Verified on the release binary: the same three steps now hold both settings at once —
+  19500 off, 19606 off with `cache_control` present, 1895 on with `cache_control` still
+  present. Mutation back to replace fails `retuning_one_setting_leaves_the_others_alone`.
+- **Clean negative on the way past:** `STARTUP_ONLY` has been wrong once before, so all
+  three settings not on it were driven end to end in both directions. `HEADROOM_COMPRESSION`,
+  `HEADROOM_OUTPUT_SHAPER` and `HEADROOM_STABILIZE` are all genuinely live.
+
+---
+
 ## A CCR store that failed to open was invisible outside the logs
 **2026-08-03** · the proxy reported itself healthy while handing out markers it could not redeem
 
