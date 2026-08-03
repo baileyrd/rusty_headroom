@@ -6,6 +6,36 @@ the crate starts publishing releases.
 
 ---
 
+## Live-zone dispatcher (invariants I2, I3)
+**2026-08-03** · closes [#14](https://github.com/baileyrd/rusty_headroom/issues/14)
+
+- **Added:** `Conversation`, `Message`, and `Role` — the conversation model. `system`
+  and `tools` are exposed immutably and have no mutable accessor at all, so the
+  compression path cannot reach the cache hot zone. Invariant I2 becomes a function
+  that does not exist rather than a rule to remember.
+- **Added:** `live_zone()` — computes which blocks are eligible for compression by
+  scanning from the tail: the newest user message's text, plus the newest instance of
+  each tool-output shape.
+- **Added:** `BlockKind::FunctionCallOutput`, `LocalShellCallOutput`, and
+  `ApplyPatchCallOutput`, the OpenAI Responses output shapes named in the live-zone
+  definition.
+- **Design note:** the newest-instance rule is applied *on top of*
+  `frozen_message_count`, not instead of it. A message can sit above the floor and
+  still have been sent upstream already. Compressing too little costs tokens;
+  compressing too much invalidates a cached prefix, costing tokens *and* context,
+  silently. The failure directions are not symmetric.
+- **Bug found and fixed during development:** an early version treated "the latest
+  user text" as its own category, which reached back to prose several turns old
+  whenever the newest user message carried only tool results — the exact
+  cache-busting this module exists to prevent. Corrected to "the text of the latest
+  user message", with tests covering both directions.
+- **Known limitation:** `frozen_message_count` is supplied by the caller. Nothing
+  derives it from `cache_control` markers yet, so today every caller passes `0` and
+  the newest-instance rule is doing all the work.
+- **Known limitation:** no compressor is wired to the dispatcher yet. It computes the
+  eligible set and applies a closure; routing to type-aware compressors arrives with
+  the pipeline orchestrator.
+
 ## PR #16 — Token validation with fallback to the original (invariant I5)
 **2026-08-03** · [#16](https://github.com/baileyrd/rusty_headroom/pull/16) · closes [#8](https://github.com/baileyrd/rusty_headroom/issues/8)
 

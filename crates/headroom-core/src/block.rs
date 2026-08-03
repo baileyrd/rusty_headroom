@@ -20,6 +20,22 @@ pub enum BlockKind {
     Text,
     /// The result of a tool call, returned to the model.
     ToolResult,
+    /// The output of a function call, in the OpenAI Responses item shape.
+    ///
+    /// Semantically the same thing as [`BlockKind::ToolResult`] — bulky text coming
+    /// back from a tool — but a distinct item type on the wire, so the live-zone
+    /// dispatcher has to recognize it by name.
+    FunctionCallOutput,
+    /// The output of a local shell call, in the OpenAI Responses item shape.
+    ///
+    /// Note this is the *output*. The corresponding `local_shell_call.action.command`
+    /// argv array is passthrough-only and is not modeled as a compressible block.
+    LocalShellCallOutput,
+    /// The output of an apply-patch call, in the OpenAI Responses item shape.
+    ///
+    /// The output is compressible; the V4A patch body in the *call* is not, and is
+    /// not modeled here.
+    ApplyPatchCallOutput,
     /// A tool invocation emitted by the model.
     ToolUse,
     /// Extended-thinking content carrying a provider `signature`.
@@ -58,7 +74,29 @@ impl BlockKind {
 
     /// Whether a transform may ever be offered this block.
     pub fn is_compressible(self) -> bool {
-        matches!(self, Self::Text | Self::ToolResult)
+        matches!(
+            self,
+            Self::Text
+                | Self::ToolResult
+                | Self::FunctionCallOutput
+                | Self::LocalShellCallOutput
+                | Self::ApplyPatchCallOutput
+        )
+    }
+
+    /// Whether this block carries output returned from a tool.
+    ///
+    /// Tool output is where the tokens actually are — a directory listing, a test
+    /// run, a search result set. It is the primary target of compression, and the
+    /// live zone is defined largely in terms of it.
+    pub fn is_tool_output(self) -> bool {
+        matches!(
+            self,
+            Self::ToolResult
+                | Self::FunctionCallOutput
+                | Self::LocalShellCallOutput
+                | Self::ApplyPatchCallOutput
+        )
     }
 
     /// A stable identifier for telemetry and error messages.
@@ -66,6 +104,9 @@ impl BlockKind {
         match self {
             Self::Text => "text",
             Self::ToolResult => "tool_result",
+            Self::FunctionCallOutput => "function_call_output",
+            Self::LocalShellCallOutput => "local_shell_call_output",
+            Self::ApplyPatchCallOutput => "apply_patch_call_output",
             Self::ToolUse => "tool_use",
             Self::Thinking => "thinking",
             Self::RedactedThinking => "redacted_thinking",

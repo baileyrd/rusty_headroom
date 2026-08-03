@@ -42,14 +42,18 @@
 
 pub mod block;
 pub mod ccr;
+pub mod conversation;
 pub mod detection;
 pub mod error;
+pub mod live_zone;
 pub mod tokenizer;
 pub mod transform;
 pub mod validate;
 
 pub use block::{Block, BlockKind};
 pub use ccr::{CcrStore, ContentHash};
+pub use conversation::{Conversation, Message, Role};
 pub use error::{Declined, Error, Result};
+pub use live_zone::{live_zone, LiveZone, Location};
 pub use transform::{LosslessTransform, LossyTransform, Transform};
 pub use validate::{validated_apply, Outcome};
