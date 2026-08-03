@@ -6,6 +6,22 @@ the crate starts publishing releases.
 
 ---
 
+## The output shaper had the same missing frozen check
+**2026-08-03** · found by looking for the sibling, not by a failure
+
+- `output_shaping::verbosity_append` is structurally identical to the `inject_append` fixed
+  in the previous PR: find the newest user message, find its newest text block, append. It
+  had **no frozen-floor check either**, and sits three lines away in `compress_dialect`.
+- Same incidental protection, same fragility — the `zone.is_empty()` early return in
+  another crate, whose stated reason is that there is nothing to compress.
+- Worth noting it is a *separate* opt-in: `HEADROOM_OUTPUT_SHAPER` is independent of
+  `HEADROOM_MEMORY`, so a deployment could have this path live with the other one off.
+- **Fixed** the same way: `frozen` is a parameter, and a message below the floor is
+  refused. Two tests, including that a live message still gets the note.
+- Verified by removing the guard and watching `appended below a floor of 3`.
+- The lesson is the finding: when a guard is missing in one place, the thing to do next is
+  look for its siblings. This one cost a grep.
+
 ## Memory injection was kept out of the frozen prefix by accident
 **2026-08-03** · no violation found — the guard was in another crate, for another reason
 

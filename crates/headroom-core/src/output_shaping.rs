@@ -211,6 +211,7 @@ fn newest_user_text(conversation: &Conversation) -> Option<String> {
 pub fn verbosity_append(
     conversation: &Conversation,
     verbosity: Verbosity,
+    frozen: usize,
 ) -> Option<(usize, usize, String)> {
     let note = verbosity.note()?;
 
@@ -220,6 +221,19 @@ pub fn verbosity_append(
         .enumerate()
         .rev()
         .find(|(_, message)| message.role() == crate::conversation::Role::User)?;
+
+    // Invariant I2, the same check `memory::inject_append` carries and for the same
+    // reason. `frozen` counts the messages the provider may already have cached, so
+    // appending a note below it rewrites a block the customer paid to cache and
+    // invalidates the prefix on the turn it lands.
+    //
+    // Both functions were protected only by `compress_dialect` returning early when the
+    // live zone is empty — a guard in another crate, above the call, whose stated reason
+    // is that there is nothing to compress. This one was found by looking for the sibling
+    // of the one that had just been fixed, rather than by anything failing.
+    if message_index < frozen {
+        return None;
+    }
 
     let (block_index, block) = message
         .blocks()
@@ -257,6 +271,44 @@ mod tests {
         Conversation::new(Some("You are helpful.".into()), Vec::new(), messages)
     }
 
+    // ---- the frozen floor ----
+
+    #[test]
+    fn the_note_never_lands_on_a_frozen_message() {
+        // Invariant I2, the same check `memory::inject_append` carries. Appending to a
+        // message the provider has cached rewrites a block the customer paid for and
+        // invalidates the prefix on the turn it lands.
+        //
+        // Both functions were protected only by `compress_dialect` returning early when
+        // the live zone is empty — a guard in another crate, above the call, whose stated
+        // reason is that there is nothing to compress. This one was found by looking for
+        // the sibling of the function that had just been fixed, not by a failure.
+        let conversation = convo(vec![user("one"), assistant("ok"), user("two")]);
+
+        for frozen in [3, 4, usize::MAX] {
+            assert_eq!(
+                verbosity_append(&conversation, Verbosity::Terse, frozen),
+                None,
+                "appended below a floor of {frozen}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_note_still_lands_on_a_live_message() {
+        // A guard that refuses everything looks exactly like one that works, and the
+        // shaper would be silently off.
+        let conversation = convo(vec![user("one"), assistant("ok"), user("two")]);
+
+        let (message, block, content) =
+            verbosity_append(&conversation, Verbosity::Terse, 2).expect("nothing was appended");
+
+        assert_eq!(message, 2, "appended to a message behind the floor");
+        assert_eq!(block, 0);
+        assert!(content.starts_with("two"), "the original text was lost");
+        assert!(content.len() > "two".len(), "no note was appended");
+    }
+
     // ---- verbosity ----
 
     #[test]
@@ -266,7 +318,7 @@ mod tests {
         // change that saves 200 output tokens and re-bills 20,000 input ones.
         let conversation = convo(vec![user("first"), assistant("reply"), user("second")]);
 
-        let (message, block, _) = verbosity_append(&conversation, Verbosity::Terse).unwrap();
+        let (message, block, _) = verbosity_append(&conversation, Verbosity::Terse, 0).unwrap();
         assert_eq!(message, 2, "the note landed outside the live zone");
         assert_eq!(block, 0);
 
@@ -278,7 +330,7 @@ mod tests {
     #[test]
     fn the_original_text_is_preserved_and_the_note_appended() {
         let conversation = convo(vec![user("what does this do?")]);
-        let (_, _, rewritten) = verbosity_append(&conversation, Verbosity::Terse).unwrap();
+        let (_, _, rewritten) = verbosity_append(&conversation, Verbosity::Terse, 0).unwrap();
 
         assert!(rewritten.starts_with("what does this do?"));
         assert!(rewritten.contains("briefly"));
@@ -290,11 +342,11 @@ mod tests {
         // accumulates the instruction a dozen times — wasted tokens, and a worse prompt,
         // since a repeated instruction reads as emphasis.
         let conversation = convo(vec![user("what does this do?")]);
-        let (_, _, once) = verbosity_append(&conversation, Verbosity::Terse).unwrap();
+        let (_, _, once) = verbosity_append(&conversation, Verbosity::Terse, 0).unwrap();
 
         let already = convo(vec![user(&once)]);
         assert_eq!(
-            verbosity_append(&already, Verbosity::Terse),
+            verbosity_append(&already, Verbosity::Terse, 0),
             None,
             "the note was appended a second time"
         );
@@ -306,7 +358,7 @@ mod tests {
         // message, and a modified message is a different message.
         assert_eq!(Verbosity::Default.note(), None);
         assert_eq!(
-            verbosity_append(&convo(vec![user("hi")]), Verbosity::Default),
+            verbosity_append(&convo(vec![user("hi")]), Verbosity::Default, 0),
             None
         );
     }
@@ -321,7 +373,10 @@ mod tests {
                 vec![Block::new(BlockKind::Attachment, "an image")],
             )],
         ] {
-            assert_eq!(verbosity_append(&convo(messages), Verbosity::Terse), None);
+            assert_eq!(
+                verbosity_append(&convo(messages), Verbosity::Terse, 0),
+                None
+            );
         }
     }
 
@@ -418,7 +473,7 @@ mod tests {
 
         assert_eq!(route_effort(&broken), Effort::High);
         // A terse answer to a hard question is still a legitimate request.
-        assert!(verbosity_append(&broken, Verbosity::Terse).is_some());
+        assert!(verbosity_append(&broken, Verbosity::Terse, 0).is_some());
     }
 
     #[test]
