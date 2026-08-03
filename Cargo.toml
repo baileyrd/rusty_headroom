@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/headroom-core",
+    "crates/headroom-py",
     "crates/headroom-proxy",
     "crates/headroom-mcp",
     "crates/headroom-cli",
@@ -15,6 +16,7 @@ members = [
 # `cargo build`/`cargo test` loop stays green without a Python toolchain present.
 default-members = [
     "crates/headroom-core",
+    "crates/headroom-py",
     "crates/headroom-proxy",
     "crates/headroom-mcp",
     "crates/headroom-cli",
