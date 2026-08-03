@@ -14,9 +14,17 @@
 # Every one had passing tests. A test proves a function works, not that anything
 # calls it.
 #
-# Check 6 is a different failure with the same shape: not a capability nothing
-# reaches, but a *second copy* of a decision, which drifts from the real one and
-# then describes the system incorrectly with total confidence.
+# Checks 6 and 7 are different failures with the same shape.
+#
+# Check 6: a *second copy* of a decision, which drifts from the real one and then
+# describes the system incorrectly with total confidence. Eight copies of the
+# routing table have been found, in `headroom compress`, the MCP server, `route`
+# itself, `headroom inspect`, `headroom tools`, the reformat list, the metrics
+# reason list, and the Python binding.
+#
+# Check 7: a *guarantee* nothing checks. The invariants are described in README.md
+# and ARCHITECTURE.md as acceptance criteria on every change, with a named file
+# gating each one. A renamed or deleted test leaves that claim standing.
 #
 # The first version of this check asked "is this symbol referenced outside its own
 # file?" — which #82 and #84 both passed, because the CLI and the MCP server
@@ -142,6 +150,31 @@ for f in $(grep -rl "ContentType::" --include=*.rs crates); do
   else
     fail "$f matches on $n ContentType arms — a second routing table? (D23)"
   fi
+done
+
+echo "== 7. every invariant has a test that names it"
+# README.md and ARCHITECTURE.md both say which file gates which invariant, and that claim
+# is the load-bearing one in this repository: the invariants are described as acceptance
+# criteria on every change rather than aspirations. A deleted or renamed test with the
+# documentation still claiming coverage is the worst version of everything above — not a
+# capability nothing reaches, but a *guarantee* nothing checks.
+#
+# Checked at the time of writing rather than assumed: invariants.rs carries `i1_`..`i4_`,
+# `i6_`..`i9_` (eight), and properties.rs covers I5 and I10, which are claims about many
+# inputs and cannot be established by one fixture. That is exactly what the docs say.
+e2e=crates/headroom-proxy/tests/invariants.rs
+prop=crates/headroom-proxy/tests/properties.rs
+for n in 1 2 3 4 6 7 8 9; do
+  grep -qE "^(async )?fn i${n}_" "$e2e" \
+    && note "✓ I$n gated end to end" \
+    || fail "I$n is documented as gated in $e2e and no test there names it"
+done
+# I5 and I10 by property rather than by fixture, so they are matched on the claim in the
+# test body — a property test's name describes the property, not the invariant number.
+for n in 5 10; do
+  grep -q "I$n" "$prop" \
+    && note "✓ I$n gated by property" \
+    || fail "I$n is documented as gated in $prop and nothing there cites it"
 done
 
 echo

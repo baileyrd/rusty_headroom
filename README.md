@@ -115,9 +115,11 @@ repository were once shipped, tested, documented as done, and never called by an
 A test proves a function works; it does not prove that anything calls it. The script's
 header records which gap motivated each check.
 
-Its sixth check asks a related question: does anything carry a *second copy* of the
-routing table? Five places did, and each eventually disagreed with the pipeline it was
-describing — including both commands whose whole purpose is to describe it.
+Two of its checks ask related questions. The sixth: does anything carry a *second copy*
+of the routing table? Eight places did, and each eventually disagreed with the pipeline it
+was describing — including both commands whose whole purpose is to describe it. The
+seventh: does every invariant listed above still have a test naming it, in the file this
+README says gates it? A guarantee nothing checks is worse than one nobody claimed.
 
 ## Layout
 

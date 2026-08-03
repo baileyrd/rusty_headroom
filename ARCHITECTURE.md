@@ -97,4 +97,7 @@ maintained — prefer `DECISIONS.md`.
 - `crates/headroom-proxy/tests/properties.rs` — I5 and I10, which are claims about *many*
   inputs and cannot be established by one fixture.
 - `scripts/reachability-audit.sh` — is every capability actually reached? Five were once
-  shipped, tested, documented as done, and called by nothing.
+  shipped, tested, documented as done, and called by nothing. Its check 7 closes the loop
+  on the two files above: each invariant must still have a test naming it, in the file
+  this document says gates it, so deleting one fails the build rather than quietly
+  turning these two lines into fiction.
