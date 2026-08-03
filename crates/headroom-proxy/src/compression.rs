@@ -55,6 +55,13 @@ use crate::frozen::frozen_message_count;
 /// `headroom compress` and `POST /v1/messages` route identically by construction.
 pub struct Compressors {
     orchestrator: Orchestrator,
+    /// Memories to inject into the live-zone tail, loaded once at startup.
+    ///
+    /// Empty unless configured, and an empty store injects nothing — so a proxy with no
+    /// memory file behaves exactly as it did before injection existed.
+    memories: headroom_core::memory::MemoryStore,
+    /// How many memories one injection may carry.
+    memory_limit: usize,
 }
 
 impl Compressors {
@@ -62,6 +69,8 @@ impl Compressors {
     pub fn new(store: Arc<dyn CcrStore>) -> Self {
         Self {
             orchestrator: Orchestrator::new(store),
+            memories: Default::default(),
+            memory_limit: crate::config::DEFAULT_MEMORY_LIMIT,
         }
     }
 
@@ -72,7 +81,20 @@ impl Compressors {
     ) -> Self {
         Self {
             orchestrator: Orchestrator::new(store).with_recommendations(recommendations),
+            memories: Default::default(),
+            memory_limit: crate::config::DEFAULT_MEMORY_LIMIT,
         }
+    }
+
+    /// Attaches memories for live-zone injection.
+    pub fn with_memories(
+        mut self,
+        memories: headroom_core::memory::MemoryStore,
+        limit: usize,
+    ) -> Self {
+        self.memories = memories;
+        self.memory_limit = limit;
+        self
     }
 
     /// The transform for `content` under `policy`, if any applies.
@@ -232,6 +254,38 @@ pub fn compress_dialect<'a>(
             // forward what arrived.
             Err(err) => {
                 tracing::warn!(%err, "compressor failed; forwarding original block");
+            }
+        }
+    }
+
+    // Memory injection, gated on the *lossy* permission rather than the lossless one.
+    // Adding content is not a transform of anything: the lossless permission is granted
+    // on OAuth because a meaning-preserving change cannot exceed a granted scope, and
+    // injecting facts the client never sent plainly can. So this runs only where lossy
+    // rewriting is already permitted — invariant I10.
+    if policy.lossy_transforms {
+        if let Some((message, block, injected)) = headroom_core::memory::inject_append(
+            &conversation,
+            &compressors.memories,
+            compressors.memory_limit,
+        ) {
+            match edits
+                .iter_mut()
+                .find(|(m, b, _)| *m == message && *b == block)
+            {
+                // A compressor already rewrote this block. Append to *its* output, not
+                // to the original, or the compression would be discarded.
+                Some((_, _, content)) => {
+                    if !content.contains("<memory>") {
+                        if let Some(memories) = headroom_core::memory::inject_block(
+                            &compressors.memories,
+                            compressors.memory_limit,
+                        ) {
+                            content.push_str(&memories);
+                        }
+                    }
+                }
+                None => edits.push((message, block, injected)),
             }
         }
     }
@@ -677,6 +731,169 @@ mod tests {
             sha(source.as_bytes()),
             "a pinned request was modified"
         );
+    }
+
+    // ---- memory injection (gap row Y3) ----
+
+    /// A compressor set carrying two memories.
+    fn with_memories() -> Compressors {
+        use headroom_core::memory::{MemoryStore, Provenance};
+
+        let mut store = MemoryStore::new();
+        store.remember(
+            "The auth module uses tokens, not sessions.",
+            Provenance::new("reader", "s1"),
+        );
+        store.remember(
+            "Tests live under crates/*/tests.",
+            Provenance::new("reader", "s1"),
+        );
+
+        compressors().with_memories(store, 8)
+    }
+
+    #[test]
+    fn memories_land_on_the_newest_user_message() {
+        let source = prose_request();
+        let out = compress_dialect(
+            Dialect::Anthropic,
+            source.as_bytes(),
+            &with_memories(),
+            true,
+            payg(),
+            Verbosity::Default,
+        );
+        let parsed: Value = serde_json::from_slice(&out).unwrap();
+
+        let newest = parsed["messages"][2]["content"].as_str().unwrap();
+        assert!(newest.starts_with("what does this function do?"));
+        assert!(
+            newest.contains("uses tokens"),
+            "the memory block is missing: {newest}"
+        );
+    }
+
+    #[test]
+    fn memory_injection_never_touches_the_cached_prefix() {
+        // Invariants I2 and I3. The system prompt heads the cached prefix and a memory
+        // set is *designed* to change, so writing there would bust the cache on every
+        // turn that learned something — paying full price for the whole conversation in
+        // exchange for a sentence.
+        let source = prose_request();
+        let out = compress_dialect(
+            Dialect::Anthropic,
+            source.as_bytes(),
+            &with_memories(),
+            true,
+            payg(),
+            Verbosity::Default,
+        );
+
+        let before: Value = serde_json::from_str(&source).unwrap();
+        let after: Value = serde_json::from_slice(&out).unwrap();
+
+        for member in ["system", "tools", "model"] {
+            assert_eq!(before[member], after[member], "{member} was modified");
+        }
+        assert_eq!(
+            before["messages"][0], after["messages"][0],
+            "a frozen turn was modified"
+        );
+        assert_eq!(before["messages"][1], after["messages"][1]);
+    }
+
+    #[test]
+    fn an_empty_memory_store_leaves_the_request_byte_identical() {
+        // Invariant I1, and the reason this feature is safe to ship on by default: a
+        // proxy with no memory file configured must be indistinguishable from one built
+        // before injection existed.
+        let source = prose_request();
+        let out = compress_dialect(
+            Dialect::Anthropic,
+            source.as_bytes(),
+            &compressors(),
+            true,
+            payg(),
+            Verbosity::Default,
+        );
+
+        assert_eq!(sha(&out), sha(source.as_bytes()));
+    }
+
+    #[test]
+    fn a_restricted_policy_injects_nothing() {
+        // Invariant I10. Injection adds content the client never sent, which is not a
+        // transform of anything — so the lossless permission does not cover it and only
+        // pay-as-you-go traffic gets it.
+        let source = prose_request();
+        let restricted = CompressionPolicy::for_mode(headroom_core::AuthMode::Subscription);
+        let out = compress_dialect(
+            Dialect::Anthropic,
+            source.as_bytes(),
+            &with_memories(),
+            true,
+            restricted,
+            Verbosity::Default,
+        );
+
+        assert_eq!(sha(&out), sha(source.as_bytes()));
+    }
+
+    #[test]
+    fn memories_are_not_injected_twice_across_turns() {
+        // An agent loop calls this every turn. Without the guard a long session
+        // accumulates the same facts a dozen times over — wasted tokens, and a worse
+        // prompt, since repetition reads as emphasis.
+        let source = prose_request();
+        let once = compress_dialect(
+            Dialect::Anthropic,
+            source.as_bytes(),
+            &with_memories(),
+            true,
+            payg(),
+            Verbosity::Default,
+        );
+        let twice = compress_dialect(
+            Dialect::Anthropic,
+            &once,
+            &with_memories(),
+            true,
+            payg(),
+            Verbosity::Default,
+        );
+
+        assert_eq!(
+            sha(&twice),
+            sha(&once),
+            "the memory block was injected again"
+        );
+    }
+
+    #[test]
+    fn injection_is_deterministic() {
+        // Invariant I4. These bytes go upstream, so an injection order that varied would
+        // bust the very cache the live-zone placement exists to protect.
+        let source = prose_request();
+        let first = compress_dialect(
+            Dialect::Anthropic,
+            source.as_bytes(),
+            &with_memories(),
+            true,
+            payg(),
+            Verbosity::Default,
+        );
+
+        for _ in 0..25 {
+            let again = compress_dialect(
+                Dialect::Anthropic,
+                source.as_bytes(),
+                &with_memories(),
+                true,
+                payg(),
+                Verbosity::Default,
+            );
+            assert_eq!(sha(&again), sha(&first));
+        }
     }
 
     // ---- output shaping ----

@@ -28,7 +28,9 @@
 
 use std::collections::BTreeMap;
 
+use crate::block::BlockKind;
 use crate::ccr::ContentHash;
+use crate::conversation::{Conversation, Role};
 
 /// Where a memory came from.
 ///
@@ -230,6 +232,113 @@ pub fn inject_block(store: &MemoryStore, limit: usize) -> Option<String> {
     }
     out.push_str("</memory>");
     Some(out)
+}
+
+impl MemoryStore {
+    /// Builds a store from JSON-lines, skipping anything unreadable.
+    ///
+    /// One object per line: `{"content": "...", "agent": "...", "context": "..."}`.
+    /// `agent` and `context` default to `"unknown"` — provenance the file did not record
+    /// is missing, and inventing a plausible source would be worse than admitting it,
+    /// since provenance is what a reader uses to decide whether to act on a memory.
+    ///
+    /// # Why lossy, and why line-oriented
+    ///
+    /// A malformed line is skipped with a warning rather than failing the load. This file
+    /// is an input to an optimization; refusing to start without a perfect one would turn
+    /// a convenience into a hard startup dependency. Line-oriented so an agent can append
+    /// to it without rewriting — and so one bad append costs one memory rather than all
+    /// of them.
+    pub fn from_jsonl_lossy(source: &str) -> Self {
+        let mut store = Self::new();
+
+        for (number, line) in source.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                tracing::warn!(line = number + 1, "memory line is not JSON; skipped");
+                continue;
+            };
+            let Some(content) = value.get("content").and_then(|v| v.as_str()) else {
+                tracing::warn!(line = number + 1, "memory line has no content; skipped");
+                continue;
+            };
+
+            let field = |name: &str| {
+                value
+                    .get(name)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_owned()
+            };
+            store.remember(content, Provenance::new(field("agent"), field("context")));
+        }
+
+        store
+    }
+}
+
+/// Appends the memory block to the newest user message's last text block.
+///
+/// Returns the index of the message and block that changed, so a caller rewriting raw
+/// JSON knows exactly what to touch — the same contract as
+/// [`output_shaping::verbosity_append`], and for the same reason: this function must not
+/// need to know how the request was serialized.
+///
+/// Returns `None` when nothing should change: an empty store, no user message, no text
+/// block to append to, or a block that already carries the memories.
+///
+/// # Why the newest user message and nothing else
+///
+/// The block *must* land in the live zone. The system prompt is the hot cache zone and
+/// is never modified (**I2**); an earlier message is part of the frozen prefix, and
+/// editing one would rewrite bytes a provider has already cached (**I3**). The newest
+/// user message is the one part of the request that was never sent before, so appending
+/// there costs nothing that was already paid for.
+///
+/// # Why re-injection is guarded against
+///
+/// An agent loop calls this every turn. Without the check a long session accumulates the
+/// same facts a dozen times over — wasted tokens, and a genuinely worse prompt, since
+/// repetition reads as emphasis.
+///
+/// [`output_shaping::verbosity_append`]: crate::output_shaping::verbosity_append
+pub fn inject_append(
+    conversation: &Conversation,
+    store: &MemoryStore,
+    limit: usize,
+) -> Option<(usize, usize, String)> {
+    let block_text = inject_block(store, limit)?;
+
+    let (message_index, message) = conversation
+        .messages()
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, message)| message.role() == Role::User)?;
+
+    let (block_index, block) = message
+        .blocks()
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, block)| block.kind() == BlockKind::Text)?;
+
+    // Matched on the opening tag rather than the whole block: the memory set can grow
+    // between turns, and comparing the full text would re-inject a superset alongside
+    // the subset already there.
+    if block.content().contains("<memory>") {
+        return None;
+    }
+
+    Some((
+        message_index,
+        block_index,
+        format!("{}{block_text}", block.content()),
+    ))
 }
 
 /// A namespaced key-value view over shared state between agents.

@@ -32,10 +32,20 @@ pub mod vars {
     pub const OUTPUT_SHAPER: &str = "HEADROOM_OUTPUT_SHAPER";
     /// Path to a `recommendations.json` produced by `headroom learn`.
     pub const RECOMMENDATIONS: &str = "HEADROOM_RECOMMENDATIONS";
+    /// Path to a JSON-lines file of memories to inject into the live-zone tail.
+    pub const MEMORY: &str = "HEADROOM_MEMORY";
+    /// How many memories one injection may carry.
+    pub const MEMORY_LIMIT: &str = "HEADROOM_MEMORY_LIMIT";
 }
 
 /// Default listen port.
 pub const DEFAULT_PORT: u16 = 8787;
+
+/// How many memories one injection carries unless configured otherwise.
+///
+/// Small on purpose. Injection spends live-zone tokens on every request, and a handful
+/// of corroborated facts is worth more to a model than a wall of them.
+pub const DEFAULT_MEMORY_LIMIT: usize = 8;
 
 /// Default upstream provider.
 pub const DEFAULT_UPSTREAM: &str = "https://api.anthropic.com";
@@ -224,6 +234,48 @@ impl Config {
                 Default::default()
             }
         }
+    }
+
+    /// Memories to inject into the live-zone tail, read at startup.
+    ///
+    /// # Read once, for the same reason as [`Config::recommendations`]
+    ///
+    /// Reading per request would let the same request produce different bytes depending
+    /// on when it arrived, which is invariant I4 — and here the consequence is direct,
+    /// because these bytes go upstream and a request that varies busts the prompt cache
+    /// the injection was placed in the live zone to protect.
+    ///
+    /// An unset variable yields an empty store, and an empty store injects nothing. A
+    /// proxy with no memory file configured behaves exactly as it did before this
+    /// existed.
+    pub fn memories() -> headroom_core::memory::MemoryStore {
+        let Some(path) = setting(vars::MEMORY) else {
+            return Default::default();
+        };
+
+        match std::fs::read_to_string(&path) {
+            Ok(source) => {
+                let parsed = headroom_core::memory::MemoryStore::from_jsonl_lossy(&source);
+                tracing::info!(path = %path, memories = parsed.len(), "loaded memories");
+                parsed
+            }
+            Err(err) => {
+                tracing::warn!(path = %path, %err, "could not read memories; injecting none");
+                Default::default()
+            }
+        }
+    }
+
+    /// How many memories one injection may carry.
+    ///
+    /// Bounded because recall is ordered but unbounded, and a store that has accumulated
+    /// a thousand facts would otherwise put all of them on every request — spending far
+    /// more than the compression elsewhere in the pipeline saves.
+    pub fn memory_limit() -> usize {
+        setting(vars::MEMORY_LIMIT)
+            .and_then(|raw| raw.trim().parse().ok())
+            .filter(|limit| *limit > 0)
+            .unwrap_or(DEFAULT_MEMORY_LIMIT)
     }
 
     /// Whether compression runs at all.

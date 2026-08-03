@@ -212,7 +212,7 @@ Every row is a gap: the target repo is empty, so all rows are new implementation
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Y1 | cross-agent memory store | type | spec | all | `docs/memory.mdx` | no | L | Auto-dedup + provenance tracking. **Split candidate.** Done as `memory::MemoryStore` — content-addressed dedup, provenance list, corroboration. In-memory only; no persistence or eviction. |
 | Y2 | `SharedContext` put/get | fn | spec | all | `docs/shared-context.mdx` | no | M | Multi-agent shared context. Depends on Y1. Done as `memory::SharedContext`, namespaced with a unit separator so path-shaped keys cannot collide. |
-| Y3 | live-zone-tail memory injection | fn | spec | all | REALIGNMENT §2.6 | no | M | Memory goes in the live-zone tail — never the system prompt (I2). Done as `memory::inject_block`; proxy wiring outstanding. |
+| Y3 | live-zone-tail memory injection | fn | spec | all | REALIGNMENT §2.6 | no | M | Memory goes in the live-zone tail — never the system prompt (I2). Done as `memory::inject_block`, reached from the proxy via `memory::inject_append` in `compress_dialect` — appended to the newest user message's last text block, gated on the lossy permission (D19), fed by `HEADROOM_MEMORY` read once at startup. |
 
 ### Telemetry (TOIN)
 
