@@ -6,6 +6,32 @@ the crate starts publishing releases.
 
 ---
 
+## `headroom doctor` was passing without checking two of six compressors
+**2026-08-03** · found by a guard written for something else
+
+- **Fixed:** the self-test had samples for JSON, logs, code and prose. It had none for
+  **diffs or search results**, so `doctor` printed `all checks passed` having never run
+  those two compressors, and `perf` never timed them. Found the first time
+  `the_self_test_samples_cover_every_compressor` ran — it failed immediately on
+  `diff_compressor compresses diff and no self-test sample exercises it`.
+- **Fixed:** `headroom perf` benchmarked `SmartCrusher` on a JSON payload and printed the
+  result as `throughput`, unqualified. It now routes through the `Orchestrator` and
+  reports a row per compressor. The spread is **18×** — 63 µs/call for diffs against
+  1138 µs for prose — and the number it used to print was the second slowest.
+- The operational conclusion survives (even the slowest is a millisecond against a round
+  trip of hundreds), but that is now measured rather than generalized from one sample. A
+  compressor that regressed 100× would have stayed invisible.
+- **Changed:** `doctor` and `perf` share `self_test_samples()`, so "it works" and "it is
+  this fast" are statements about the same content.
+- **Added:** three guards — samples cover every compressor the orchestrator routes to,
+  each sample is still detected as its own label, and each still actually compresses.
+- The first diff sample I wrote did not compress: it gave each hunk three context lines,
+  all inside the two-line keep window, so the compressor correctly removed nothing.
+  `every_self_test_sample_actually_compresses` caught it, which is the point of asserting
+  a measured result rather than a return code.
+
+---
+
 ## The audit now checks that the invariants are still gated
 **2026-08-03** · no bug found — the claim was true, and is now held true
 

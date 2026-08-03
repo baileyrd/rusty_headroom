@@ -14,7 +14,7 @@ use headroom_core::pipeline::reformats::Reformatter;
 use headroom_core::pipeline::Orchestrator;
 use headroom_core::telemetry::{AggregationKey, Aggregator, StructureHash, Telemetry};
 use headroom_core::tokenizer::{HeuristicEstimator, Tokenizer};
-use headroom_core::{validated_apply, Block, BlockKind, SmartCrusher};
+use headroom_core::{validated_apply, Block, BlockKind};
 
 /// Reads all of stdin.
 fn read_stdin() -> anyhow::Result<String> {
@@ -177,33 +177,17 @@ pub fn inspect() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `headroom doctor`.
-pub fn doctor() -> anyhow::Result<()> {
-    let mut problems = 0;
-
-    println!("headroom {}", env!("CARGO_PKG_VERSION"));
-
-    // A self-test rather than a version dump. Reporting "installed correctly" without
-    // exercising anything is how a broken install passes its own health check.
-    //
-    // # Routed through the orchestrator, not a compressor picked here
-    //
-    // This used to call `SmartCrusher` directly. That checks that *a* compressor works,
-    // which is not the question an operator is asking — they want to know whether the
-    // proxy will compress their traffic. The two came apart badly: the orchestrator had
-    // no arm for source code or prose for the whole life of the pipeline refactor, so the
-    // proxy forwarded both whole while this command reported "compression: ok".
-    //
-    // Going through `Orchestrator` means a routing gap shows up here, which is where
-    // somebody is looking when they suspect one.
-    let store = Arc::new(InMemoryCcrStore::new());
-    let orchestrator = Orchestrator::new(store.clone());
-    let policy = CompressionPolicy::for_mode(AuthMode::PayAsYouGo);
-    let estimator = HeuristicEstimator::new();
-
-    // One sample per content type the router can produce, so a type that reaches no
-    // compressor is named rather than averaged away by the ones that work.
-    let samples: Vec<(&str, String)> = vec![
+/// One sample per content type that reaches a compressor.
+///
+/// Shared by `headroom doctor` and `headroom perf`, which ask two questions about the
+/// same four compressors — does each one work, and how fast is each one. Two sample sets
+/// would let those answers describe different content, so a compressor could pass the
+/// self-test on one payload and be benchmarked on another.
+///
+/// The samples are chosen so a failure means something. Each note below records a case
+/// where a badly chosen one made a passing check prove nothing.
+fn self_test_samples() -> Vec<(&'static str, String)> {
+    vec![
         (
             "json",
             format!(
@@ -250,7 +234,77 @@ pub fn doctor() -> anyhow::Result<()> {
                 .collect::<Vec<_>>()
                 .join("\n"),
         ),
-    ];
+        (
+            // Added because `the_self_test_samples_cover_every_compressor` found it
+            // missing: `headroom doctor` printed "all checks passed" having never run the
+            // diff compressor, and `headroom perf` never timed it.
+            "diff",
+            (0..12)
+                .map(|i| {
+                    // Long runs of unchanged context around one change, because eliding
+                    // context beyond two lines either side is the entire transform. The
+                    // first version of this sample gave each hunk three context lines,
+                    // all of them within the keep window, so nothing was dropped and
+                    // `doctor` reported a broken compressor that was working correctly.
+                    let context: String = (0..14)
+                        .map(|line| format!(" \x20   let step_{line} = stage_{line}(&state);\n"))
+                        .collect();
+                    format!(
+                        "diff --git a/src/module_{i}.rs b/src/module_{i}.rs\n\
+                         --- a/src/module_{i}.rs\n\
+                         +++ b/src/module_{i}.rs\n\
+                         @@ -1,32 +1,32 @@\n\
+                         {context}\
+                         -    let parsed = parse_old(input)?;\n\
+                         +    let parsed = parse_new(input)?;\n\
+                         {context}"
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+        ),
+        (
+            // Missing for the same reason as the diff sample above.
+            "search",
+            (0..120)
+                .map(|i| {
+                    format!(
+                        "src/module_{}.rs:{}:    let parsed = parse(input)?;",
+                        i % 12,
+                        i + 1
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+    ]
+}
+
+/// `headroom doctor`.
+pub fn doctor() -> anyhow::Result<()> {
+    let mut problems = 0;
+
+    println!("headroom {}", env!("CARGO_PKG_VERSION"));
+
+    // A self-test rather than a version dump. Reporting "installed correctly" without
+    // exercising anything is how a broken install passes its own health check.
+    //
+    // # Routed through the orchestrator, not a compressor picked here
+    //
+    // This used to call `SmartCrusher` directly. That checks that *a* compressor works,
+    // which is not the question an operator is asking — they want to know whether the
+    // proxy will compress their traffic. The two came apart badly: the orchestrator had
+    // no arm for source code or prose for the whole life of the pipeline refactor, so the
+    // proxy forwarded both whole while this command reported "compression: ok".
+    //
+    // Going through `Orchestrator` means a routing gap shows up here, which is where
+    // somebody is looking when they suspect one.
+    let store = Arc::new(InMemoryCcrStore::new());
+    let orchestrator = Orchestrator::new(store.clone());
+    let policy = CompressionPolicy::for_mode(AuthMode::PayAsYouGo);
+    let estimator = HeuristicEstimator::new();
+
+    let samples = self_test_samples();
 
     // Kept for the retrieval check below: whichever sample compressed first, and what it
     // originally said.
@@ -864,6 +918,75 @@ mod tests {
     }
 
     #[test]
+    fn the_self_test_samples_cover_every_compressor() {
+        // `doctor` says whether each compressor works and `perf` says how fast each one
+        // is, both by walking these samples. A content type that gains a compressor and
+        // no sample is a compressor both commands silently stop reporting — and silence
+        // from a self-test reads as "fine", which is the failure mode that let five
+        // capabilities ship unreached.
+        let orchestrator = orchestrator();
+        let samples = self_test_samples();
+
+        let mut covered = Vec::new();
+        for (_, sample) in &samples {
+            let block = Block::new(BlockKind::ToolResult, sample.clone());
+            let transform = orchestrator
+                .transform_for_block(&block, payg(), "")
+                .unwrap_or_else(|| panic!("a sample reaches no compressor: {sample:.60}"));
+            covered.push(transform.name());
+        }
+
+        for content_type in ContentType::ALL {
+            let Some(transform) = orchestrator.for_type(content_type) else {
+                continue;
+            };
+            assert!(
+                covered.contains(&transform.name()),
+                "{} compresses {} and no self-test sample exercises it",
+                transform.name(),
+                content_type.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn every_self_test_sample_is_detected_as_its_label() {
+        // A sample that stopped being detected as what it is named would move to another
+        // compressor, and both commands would keep reporting under the old label — the
+        // prose sample was once a single 24 KB line, which is one line to a line-budget
+        // summarizer and compressed nothing.
+        for (label, sample) in self_test_samples() {
+            assert_eq!(
+                detect(sample.as_bytes()).content_type.as_str(),
+                label,
+                "the {label} sample is detected as something else"
+            );
+        }
+    }
+
+    #[test]
+    fn every_self_test_sample_actually_compresses() {
+        // Otherwise `doctor` reports a failure that is the fixture's fault, and `perf`
+        // times a compressor declining rather than working.
+        let orchestrator = orchestrator();
+        let estimator = HeuristicEstimator::new();
+
+        for (label, sample) in self_test_samples() {
+            let mut block = Block::new(BlockKind::ToolResult, sample.clone());
+            let transform = orchestrator
+                .transform_for_block(&block, payg(), "")
+                .unwrap_or_else(|| panic!("{label} reached no compressor"));
+            let outcome = validated_apply(transform, &mut block, &estimator)
+                .unwrap_or_else(|err| panic!("{label} failed to compress: {err}"));
+
+            assert!(
+                outcome.is_compressed(),
+                "the {label} sample did not compress"
+            );
+        }
+    }
+
+    #[test]
     fn savings_ignores_labelled_series() {
         // `headroom_routing_total{reason=...}` is the first labelled metric the proxy
         // exposes, and this report predates it. A parser that matched on the bare name
@@ -1244,60 +1367,84 @@ mod command_tests {
 ///
 /// Returns an error if stdout cannot be written.
 pub fn perf(iterations: usize) -> anyhow::Result<()> {
-    let store = Arc::new(InMemoryCcrStore::new());
+    // Routed through the `Orchestrator`, one row per compressor.
+    //
+    // # Why one number was the wrong answer
+    //
+    // This benchmarked `SmartCrusher` on a JSON payload and printed the result as
+    // `throughput`, unqualified. An operator reads that as what the proxy does to their
+    // traffic — but their traffic is mostly source files and command output, which go to
+    // different compressors with different costs. Measured over all six, per call:
+    // 63 µs for diffs, 74 for search output, 194 for JSON, 196 for code, 249 for logs,
+    // 1138 for prose. An 18x spread reported as one number, and the number reported was
+    // the second slowest.
+    //
+    // The conclusion happens to survive — even the slowest is a millisecond against a
+    // round trip of hundreds, which is the question the header above says matters. But
+    // that is the answer, not something to assume from one sample: a compressor that
+    // regressed by 100x would still have been invisible here.
     let estimator = HeuristicEstimator::new();
-    let crusher = SmartCrusher::new(store);
-
-    let sample: String = format!(
-        "[{}]",
-        (0..200)
-            .map(|i| format!(
-                r#"{{"path":"src/module_{i}.rs","kind":"file","status":"ok","size":{}}}"#,
-                1000 + i
-            ))
-            .collect::<Vec<_>>()
-            .join(",")
-    );
-    let bytes = sample.len();
-
-    // A warm-up pass, discarded. The first iteration pays for allocator growth and
-    // branch prediction that every later one does not, so including it reports a
-    // throughput this machine never actually sustains.
-    let mut warm = Block::new(BlockKind::Text, sample.clone());
-    let _ = validated_apply(&crusher, &mut warm, &estimator);
-
-    let started = std::time::Instant::now();
-    let mut compressed = 0usize;
-    for _ in 0..iterations {
-        let mut block = Block::new(BlockKind::Text, sample.clone());
-        if let Ok(outcome) = validated_apply(&crusher, &mut block, &estimator) {
-            if outcome.is_compressed() {
-                compressed += 1;
-            }
-        }
-    }
-    let elapsed = started.elapsed();
+    let orchestrator = Orchestrator::new(Arc::new(InMemoryCcrStore::new()));
+    let policy = CompressionPolicy::for_mode(AuthMode::PayAsYouGo);
 
     let mut stdout = std::io::stdout().lock();
     writeln!(stdout, "iterations    {iterations}")?;
-    writeln!(stdout, "payload       {bytes} bytes")?;
-    writeln!(stdout, "compressed    {compressed}/{iterations}")?;
-    writeln!(stdout, "elapsed       {:.3} s", elapsed.as_secs_f64())?;
+    writeln!(stdout)?;
+    writeln!(
+        stdout,
+        "{:<8} {:<18} {:>7} {:>12} {:>10}  compressed",
+        "type", "compressor", "bytes", "per call", "throughput"
+    )?;
 
-    // Guarded rather than divided blindly: a fast machine and a small iteration count
-    // can round to zero, and dividing by it would report `inf` as a throughput.
-    let seconds = elapsed.as_secs_f64();
-    if seconds > 0.0 && iterations > 0 {
-        let per_op = elapsed.as_secs_f64() / iterations as f64;
-        writeln!(stdout, "per call      {:.1} µs", per_op * 1e6)?;
-        writeln!(
-            stdout,
-            "throughput    {:.1} MB/s",
-            (bytes * iterations) as f64 / seconds / 1e6
-        )?;
-    } else {
-        writeln!(stdout, "per call      too fast to measure at this count")?;
+    // The same four samples `headroom doctor` self-tests with, so "it works" and "it is
+    // this fast" are statements about the same content.
+    for (label, sample) in self_test_samples() {
+        // `ToolResult`, not `Text`: prose compresses only from tool output (D24), and a
+        // `Text` block would silently drop the slowest compressor from the benchmark.
+        let block = Block::new(BlockKind::ToolResult, sample.clone());
+        let Some(transform) = orchestrator.transform_for_block(&block, policy, "") else {
+            writeln!(stdout, "{label:<8} {:<18}", "no compressor")?;
+            continue;
+        };
+
+        // A warm-up pass, discarded. The first iteration pays for allocator growth and
+        // branch prediction that every later one does not, so including it reports a
+        // throughput this machine never actually sustains.
+        let mut warm = Block::new(BlockKind::ToolResult, sample.clone());
+        let _ = validated_apply(transform, &mut warm, &estimator);
+
+        let started = std::time::Instant::now();
+        let mut compressed = 0usize;
+        for _ in 0..iterations {
+            let mut block = Block::new(BlockKind::ToolResult, sample.clone());
+            if let Ok(outcome) = validated_apply(transform, &mut block, &estimator) {
+                if outcome.is_compressed() {
+                    compressed += 1;
+                }
+            }
+        }
+        let seconds = started.elapsed().as_secs_f64();
+        let bytes = sample.len();
+
+        // Guarded rather than divided blindly: a fast machine and a small iteration count
+        // can round to zero, and dividing by it would report `inf` as a throughput.
+        if seconds > 0.0 && iterations > 0 {
+            writeln!(
+                stdout,
+                "{label:<8} {:<18} {bytes:>7} {:>9.1} µs {:>7.1} MB/s  {compressed}/{iterations}",
+                transform.name(),
+                seconds * 1e6 / iterations as f64,
+                (bytes * iterations) as f64 / seconds / 1e6
+            )?;
+        } else {
+            writeln!(
+                stdout,
+                "{label:<8} {:<18} {bytes:>7}   too fast to measure at this count",
+                transform.name()
+            )?;
+        }
     }
+
     stdout.flush()?;
     Ok(())
 }
