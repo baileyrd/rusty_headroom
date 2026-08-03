@@ -895,8 +895,8 @@ mod tests {
         //
         // This one renders a real `Metrics`, so the two names have to be the same name.
         let metrics = headroom_proxy::metrics::Metrics::new();
-        metrics.record_compressed(1000, 600);
-        metrics.record_compressed(500, 400);
+        metrics.record_rewritten(1000, 600);
+        metrics.record_rewritten(500, 400);
         metrics.record_passthrough();
         // A labelled series in the same scrape, from the same source rather than typed
         // into a fixture — the shape that would break a prefix match.
@@ -984,6 +984,34 @@ mod tests {
                 "the {label} sample did not compress"
             );
         }
+    }
+
+    #[test]
+    fn a_request_the_proxy_made_larger_is_not_reported_as_compressed() {
+        // Memory injection adds content by design, so a request can leave larger than it
+        // arrived. Measured through the release binary with `HEADROOM_MEMORY` set: 65
+        // tokens in, 440 out — and `/metrics` said `compressed_total 1`, `saved_total 0`.
+        //
+        // "Compression ran and found nothing" and "this request was made 6.8 times
+        // bigger" are opposite outcomes, and the counter that answers *is the proxy
+        // helping* was reporting the first for the second.
+        let metrics = headroom_proxy::metrics::Metrics::new();
+        metrics.record_rewritten(65, 440);
+
+        let scrape = metrics.render();
+        let report = savings_report(&scrape);
+
+        assert!(report.contains("compressed    0"), "{report}");
+        assert!(report.contains("made larger   1"), "{report}");
+
+        // And the ordinary case still reads as before, or the fix would be a new way to
+        // misreport.
+        let shrunk = headroom_proxy::metrics::Metrics::new();
+        shrunk.record_rewritten(1000, 400);
+        let report = savings_report(&shrunk.render());
+
+        assert!(report.contains("compressed    1"), "{report}");
+        assert!(!report.contains("made larger"), "{report}");
     }
 
     #[test]
@@ -1208,12 +1236,20 @@ fn savings_report(metrics: &str) -> String {
 
     let requests = value("headroom_requests_total ").unwrap_or(0.0);
     let compressed = value("headroom_compressed_total ").unwrap_or(0.0);
+    // Reported because it is the one outcome an operator would never guess at from the
+    // other numbers. Memory injection adds content by design, so a request can leave
+    // larger than it arrived — and that used to be counted as a compression that saved
+    // nothing, which reads as "found nothing to do" rather than "made it worse".
+    let expanded = value("headroom_expanded_total ").unwrap_or(0.0);
     let before = value("headroom_tokens_before_total ").unwrap_or(0.0);
     let saved = value("headroom_tokens_saved_total ").unwrap_or(0.0);
 
     let mut out = String::new();
     out.push_str(&format!("requests      {requests:.0}\n"));
     out.push_str(&format!("compressed    {compressed:.0}\n"));
+    if expanded > 0.0 {
+        out.push_str(&format!("made larger   {expanded:.0}\n"));
+    }
     out.push_str(&format!("tokens saved  {saved:.0}\n"));
 
     // A ratio needs a denominator. Reporting "0.0%" when nothing has been measured is

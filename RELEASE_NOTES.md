@@ -6,6 +6,38 @@ the crate starts publishing releases.
 
 ---
 
+## A request the proxy made larger was counted as a compression
+**2026-08-03** · measured through the release binary: 65 tokens in, 440 out
+
+- Memory injection adds content by design, gated on I10. The handlers called
+  `record_compressed` whenever the outgoing body **differed** from the incoming one — which
+  is not the same as "compression helped".
+- With `HEADROOM_MEMORY` set, a short request left 6.8× larger and `/metrics` said:
+
+  ```
+  headroom_compressed_total 1
+  headroom_tokens_saved_total 0
+  ```
+
+  That reads as *"compression ran and found nothing"*. It was *"this request was made
+  6.8 times bigger"*. The counter answering **is the proxy helping** said yes while the
+  proxy was making things worse.
+- The token totals were always honest — `tokens_saved` subtracts the totals, so growth nets
+  against savings across requests. What was missing is that a single request can go the
+  wrong way and nothing said so.
+- **Changed:** `record_compressed` → `record_rewritten`, which counts a request that grew
+  under a new `headroom_expanded_total` instead. The old name claimed something it could
+  not know.
+- **Added:** `headroom savings` prints `made larger N`, but only when it is non-zero — a
+  line that is always `0` is one people stop reading.
+- **Also:** the README documented `HEADROOM_MEMORY` as "JSON-lines memories" without the
+  schema. I guessed `text`, every line was skipped, and the feature silently did nothing
+  until I read the parser. It now says `content`.
+- Verified end to end: the same request now reports `compressed_total 0`,
+  `expanded_total 1`, and `headroom savings` shows `made larger 1`.
+
+---
+
 ## Half the lossy compressors had no test that their marker redeems
 **2026-08-03** · no bug found — three of six were guarded, now all six
 

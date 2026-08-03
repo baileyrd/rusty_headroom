@@ -229,7 +229,7 @@ async fn messages(
         state.metrics.record_passthrough();
     } else {
         let estimator = HeuristicEstimator::new();
-        state.metrics.record_compressed(
+        state.metrics.record_rewritten(
             estimator.count(&String::from_utf8_lossy(&body)) as u64,
             estimator.count(&String::from_utf8_lossy(&compressed)) as u64,
         );
