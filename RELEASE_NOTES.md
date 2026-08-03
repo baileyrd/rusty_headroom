@@ -32,6 +32,11 @@ the crate starts publishing releases.
   differ, deliberately. D23 was about ending exactly that kind of divergence, so the
   difference is two named entry points with the reason in both doc comments, not a flag
   someone has to remember.
+- **Documented rather than wired:** `TextCrusher` performs the *same* normalization as
+  `pipeline::reformats::tidy_lines`, which is already reached through `Reformatter` on the
+  lossless branch. Routing it too would give prose two lossless paths that could disagree
+  — the drift D23 exists to end. It stays as public API, marked redundant so nobody
+  "fixes" it by wiring it up.
 - **Verified end to end:** the tag keep-set holds `</result>` through an 80% reduction,
   and the boundary anchor holds the final line of a 21 KB report — the first time either
   has run against a real request.
