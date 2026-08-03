@@ -61,7 +61,11 @@ impl AppState {
         };
 
         Self {
-            compressors: Arc::new(Compressors::new(Arc::new(InMemoryCcrStore::new()))),
+            compressors: Arc::new(Compressors::with_recommendations(
+                Arc::new(InMemoryCcrStore::new()),
+                // Read once, here, at construction. See `Config::recommendations`.
+                Config::recommendations(),
+            )),
             metrics: Arc::new(Metrics::new()),
             upstream,
             limiter: Arc::new(RateLimiter::new(RATE_CAPACITY, RATE_WINDOW)),

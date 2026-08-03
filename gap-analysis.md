@@ -78,9 +78,9 @@ Every row is a gap: the target repo is empty, so all rows are new implementation
 | ID | Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | T1 | `Tokenizer` trait + `estimator` | trait/fn | spec | all | REALIGNMENT §2.3 `tokenizer/` | no | S | Heuristic byte→token estimator as the always-available fallback. Done — `HeuristicEstimator`, documented never to under-count. |
-| T2 | tiktoken BPE impl | fn | spec | all | `tokenizer/tiktoken_impl.rs` | no | M | OpenAI model families. Done as `tokenizer::TiktokenCounter` (o200k_base, cl100k_base) via `tiktoken-rs` 0.11 — embedded tables, exact offline. Not yet registered by the proxy. |
+| T2 | tiktoken BPE impl | fn | spec | all | `tokenizer/tiktoken_impl.rs` | no | M | OpenAI model families. Done as `tokenizer::TiktokenCounter` (o200k_base, cl100k_base) via `tiktoken-rs` 0.11 — embedded tables, exact offline, registered by default and selected from the request's `model`. |
 | T3 | HuggingFace tokenizer impl | fn | spec | all | `tokenizer/hf_impl.rs` | no | M | Via `tokenizers` crate. **Deliberately deferred** — needs a per-model `tokenizer.json` fetched at runtime, making the tokenizer a network dependency of the request path, and Anthropic publishes no tokenizer to be exact against. See DECISIONS D16. |
-| T4 | tokenizer registry | fn | spec | all | `tokenizer/registry.rs` | no | S | model-id → tokenizer resolution with fallback to T1. Done as `tokenizer::registry::{Family, Registry}` — always resolves, never `None`; no exact tokenizer registered until T2/T3 land, and not yet consulted by the proxy. |
+| T4 | tokenizer registry | fn | spec | all | `tokenizer/registry.rs` | no | S | model-id → tokenizer resolution with fallback to T1. Done as `tokenizer::registry::{Family, Registry}` — always resolves, never `None`; `with_defaults()` registers the tiktoken counters and the proxy selects through it. |
 
 ### Content detection
 
@@ -98,8 +98,8 @@ Every row is a gap: the target repo is empty, so all rows are new implementation
 | S1 | line importance scoring | fn | spec | all | `signals/line_importance.rs` | no | M | Drives which lines survive lossy passes. Done. |
 | S2 | keyword / error detector | fn | spec | all | `signals/keyword_detector.rs` | no | S | Error/warning keyword sets; never drop error lines. Done. |
 | S3 | tiered signal aggregation | fn | spec | all | `signals/tiered.rs` | no | S | Combines S1+S2 into keep/drop tiers. Done. |
-| S4 | `AnchorSelector` | fn | spec | all | `transforms/anchor_selector.rs` | no | M | Picks stable anchor points so output stays position-preserving (I6). Done as `signals::anchors::select_anchors` — hunk headers, headings, fences, stack frames, structure opens, boundaries. Not yet consulted by a compressor. |
-| S5 | `TagProtector` | fn | spec | all | `transforms/tag_protector.rs` | no | S | Never break XML/markup tags mid-compression. Done as `signals::tags::{protected_lines, breaks_markup}`; balance check over tag-shaped tokens, not an XML parser. Not yet consulted by a compressor. |
+| S4 | `AnchorSelector` | fn | spec | all | `transforms/anchor_selector.rs` | no | M | Picks stable anchor points so output stays position-preserving (I6). Done as `signals::anchors::select_anchors` — hunk headers, headings, fences, stack frames, structure opens, boundaries. **Open:** no compressor consults it yet, so I6 rests on each compressor's own position handling. |
+| S5 | `TagProtector` | fn | spec | all | `transforms/tag_protector.rs` | no | S | Never break XML/markup tags mid-compression. Done as `signals::tags::{protected_lines, breaks_markup}`; balance check over tag-shaped tokens, not an XML parser. **Open:** no compressor consults it yet. |
 
 ### SmartCrusher (JSON) — split into 6 issues to keep them small
 
@@ -130,9 +130,9 @@ Every row is a gap: the target repo is empty, so all rows are new implementation
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | P1 | `LosslessTransform` / `LossyTransform` | trait | spec | all | REALIGNMENT §2.3 `pipeline/traits.rs` | no | S | In-place `fn(&mut Block) -> Result<()>` per I6. Done. |
 | P2 | `live_zone` block dispatcher | fn | spec | all | REALIGNMENT §2.2 I2/I3 | no | L | **Core of the whole design.** Walks messages from tail; identifies latest user msg, tool_result, function_call_output, local_shell_call_output, apply_patch_call_output. Done. |
-| P3 | pipeline orchestrator | fn | spec | all | `pipeline/orchestrator.rs` | no | M | Live-zone-only; routes via D1 to C*. Done as `pipeline::Orchestrator`; `Routing` names the decline reason. Proxy not yet switched over to it. |
+| P3 | pipeline orchestrator | fn | spec | all | `pipeline/orchestrator.rs` | no | M | Live-zone-only; routes via D1 to C*. Done as `pipeline::Orchestrator`; `Routing` names the decline reason. The proxy's `Compressors` is a thin wrapper over it. |
 | P4 | offloads (json/log/diff/search/prose) | fn | spec | all | `pipeline/offloads/` | no | M | Move bulky sub-values to CCR, leave markers. **Covered by the existing compressors** — SmartCrusher/Log/Search/Diff already offload to CCR and leave markers; a separate layer would be a second name for the same mechanism. |
-| P5 | reformats (json minifier, log template) | fn | spec | all | `pipeline/reformats/` | no | S | Lossless byte reduction. Done as `pipeline::reformats::{minify_json, tidy_lines}`. Not yet wired into a compressor chain. |
+| P5 | reformats (json minifier, log template) | fn | spec | all | `pipeline/reformats/` | no | S | Lossless byte reduction. Done as `pipeline::reformats::{minify_json, tidy_lines}`, exposed as `Reformatter` and routed by the orchestrator for policies permitting lossless transforms (D14). |
 | P6 | `safety` checks | fn | spec | all | `transforms/safety.rs` | no | S | Guards against pathological/adversarial input. Done as `pipeline::safety::check` — size, depth, line length, line count; declines to compress rather than rejecting the request. |
 | P7 | token validation + fallback | fn | spec | all | REALIGNMENT I5 | no | S | If `compressed.tokens >= original.tokens`, forward original. Depends on T1. Done — `validated_apply`. |
 
@@ -168,7 +168,7 @@ Every row is a gap: the target repo is empty, so all rows are new implementation
 | X9 | SSE framing + byte-level state machine | fn | spec | all | REALIGNMENT §2.1 step 10 | no | L | **High risk.** Must survive UTF-8 splits mid-codepoint and single-`\n` splits. Done. |
 | X10 | SSE Anthropic events | fn | spec | all | REALIGNMENT Phase C | no | M | All delta types incl. `thinking_delta`, `signature_delta`, `citations_delta`. Depends on X9. Done. |
 | X11 | SSE OpenAI chat events | fn | spec | all | REALIGNMENT Phase C | no | M | `tool_call` accumulation across chunks. Depends on X9. Done. |
-| X12 | SSE OpenAI responses events | fn | spec | all | REALIGNMENT Phase C | no | M | Output items + reasoning summary. Depends on X9. Done as `sse::responses`; stem/suffix split so future event types stay classifiable. Not yet attached to the relayed stream. |
+| X12 | SSE OpenAI responses events | fn | spec | all | REALIGNMENT Phase C | no | M | Output items + reasoning summary. Depends on X9. Done as `sse::responses`; stem/suffix split so future event types stay classifiable. **Open:** `ObservingStream` still attaches only the Anthropic `StreamObserver`, so a Responses stream is relayed unobserved. |
 | X13 | WebSocket flow | fn | spec | all | `crates/headroom-proxy/src/websocket.rs` (name only) | no | M | Codex WS transport. Done as `websocket::relay_socket` — bidirectional faithful relay, frame kinds preserved. **Deliberately does not compress**; see DECISIONS D15. |
 | X14 | tool array sort + JSON Schema key sort | fn | spec | all | REALIGNMENT I7 | no | M | Deterministic recursive sort. Normalize, never compress. Done. |
 | X15 | `cache_control` auto-placement | fn | spec | all | REALIGNMENT Phase E | no | M | Anthropic, ≤4 ephemeral breakpoints. PAYG only per I10. Done. |
@@ -220,14 +220,14 @@ Every row is a gap: the target repo is empty, so all rows are new implementation
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | N1 | `Telemetry` trait (observation-only) | trait | spec | all | REALIGNMENT §2.5 | no | S | **No request-time hint API** — that is invariant I9. Done: `telemetry::Telemetry`, every method returns `()`, asserted structurally by a test. |
 | N2 | structure hashing + aggregation key | fn | spec | all | REALIGNMENT §2.5 | no | M | Key = `(auth_mode, model_family, structure_hash)`. Done: `telemetry::{StructureHash, AggregationKey}`; FNV-1a for cross-build stability, values discarded before hashing. |
-| N3 | recommendations publish + startup load | fn | spec | all | REALIGNMENT §2.5 | no | M | `recommendations.toml`, read at startup only. Done as `telemetry::Recommendations`, published as JSON (DECISIONS D12). Startup load not yet wired into the proxy. |
+| N3 | recommendations publish + startup load | fn | spec | all | REALIGNMENT §2.5 | no | M | `recommendations.toml`, read at startup only. Done as `telemetry::Recommendations`, published as JSON (DECISIONS D12); `headroom learn` writes one and `HEADROOM_RECOMMENDATIONS` loads it at startup, gating routing via `Routing::MeasuredUseless`. |
 
 ### Output shaping
 
 | ID | Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | O1 | verbosity steering | fn | spec | all | README "Output Token Reduction" | no | M | `HEADROOM_OUTPUT_SHAPER=1`. Appends terseness note **without** busting the prompt cache. Done: `output_shaping::verbosity_append`, note lands in the live-zone tail, wired into `compress_dialect`. |
-| O2 | effort routing | fn | spec | all | README | no | M | `reasoning_effort` (OpenAI) / `thinking.budget_tokens` (Anthropic); full effort on new questions and errors. Done as `output_shaping::route_effort`; not yet written into outgoing requests. |
+| O2 | effort routing | fn | spec | all | README | no | M | `reasoning_effort` (OpenAI) / `thinking.budget_tokens` (Anthropic); full effort on new questions and errors. Done as `output_shaping::route_effort`, applied to outgoing OpenAI requests in `proxy::openai`. |
 
 ### Python bindings
 

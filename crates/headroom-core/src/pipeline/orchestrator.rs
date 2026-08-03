@@ -15,12 +15,15 @@
 
 use std::sync::Arc;
 
-use crate::auth_mode::CompressionPolicy;
+use crate::auth_mode::{AuthMode, CompressionPolicy};
 use crate::block::Block;
 use crate::ccr::CcrStore;
 use crate::detection::{detect, ContentType};
 use crate::pipeline::reformats::Reformatter;
 use crate::pipeline::safety::{check, Hazard, Limits};
+use crate::telemetry::{AggregationKey, Recommendations, StructureHash};
+use crate::tokenizer::registry::Registry;
+use crate::tokenizer::Tokenizer;
 use crate::transform::Transform;
 use crate::{DiffCompressor, LogCompressor, SearchCompressor, SmartCrusher};
 
@@ -54,6 +57,16 @@ pub enum Routing {
         /// What the content was detected as.
         content_type: ContentType,
     },
+    /// Forward unchanged: a previous run measured this shape as not worth compressing.
+    ///
+    /// Distinguished from [`Routing::NoCompressor`] because the cause is opposite. A
+    /// compressor *does* handle this content; it was tried, repeatedly, and did not
+    /// help. An operator seeing this should look at the recommendations file, not at the
+    /// compressor list.
+    MeasuredUseless {
+        /// What the content was detected as.
+        content_type: ContentType,
+    },
 }
 
 impl Routing {
@@ -79,6 +92,7 @@ impl Routing {
             Self::PolicyForbids => "policy_forbids",
             Self::Unsafe { .. } => "unsafe",
             Self::NoCompressor { .. } => "no_compressor",
+            Self::MeasuredUseless { .. } => "measured_useless",
         }
     }
 }
@@ -91,6 +105,8 @@ pub struct Orchestrator {
     diff: DiffCompressor,
     reformatter: Reformatter,
     limits: Limits,
+    tokenizers: Registry,
+    recommendations: Recommendations,
 }
 
 impl Orchestrator {
@@ -108,6 +124,13 @@ impl Orchestrator {
             diff: DiffCompressor::new(store),
             reformatter: Reformatter::new(),
             limits: Limits::default(),
+            // The exact OpenAI counters are registered by default. They are already
+            // compiled in — leaving them unregistered would mean carrying the
+            // vocabularies and then not using them, which is the worst of both.
+            tokenizers: Registry::with_defaults(),
+            // Empty by default. An unmeasured shape is always attempted — see
+            // `Recommendations::worth_compressing`.
+            recommendations: Recommendations::default(),
         }
     }
 
@@ -115,6 +138,30 @@ impl Orchestrator {
     pub fn with_limits(mut self, limits: Limits) -> Self {
         self.limits = limits;
         self
+    }
+
+    /// Uses `recommendations` learned from a previous run.
+    ///
+    /// # Read once, never per request
+    ///
+    /// The recommendations are configuration, fixed for the process lifetime. Consulting
+    /// a *live* aggregate per request would make compression depend on accumulated
+    /// history — the same request would compress differently depending on what came
+    /// before it, and a failure could not be reproduced from the failing request alone.
+    /// That is invariant I4, and it is why this is a constructor rather than a setter on
+    /// a shared handle.
+    pub fn with_recommendations(mut self, recommendations: Recommendations) -> Self {
+        self.recommendations = recommendations;
+        self
+    }
+
+    /// The tokenizer to measure `model` with.
+    ///
+    /// Exact where one is registered, and the heuristic upper bound otherwise. The
+    /// distinction matters to invariant I5: an exact count lets a compressor keep a
+    /// result the heuristic's over-count would have rejected.
+    pub fn tokenizer_for(&self, model: &str) -> Arc<dyn Tokenizer> {
+        self.tokenizers.for_model(model)
     }
 
     /// Decides what to do with `content` under `policy`.
@@ -136,10 +183,10 @@ impl Orchestrator {
     ///     .collect();
     /// let json = format!("[{}]", records.trim_end_matches(','));
     ///
-    /// assert!(orchestrator.route(&json, payg).will_compress());
-    /// assert!(!orchestrator.route(&json, restricted).will_compress());
+    /// assert!(orchestrator.route(&json, payg, "claude-opus-4").will_compress());
+    /// assert!(!orchestrator.route(&json, restricted, "claude-opus-4").will_compress());
     /// ```
-    pub fn route(&self, content: &str, policy: CompressionPolicy) -> Routing {
+    pub fn route(&self, content: &str, policy: CompressionPolicy, model: &str) -> Routing {
         let content_type = detect(content.as_bytes()).content_type;
 
         // The safety check runs before the policy branch, because both branches lead to
@@ -168,7 +215,22 @@ impl Orchestrator {
             ContentType::Json
             | ContentType::Log
             | ContentType::SearchResults
-            | ContentType::Diff => Routing::Compress { content_type },
+            | ContentType::Diff => {
+                // Checked last, so a shape only reaches this gate if a compressor would
+                // otherwise have run. An unmeasured shape is always attempted: skipping
+                // it would never gather the data that would let it be skipped for a
+                // reason.
+                let key = AggregationKey::new(
+                    AuthMode::PayAsYouGo,
+                    model,
+                    StructureHash::of(content, content_type),
+                );
+                if self.recommendations.worth_compressing(&key) {
+                    Routing::Compress { content_type }
+                } else {
+                    Routing::MeasuredUseless { content_type }
+                }
+            }
             other => Routing::NoCompressor {
                 content_type: other,
             },
@@ -184,8 +246,9 @@ impl Orchestrator {
         &self,
         content: &str,
         policy: CompressionPolicy,
+        model: &str,
     ) -> Option<&dyn Transform> {
-        match self.route(content, policy) {
+        match self.route(content, policy, model) {
             Routing::Compress { content_type } => self.for_type(content_type),
             Routing::Lossless => Some(&self.reformatter),
             _ => None,
@@ -249,11 +312,15 @@ mod tests {
         let orchestrator = orchestrator();
         for content in [bulky_json(), bulky_log()] {
             assert!(
-                orchestrator.route(&content, payg()).will_compress(),
+                orchestrator
+                    .route(&content, payg(), "claude-opus-4")
+                    .will_compress(),
                 "{:?}",
-                orchestrator.route(&content, payg())
+                orchestrator.route(&content, payg(), "claude-opus-4")
             );
-            assert!(orchestrator.transform_for(&content, payg()).is_some());
+            assert!(orchestrator
+                .transform_for(&content, payg(), "claude-opus-4")
+                .is_some());
         }
     }
 
@@ -263,7 +330,7 @@ mod tests {
         // meaning-preserving reformat cannot exceed a scope.
         let orchestrator = orchestrator();
         let policy = CompressionPolicy::for_mode(AuthMode::OAuth);
-        let routing = orchestrator.route(&bulky_json(), policy);
+        let routing = orchestrator.route(&bulky_json(), policy, "claude-opus-4");
 
         assert_eq!(routing, Routing::Lossless);
         assert!(routing.will_compress());
@@ -280,10 +347,12 @@ mod tests {
         let policy = CompressionPolicy::for_mode(AuthMode::Subscription);
 
         assert_eq!(
-            orchestrator.route(&bulky_json(), policy),
+            orchestrator.route(&bulky_json(), policy, "claude-opus-4"),
             Routing::PolicyForbids
         );
-        assert!(orchestrator.transform_for(&bulky_json(), policy).is_none());
+        assert!(orchestrator
+            .transform_for(&bulky_json(), policy, "claude-opus-4")
+            .is_none());
     }
 
     #[test]
@@ -295,7 +364,7 @@ mod tests {
         let deep = format!("{}1{}", "[".repeat(500), "]".repeat(500));
 
         assert!(matches!(
-            orchestrator.route(&deep, restricted),
+            orchestrator.route(&deep, restricted, "claude-opus-4"),
             Routing::Unsafe { .. }
         ));
     }
@@ -308,12 +377,18 @@ mod tests {
         for mode in [AuthMode::Subscription, AuthMode::OAuth] {
             assert!(
                 !orchestrator
-                    .route(&bulky_json(), CompressionPolicy::for_mode(mode))
+                    .route(
+                        &bulky_json(),
+                        CompressionPolicy::for_mode(mode),
+                        "claude-opus-4"
+                    )
                     .is_lossy(),
                 "{mode:?}"
             );
         }
-        assert!(orchestrator.route(&bulky_json(), payg()).is_lossy());
+        assert!(orchestrator
+            .route(&bulky_json(), payg(), "claude-opus-4")
+            .is_lossy());
     }
 
     #[test]
@@ -322,10 +397,12 @@ mod tests {
         let deep = format!("{}1{}", "[".repeat(500), "]".repeat(500));
 
         assert!(matches!(
-            orchestrator.route(&deep, payg()),
+            orchestrator.route(&deep, payg(), "claude-opus-4"),
             Routing::Unsafe { .. }
         ));
-        assert!(orchestrator.transform_for(&deep, payg()).is_none());
+        assert!(orchestrator
+            .transform_for(&deep, payg(), "claude-opus-4")
+            .is_none());
     }
 
     #[test]
@@ -337,7 +414,7 @@ mod tests {
         let prose = "The quick brown fox jumps over the lazy dog. ".repeat(50);
 
         assert!(matches!(
-            orchestrator.route(&prose, payg()),
+            orchestrator.route(&prose, payg(), "claude-opus-4"),
             Routing::NoCompressor { .. } | Routing::Unsafe { .. }
         ));
     }
@@ -350,9 +427,13 @@ mod tests {
         let deep = format!("{}1{}", "[".repeat(500), "]".repeat(500));
 
         let reasons = [
-            orchestrator.route(&bulky_json(), restricted).as_str(),
-            orchestrator.route(&deep, payg()).as_str(),
-            orchestrator.route("short", payg()).as_str(),
+            orchestrator
+                .route(&bulky_json(), restricted, "claude-opus-4")
+                .as_str(),
+            orchestrator.route(&deep, payg(), "claude-opus-4").as_str(),
+            orchestrator
+                .route("short", payg(), "claude-opus-4")
+                .as_str(),
         ];
 
         assert_eq!(reasons[0], "policy_forbids");
@@ -368,7 +449,7 @@ mod tests {
         });
 
         assert!(matches!(
-            orchestrator.route(&bulky_json(), payg()),
+            orchestrator.route(&bulky_json(), payg(), "claude-opus-4"),
             Routing::Unsafe {
                 hazard: Hazard::TooLarge { .. }
             }
@@ -381,11 +462,124 @@ mod tests {
         // request compresses differently between runs.
         let orchestrator = orchestrator();
         let content = bulky_json();
-        let first = orchestrator.route(&content, payg());
+        let first = orchestrator.route(&content, payg(), "claude-opus-4");
 
         for _ in 0..25 {
-            assert_eq!(orchestrator.route(&content, payg()), first);
+            assert_eq!(orchestrator.route(&content, payg(), "claude-opus-4"), first);
         }
+    }
+
+    // ---- recommendations ----
+
+    #[test]
+    fn a_shape_measured_useless_is_skipped() {
+        // The other half of N3. Without this, `learn` produces a file nothing reads and
+        // the proxy re-attempts a shape it has already measured as hopeless on every
+        // request.
+        use crate::telemetry::{Aggregator, Telemetry};
+
+        let content = bulky_json();
+        let key = AggregationKey::new(
+            AuthMode::PayAsYouGo,
+            "claude-opus-4",
+            StructureHash::of(&content, ContentType::Json),
+        );
+
+        let mut aggregator = Aggregator::new();
+        for _ in 0..10 {
+            aggregator.record_decline(&key);
+        }
+
+        let orchestrator = orchestrator().with_recommendations(aggregator.recommend(5));
+        assert!(matches!(
+            orchestrator.route(&content, payg(), "claude-opus-4"),
+            Routing::MeasuredUseless { .. }
+        ));
+    }
+
+    #[test]
+    fn a_shape_measured_useful_still_compresses() {
+        // The balancing case: a recommendations file must not turn compression off
+        // wholesale, only for the shapes it measured as hopeless.
+        use crate::telemetry::{Aggregator, Telemetry};
+
+        let content = bulky_json();
+        let key = AggregationKey::new(
+            AuthMode::PayAsYouGo,
+            "claude-opus-4",
+            StructureHash::of(&content, ContentType::Json),
+        );
+
+        let mut aggregator = Aggregator::new();
+        for _ in 0..10 {
+            aggregator.record(&key, 1000, 100);
+        }
+
+        let orchestrator = orchestrator().with_recommendations(aggregator.recommend(5));
+        assert!(orchestrator
+            .route(&content, payg(), "claude-opus-4")
+            .will_compress());
+    }
+
+    #[test]
+    fn an_unmeasured_shape_is_still_attempted() {
+        // Skipping it would never gather the data that would let it be skipped for a
+        // reason — the recommendations file would only ever grow entries for shapes that
+        // already work.
+        use crate::telemetry::{Aggregator, Telemetry};
+
+        let mut aggregator = Aggregator::new();
+        let other = AggregationKey::new(
+            AuthMode::PayAsYouGo,
+            "claude-opus-4",
+            StructureHash::of("something else entirely", ContentType::Json),
+        );
+        for _ in 0..10 {
+            aggregator.record_decline(&other);
+        }
+
+        let orchestrator = orchestrator().with_recommendations(aggregator.recommend(5));
+        assert!(orchestrator
+            .route(&bulky_json(), payg(), "claude-opus-4")
+            .will_compress());
+    }
+
+    #[test]
+    fn a_recommendation_for_one_model_does_not_silence_another() {
+        // The key includes the model family. A shape that compresses badly for one model
+        // may compress fine for another, and pooling them would let one bad measurement
+        // disable compression everywhere.
+        use crate::telemetry::{Aggregator, Telemetry};
+
+        let content = bulky_json();
+        let key = AggregationKey::new(
+            AuthMode::PayAsYouGo,
+            "gpt-4o",
+            StructureHash::of(&content, ContentType::Json),
+        );
+
+        let mut aggregator = Aggregator::new();
+        for _ in 0..10 {
+            aggregator.record_decline(&key);
+        }
+
+        let orchestrator = orchestrator().with_recommendations(aggregator.recommend(5));
+        assert!(matches!(
+            orchestrator.route(&content, payg(), "gpt-4o"),
+            Routing::MeasuredUseless { .. }
+        ));
+        assert!(orchestrator
+            .route(&content, payg(), "claude-opus-4")
+            .will_compress());
+    }
+
+    #[test]
+    fn the_default_orchestrator_has_no_recommendations() {
+        // An empty set means every shape is attempted, which is the right default for a
+        // process that has never been given a file.
+        assert!(orchestrator()
+            .route(&bulky_json(), payg(), "claude-opus-4")
+            .will_compress());
     }
 
     // ---- eligibility ----
