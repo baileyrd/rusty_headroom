@@ -189,7 +189,12 @@ impl Metrics {
             ),
             (
                 "headroom_passthrough_total",
-                "Requests forwarded unchanged.",
+                // Not "forwarded unchanged", which is what this said and is false on two
+                // of the three surfaces: the OpenAI routes still add `prompt_cache_key`
+                // and `reasoning_effort` to a request nothing compressed. Measured — a
+                // 62-byte chat request left as 88. See `passthrough_is_byte_identical_\
+                // only_where_nothing_enriches`.
+                "Requests where no compression applied.",
                 self.passthrough.load(Ordering::Relaxed),
             ),
             (
