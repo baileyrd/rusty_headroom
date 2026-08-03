@@ -6,6 +6,59 @@ the crate starts publishing releases.
 
 ---
 
+## CLI: wrap, unwrap, and savings
+**2026-08-03** · gap rows L5, L6, L7, L8, L12
+
+- **Added:** `headroom wrap <agent>`, `headroom unwrap <agent>`, `headroom savings`, and
+  a `wrap` module covering claude, codex, cursor, aider, cline, continue, goose and
+  openhands.
+- **Verified through the release binary:** a settings file with deliberately unusual key
+  order was wrapped and then unwrapped, and came back **SHA-256 identical**, with the
+  backup removed.
+- **Design note, and the reason the module is shaped this way:** wrapping is easy —
+  change a base URL. The part that has to be right is *undoing* it. An `unwrap` that
+  leaves an agent half-configured breaks the customer's tooling in a way they will
+  attribute to their agent rather than to this program, and they will debug it in the
+  wrong place. So the backup holds the **original bytes of the whole file** and restore
+  writes those bytes verbatim. Reconstructing the original by reversing each edit sounds
+  equivalent and is not: it rewrites formatting, reorders keys, and drops anything the
+  writer did not understand.
+- **Design note:** wrapping twice **refuses**. The second wrap would capture an
+  already-wrapped file, and unwrap would then restore the customer to the wrapped state
+  while reporting success — leaving them permanently routed through a proxy they thought
+  they had removed.
+- **Design note:** the backup is written *before* the original is touched, and removed
+  only *after* the restore succeeds. A rewrite that cannot be undone is worse than one
+  that never happened, and a backup deleted first with a failing write leaves neither
+  version.
+- **Design note:** `unwrap` on something never wrapped is a no-op that says so, not an
+  error. The state the caller asked for is the state they already have.
+- **Design note:** exports are printed rather than written to a shell profile. A profile
+  belongs to its owner — appending means guessing which of `.bashrc`, `.zshrc`,
+  `.profile` or a fish config is live, editing a file the customer maintains by hand, and
+  owning the removal forever.
+- **Design note:** OpenAI-shaped agents get a base URL ending in `/v1`; Anthropic-shaped
+  ones do not. Getting that backwards produces `/v1/v1/chat/completions`, which fails as
+  a 404 that looks like the proxy is broken.
+- **Design note:** Cursor reports as unsupported rather than printing exports that would
+  do nothing. The customer would otherwise believe they were routed through the proxy,
+  see no savings, and have nothing to explain why.
+- **Design note:** `savings` reports "no data yet" rather than "0.0%" before anything is
+  measured — zero is indistinguishable from a compressor that has stopped working, which
+  is the one thing this report exists to reveal. It also parses `headroom_requests_total`
+  without matching the `# HELP` line that shares its prefix, with a test for that.
+- **Design note:** no currency figure. It needs a per-model price this program does not
+  have and cannot keep current, and a wrong number about money is worse than no number.
+  A test asserts no currency symbol appears.
+- **Known limitation:** a settings file must be supplied with `--settings`; no agent's
+  config path is discovered automatically. Guessing a path and rewriting whatever is
+  there is not something to do on the strength of an assumption about someone else's
+  tool layout.
+- **Known limitation:** the settings rewrite sets a `base_url` member and assumes JSON.
+  Agents using TOML or a differently-named key need per-agent handling.
+- **Known limitation:** `deploy` (L4), `perf` (L9), `learn` (L10), `update` (L11) and
+  `init`/`tools` (L13) remain unimplemented.
+
 ## Cross-agent memory and shared context
 **2026-08-03** · gap rows Y1, Y2, Y3
 
