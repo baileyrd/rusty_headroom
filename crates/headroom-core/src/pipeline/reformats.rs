@@ -125,6 +125,37 @@ pub fn tidy_lines(content: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BlockKind;
+
+    #[test]
+    fn every_named_step_is_one_that_actually_runs() {
+        // `STEPS` is what `apply` iterates *and* what `headroom tools` prints, so the
+        // name and the behaviour cannot drift. What this checks is the thing the shared
+        // array does not give for free: that each entry does something — a step named,
+        // listed to an operator, and never able to fire is a capability reported that
+        // does not exist, which is the failure the reachability audit exists for.
+        for (name, reformat) in Reformatter::STEPS {
+            let input = match name {
+                "minify_json" => "{\n  \"a\": 1\n}",
+                "tidy_lines" => "alpha  \n\n\n\nbeta\n",
+                other => panic!("no fixture for step `{other}` — add one rather than skipping"),
+            };
+
+            let direct =
+                reformat(input).unwrap_or_else(|| panic!("`{name}` declined its own fixture"));
+
+            // And the same input through `apply` reaches that step rather than another.
+            let mut block = Block::new(BlockKind::ToolResult, input.to_string());
+            Reformatter::new()
+                .apply(&mut block)
+                .unwrap_or_else(|err| panic!("apply declined `{name}`'s fixture: {err}"));
+            assert_eq!(
+                block.content(),
+                direct,
+                "`{name}` is named but `apply` produced another step's result"
+            );
+        }
+    }
 
     // ---- JSON minification ----
 
@@ -295,7 +326,27 @@ mod tests {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Reformatter;
 
+/// One reformat: the name it is reported under, and the function that performs it.
+///
+/// `None` from the function means "declined" — either nothing to remove, or the content
+/// is not this reformat's shape. See [`Reformatter::STEPS`].
+pub type ReformatStep = (&'static str, fn(&str) -> Option<String>);
+
 impl Reformatter {
+    /// The reformats it tries, in order, paired with the name each is reported under.
+    ///
+    /// # One list, because the other place that had it was a `writeln!`
+    ///
+    /// `headroom tools` printed these two names as string literals. It happened to be
+    /// right, which is the only thing separating it from the four routing tables that
+    /// were not — and being right by luck is not a property that survives somebody adding
+    /// a third reformat.
+    ///
+    /// The names and the functions are the same array, so `apply` below and any command
+    /// listing them cannot disagree: a reformat that is not here does not run, and one
+    /// that runs is named here.
+    pub const STEPS: [ReformatStep; 2] = [("minify_json", minify_json), ("tidy_lines", tidy_lines)];
+
     /// Creates the reformatter.
     pub fn new() -> Self {
         Self
@@ -316,8 +367,13 @@ impl Transform for Reformatter {
             return Err(Error::Declined(Declined::Sacrosanct));
         }
 
-        let reformatted = minify_json(block.content())
-            .or_else(|| tidy_lines(block.content()))
+        // First one that produces something, in declaration order. The order carries the
+        // meaning it did as an `.or_else` chain: on pretty-printed JSON both would
+        // succeed, and `minify_json` removes the indentation `tidy_lines` would only
+        // trim the trailing edge of, so trying it second would leave the larger result.
+        let reformatted = Self::STEPS
+            .iter()
+            .find_map(|(_, reformat)| reformat(block.content()))
             .ok_or(Error::Declined(Declined::NotSmaller))?;
 
         *block.content_mut() = reformatted;

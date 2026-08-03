@@ -10,6 +10,7 @@ use std::sync::Arc;
 use headroom_core::auth_mode::{AuthMode, CompressionPolicy};
 use headroom_core::ccr::{CcrStore, InMemoryCcrStore};
 use headroom_core::detection::{detect, AdaptiveSizer, ContentType};
+use headroom_core::pipeline::reformats::Reformatter;
 use headroom_core::pipeline::Orchestrator;
 use headroom_core::telemetry::{AggregationKey, Aggregator, StructureHash, Telemetry};
 use headroom_core::tokenizer::{HeuristicEstimator, Tokenizer};
@@ -1337,8 +1338,13 @@ pub fn tools() -> anyhow::Result<()> {
         stdout,
         "lossless transforms (every auth mode except subscription)"
     )?;
-    writeln!(stdout, "  minify_json")?;
-    writeln!(stdout, "  tidy_lines")?;
+    // Read out of `Reformatter::STEPS`, the array `Reformatter::apply` iterates. These
+    // were two string literals — right by luck, which is the only thing that separated
+    // them from the routing tables above that were not, and not a property that survives
+    // somebody adding a third reformat.
+    for (name, _) in Reformatter::STEPS {
+        writeln!(stdout, "  {name}")?;
+    }
 
     stdout.flush()?;
     Ok(())

@@ -6,6 +6,24 @@ the crate starts publishing releases.
 
 ---
 
+## The reformat list stops being written down twice
+**2026-08-03** · the sixth copy, in the command the last PR had just fixed
+
+- **Fixed:** `headroom tools` printed `minify_json` and `tidy_lines` as string literals
+  while `Reformatter::apply` called the two functions in an `.or_else` chain. It was
+  *right* — which is the only thing separating it from the five routing tables that were
+  not, and not a property that survives somebody adding a third reformat.
+- **Added:** `Reformatter::STEPS`, an array of `(name, fn)` pairs that `apply` iterates
+  and `tools` reads. The name and the behaviour are now the same array, so a reformat that
+  is not listed does not run, and one that runs is listed.
+- **Added:** `ReformatStep`, the type alias behind it.
+- **Guard:** `every_named_step_is_one_that_actually_runs` puts each step's fixture through
+  `apply` and checks it reaches *that* step. Verified by making `apply` hardcode the first
+  step and watching the test go red. A step with no fixture panics rather than skipping —
+  a listed capability that cannot fire is what the reachability audit exists for.
+
+---
+
 ## `headroom inspect` and `headroom tools` stop contradicting the pipeline
 **2026-08-03** · the fourth and fifth routing tables, in the two commands that describe routing
 
