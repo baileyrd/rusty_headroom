@@ -21,8 +21,13 @@
 //! the granted scope, and on subscription traffic it is a proxy-revealing change. Both
 //! are gated on [`CompressionPolicy`].
 
+use std::borrow::Cow;
+
 use headroom_core::auth_mode::CompressionPolicy;
 use serde_json::{Map, Value};
+
+use crate::body::FaithfulBody;
+use crate::compression::Dialect;
 
 /// Most `cache_control` breakpoints Anthropic accepts.
 const MAX_BREAKPOINTS: usize = 4;
@@ -91,57 +96,133 @@ pub fn normalize_tools(body: &mut Value) -> bool {
     *tools != before
 }
 
-/// Places `cache_control` breakpoints on the largest stable prefix boundaries.
+/// Where breakpoints go, as fixed indices from the start of the conversation.
 ///
-/// No-op unless the policy permits it.
+/// # Why fixed anchors rather than an even spread
+///
+/// The obvious rule — spread `MAX_BREAKPOINTS` evenly across the frozen portion — is
+/// worse than placing none at all. A conversation grows by two messages a turn, so an
+/// even spread recomputes to a *different* set every couple of turns, and the index that
+/// moves first is the earliest one. Moving the earliest breakpoint rewrites bytes at the
+/// head of the prefix, which invalidates the entire cache rather than its tail. The
+/// feature would then bust the cache periodically on exactly the long conversations it
+/// exists to help.
+///
+/// These anchors are monotone: as the conversation grows, breakpoints are only ever
+/// added, never moved. A marker placed at index 3 on turn two is still at index 3 on
+/// turn twenty, so every prefix that was cached stays cached.
+///
+/// They double because the value of a breakpoint is the prefix behind it, and prefixes
+/// worth caching grow geometrically rather than linearly.
+const ANCHORS: [usize; MAX_BREAKPOINTS] = [1, 3, 7, 15];
+
+/// Places `cache_control` breakpoints on stable prefix boundaries.
+///
+/// No-op unless the policy permits it. Returns how many were placed.
 ///
 /// Breakpoints go on the *earliest* messages, not the latest. The prefix before a
 /// breakpoint is what gets cached, so marking late in the conversation caches almost
 /// nothing; marking early caches the bulk that never changes.
 pub fn place_cache_control(body: &mut Value, policy: CompressionPolicy) -> usize {
-    if !policy.auto_cache_control {
-        return 0;
-    }
+    place_at(body, policy, &breakpoints_for(body))
+}
 
+/// The message indices that should carry a breakpoint.
+///
+/// Empty when the policy forbids it, when the customer has already set a marker, or when
+/// there is not enough history to be worth caching.
+pub fn breakpoints_for(body: &Value) -> Vec<usize> {
     // A customer-set marker means they have thought about this. Adding more could push
     // past the provider's limit and silently invalidate the ones they chose.
     if has_cache_control(body) {
+        return Vec::new();
+    }
+
+    let Some(messages) = body.get("messages").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    // Nothing to cache if there is no history to speak of.
+    if messages.len() < 4 {
+        return Vec::new();
+    }
+
+    // The newest turn is left alone: it is exactly the part that changes next request,
+    // so a breakpoint there caches a prefix that is already stale.
+    let usable = messages.len().saturating_sub(1);
+    ANCHORS
+        .iter()
+        .copied()
+        .filter(|index| *index < usable)
+        .collect()
+}
+
+/// Inserts the marker at each index in `indices`.
+fn place_at(body: &mut Value, policy: CompressionPolicy, indices: &[usize]) -> usize {
+    if !policy.auto_cache_control {
         return 0;
     }
 
     let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
         return 0;
     };
-    // Nothing to cache if there is no history to speak of.
-    if messages.len() < 4 {
-        return 0;
-    }
-
-    // Spread across the frozen portion, leaving the newest turn alone since it is
-    // exactly the part that changes next request.
-    let usable = messages.len().saturating_sub(1);
-    let stride = usable.div_ceil(MAX_BREAKPOINTS).max(1);
 
     let mut placed = 0;
-    let mut index = stride.saturating_sub(1);
-    while index < usable && placed < MAX_BREAKPOINTS {
-        if let Some(message) = messages.get_mut(index).and_then(Value::as_object_mut) {
+    for index in indices {
+        if let Some(message) = messages.get_mut(*index).and_then(Value::as_object_mut) {
             message.insert(
                 "cache_control".into(),
                 serde_json::json!({ "type": "ephemeral" }),
             );
             placed += 1;
         }
-        index += stride;
     }
 
     placed
+}
+
+/// Adds a `cache_control` marker to one raw message, returning its new JSON.
+///
+/// Returns `None` if the message is not a JSON object or already carries a marker.
+///
+/// # Why this takes raw JSON rather than a parsed body
+///
+/// Only the messages that gain a marker are re-serialized; every other byte of the
+/// request — including every other message — is copied verbatim by
+/// [`FaithfulBody::rebuild`]. Round-tripping the whole body through `Value` instead
+/// would rewrite the untouched frozen prefix, costing the cache miss this function
+/// exists to avoid.
+///
+/// [`FaithfulBody::rebuild`]: crate::body::FaithfulBody::rebuild
+pub fn mark_message(raw: &str) -> Option<String> {
+    let mut message: Value = serde_json::from_str(raw).ok()?;
+    let object = message.as_object_mut()?;
+
+    if object.contains_key("cache_control") {
+        return None;
+    }
+    object.insert(
+        "cache_control".into(),
+        serde_json::json!({ "type": "ephemeral" }),
+    );
+
+    serde_json::to_string(&message).ok()
 }
 
 /// Injects `prompt_cache_key` on OpenAI-shaped requests, when permitted.
 ///
 /// Never overwrites one the customer set: their key is presumably chosen to group
 /// requests the way they want, and replacing it would scatter their cache.
+///
+/// # Not the request path
+///
+/// The proxy inserts this key in [`openai::shape_openai`], which uses
+/// [`body::insert_top_level_member`] and so rewrites nothing but the new member. This
+/// version works on a parsed [`Value`] and is for callers that already hold one; routing
+/// a request through it would re-serialize the whole body and cost the cache miss the
+/// key was inserted to avoid.
+///
+/// [`openai::shape_openai`]: crate::openai
+/// [`body::insert_top_level_member`]: crate::body::insert_top_level_member
 pub fn inject_prompt_cache_key(body: &mut Value, policy: CompressionPolicy, key: &str) -> bool {
     if !policy.auto_prompt_cache_key {
         return false;
@@ -168,6 +249,91 @@ fn has_cache_control(body: &Value) -> bool {
                 .and_then(Value::as_array)
                 .is_some_and(|blocks| blocks.iter().any(|b| b.get("cache_control").is_some()))
     })
+}
+
+/// Applies every cache-stabilizing rewrite to a request body.
+///
+/// Returns the original bytes whenever nothing applies, so a body that is already
+/// canonical costs no rebuild — invariant I1.
+///
+/// # Order, and why it is this one
+///
+/// Tool normalization runs on every auth mode because sorting discards nothing and
+/// reveals nothing: the same tools with the same schemas, in a canonical order. The two
+/// *injections* run only where the policy permits them, because adding a marker to
+/// someone's request is a change they did not ask for — on OAuth it could fall outside
+/// the granted scope, and on subscription traffic it makes the request identifiably
+/// proxied (invariant I10).
+///
+/// Each step rewrites only what it touches. Nothing here round-trips the whole body
+/// through `Value`, which would rewrite the untouched frozen prefix and cost the cache
+/// miss all of this exists to avoid.
+pub fn stabilize<'a>(dialect: Dialect, body: &'a [u8], policy: CompressionPolicy) -> Cow<'a, [u8]> {
+    // Off unless the operator opted in. Everything below rewrites the cache hot zone,
+    // which invariant I2 says is never modified — see `Config::stabilization_enabled`
+    // for why that is a decision to make deliberately rather than a default.
+    if !crate::config::Config::stabilization_enabled() {
+        return Cow::Borrowed(body);
+    }
+
+    let mut current = Cow::Borrowed(body);
+
+    if let Some(normalized) = normalized_tools_member(&current) {
+        current = Cow::Owned(normalized);
+    }
+
+    // Breakpoints are Anthropic-only: it caches what the customer marks, so a marker is
+    // the only way to cache anything at all. Both OpenAI surfaces cache prefixes
+    // automatically and need no marker — their stabilization is `prompt_cache_key`,
+    // which `openai::shape_openai` already inserts byte-faithfully on the request path.
+    if dialect == Dialect::Anthropic && policy.auto_cache_control {
+        if let Some(marked) = marked_body(&current) {
+            current = Cow::Owned(marked);
+        }
+    }
+
+    current
+}
+
+/// The request's `tools` member, normalized — or `None` if it is already canonical.
+fn normalized_tools_member(body: &[u8]) -> Option<Vec<u8>> {
+    let mut parsed: Value = serde_json::from_slice(body).ok()?;
+    if !normalize_tools(&mut parsed) {
+        return None;
+    }
+
+    let tools = serde_json::to_string(parsed.get("tools")?).ok()?;
+    crate::body::replace_top_level_member(body, "tools", &tools)
+}
+
+/// The request with breakpoints placed — or `None` if none apply.
+fn marked_body(body: &[u8]) -> Option<Vec<u8>> {
+    let parsed: Value = serde_json::from_slice(body).ok()?;
+    let indices = breakpoints_for(&parsed);
+    if indices.is_empty() {
+        return None;
+    }
+
+    let faithful = FaithfulBody::parse(body);
+    if !faithful.is_understood() {
+        return None;
+    }
+
+    // Only the marked messages are re-serialized. Every other message is copied
+    // verbatim, which is what keeps the rest of the frozen prefix cacheable.
+    let replacements: Vec<(usize, String)> = indices
+        .iter()
+        .filter_map(|index| Some((*index, mark_message(faithful.message(*index)?)?)))
+        .collect();
+    if replacements.is_empty() {
+        return None;
+    }
+
+    match faithful.rebuild(&replacements) {
+        Cow::Owned(bytes) => Some(bytes),
+        // Borrowed means nothing was substituted, so there is nothing to report.
+        Cow::Borrowed(_) => None,
+    }
 }
 
 #[cfg(test)]
@@ -379,5 +545,111 @@ mod tests {
             "session-1"
         ));
         assert!(body.get("prompt_cache_key").is_none());
+    }
+    // ---- the opt-in path (gap rows X15, I7) ----
+
+    /// A conversation of `turns` messages as raw JSON, tools deliberately out of order.
+    fn raw_conversation(turns: usize) -> String {
+        let messages: Vec<String> = (0..turns)
+            .map(|i| {
+                let role = if i % 2 == 0 { "user" } else { "assistant" };
+                format!(r#"{{"role":"{role}","content":"m{i}"}}"#)
+            })
+            .collect();
+        format!(
+            r#"{{"model":"claude-opus-4","tools":[{{"name":"zebra"}},{{"name":"apple"}}],"messages":[{}]}}"#,
+            messages.join(",")
+        )
+    }
+
+    #[test]
+    fn stabilization_is_off_unless_the_operator_opts_in() {
+        // Invariant I2. Everything here rewrites the hot zone, so the default must leave
+        // the request byte-identical — that is what keeps the I2 integration tests
+        // meaningful rather than merely passing.
+        let source = raw_conversation(10);
+        let out = stabilize(Dialect::Anthropic, source.as_bytes(), payg());
+
+        assert_eq!(out.as_ref(), source.as_bytes());
+        assert!(matches!(out, Cow::Borrowed(_)), "the body was rebuilt");
+    }
+
+    #[test]
+    fn breakpoints_never_move_as_the_conversation_grows() {
+        // The property that makes the trade positive. An even spread recomputes to a
+        // different set every couple of turns, and the index that moves first is the
+        // earliest — rewriting the head of the prefix and invalidating the whole cache,
+        // periodically, on exactly the long conversations this is meant to help.
+        let mut previous: Vec<usize> = Vec::new();
+
+        for turns in 4..40 {
+            let body: Value = serde_json::from_str(&raw_conversation(turns)).unwrap();
+            let current = breakpoints_for(&body);
+
+            assert!(
+                previous.iter().all(|index| current.contains(index)),
+                "a breakpoint moved at {turns} messages: {previous:?} -> {current:?}"
+            );
+            assert!(current.len() <= MAX_BREAKPOINTS);
+            previous = current;
+        }
+    }
+
+    #[test]
+    fn a_customer_marker_suppresses_every_automatic_one() {
+        // They have thought about this. Adding more could push past the provider's limit
+        // and silently invalidate the ones they chose.
+        let body: Value = serde_json::from_str(
+            r#"{"messages":[{"role":"user","content":"a","cache_control":{"type":"ephemeral"}},
+                {"role":"assistant","content":"b"},{"role":"user","content":"c"},
+                {"role":"assistant","content":"d"},{"role":"user","content":"e"}]}"#,
+        )
+        .unwrap();
+
+        assert!(breakpoints_for(&body).is_empty());
+    }
+
+    #[test]
+    fn marking_a_message_leaves_the_rest_of_the_body_byte_identical() {
+        // Only the marked messages are re-serialized. Round-tripping the whole body
+        // through `Value` would rewrite the untouched frozen prefix, costing the very
+        // cache miss the marker is placed to avoid.
+        let source = raw_conversation(10);
+        let faithful = FaithfulBody::parse(source.as_bytes());
+        let marked = mark_message(faithful.message(1).unwrap()).unwrap();
+        let rebuilt = faithful.rebuild(&[(1, marked)]);
+        let out = String::from_utf8(rebuilt.into_owned()).unwrap();
+
+        // Every other message survives verbatim.
+        for index in [0, 2, 3, 9] {
+            assert!(
+                out.contains(faithful.message(index).unwrap()),
+                "message {index} was re-serialized"
+            );
+        }
+        assert!(out.contains(r#""cache_control":{"type":"ephemeral"}"#));
+    }
+
+    #[test]
+    fn marking_a_message_that_is_already_marked_reports_nothing() {
+        assert!(mark_message(r#"{"role":"user","cache_control":{"type":"ephemeral"}}"#).is_none());
+        assert!(mark_message("not json").is_none());
+        assert!(mark_message("[1,2]").is_none());
+    }
+
+    #[test]
+    fn already_sorted_tools_are_not_rewritten() {
+        // Invariant I1. Rebuilding a body to write back what it already said would cost
+        // a cache miss to change nothing.
+        let source = r#"{"model":"m","tools":[{"name":"apple"},{"name":"zebra"}]}"#;
+        let mut parsed: Value = serde_json::from_str(source).unwrap();
+
+        assert!(!normalize_tools(&mut parsed));
+        assert!(crate::body::replace_top_level_member(
+            source.as_bytes(),
+            "tools",
+            r#"[{"name":"apple"},{"name":"zebra"}]"#
+        )
+        .is_none());
     }
 }

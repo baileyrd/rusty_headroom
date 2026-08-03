@@ -36,6 +36,8 @@ pub mod vars {
     pub const MEMORY: &str = "HEADROOM_MEMORY";
     /// How many memories one injection may carry.
     pub const MEMORY_LIMIT: &str = "HEADROOM_MEMORY_LIMIT";
+    /// Set to `1` to normalize tools and place `cache_control` breakpoints.
+    pub const STABILIZE: &str = "HEADROOM_STABILIZE";
 }
 
 /// Default listen port.
@@ -276,6 +278,29 @@ impl Config {
             .and_then(|raw| raw.trim().parse().ok())
             .filter(|limit| *limit > 0)
             .unwrap_or(DEFAULT_MEMORY_LIMIT)
+    }
+
+    /// Whether cache stabilization may rewrite the hot zone.
+    ///
+    /// # Off by default, and this one is not timidity
+    ///
+    /// Invariant I2 says the cache hot zone — `system`, `tools[*]`, frozen messages — is
+    /// never modified. Normalizing tools and placing `cache_control` breakpoints both
+    /// modify it, so they cannot be on by default without making I2 a slogan rather than
+    /// a property the tests enforce.
+    ///
+    /// The trade they offer is real but it is a *trade*: one cache miss now, in exchange
+    /// for hits later. Placing breakpoints is how an Anthropic conversation gets cached
+    /// at all, and normalizing tools rescues a client that serializes them inconsistently
+    /// between runs. Both are worth it for some deployments and pure cost for others —
+    /// a client that already serializes stably pays the miss and gains nothing.
+    ///
+    /// So the operator decides, and the I2 tests keep running against the default.
+    pub fn stabilization_enabled() -> bool {
+        matches!(
+            setting(vars::STABILIZE).unwrap_or_default().trim(),
+            "1" | "true" | "on" | "yes"
+        )
     }
 
     /// Whether compression runs at all.

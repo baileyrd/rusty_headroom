@@ -68,7 +68,11 @@ pub async fn chat_completions(
         );
     }
 
-    let outgoing = shape_openai(&compressed, policy);
+    // Tool normalization first, then the OpenAI-specific shaping. Both are cache
+    // stabilization rather than compression, which is why they run after the savings
+    // measurement above.
+    let stabilized = crate::stabilization::stabilize(Dialect::OpenAi, &compressed, policy);
+    let outgoing = shape_openai(&stabilized, policy);
 
     relay_to(&state, &headers, "/v1/chat/completions", outgoing, policy).await
 }
@@ -202,7 +206,8 @@ pub async fn responses(
         );
     }
 
-    let outgoing = shape_openai(&compressed, policy);
+    let stabilized = crate::stabilization::stabilize(Dialect::OpenAiResponses, &compressed, policy);
+    let outgoing = shape_openai(&stabilized, policy);
 
     relay_to(&state, &headers, "/v1/responses", outgoing, policy).await
 }

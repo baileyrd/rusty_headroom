@@ -6,6 +6,45 @@ the crate starts publishing releases.
 
 ---
 
+## Cache stabilization reaches the request path, behind an opt-in
+**2026-08-03** · gap row X15 and invariant I7's normalization half
+
+- **Added:** `stabilization::stabilize`, called from all three request handlers, and
+  `body::replace_top_level_member` (byte-faithful, the counterpart to the existing
+  insert).
+- **Added:** `HEADROOM_STABILIZE`, **default off**.
+- **Changed:** breakpoints now sit at fixed anchors (1, 3, 7, 15) rather than an even
+  spread.
+- **Found by the same audit as Y3:** all four public functions in `stabilization.rs` had
+  zero references outside their own file. X15 was marked "Done" on the strength of the
+  function existing.
+- **The invariant tests caught this, and they were right.** Wiring it in made two I2
+  tests fail: normalizing tools rewrites `tools`, and placing a breakpoint rewrites a
+  frozen message — both the hot zone I2 says is never modified. Rather than relax the
+  tests, stabilization is opt-in and the tests run against the default, so I2 stays a
+  property rather than a slogan. See `DECISIONS.md` D20.
+- **Design note:** there is no placement that avoids the hot zone. A marker on the newest
+  message would be legal *and worse than useless* — it moves next turn, so the prefix it
+  caused to be cached no longer matches, and Anthropic bills cache writes at a premium.
+  It would pay to write a cache that is never read.
+- **A latent defect fixed on the way in:** the existing even-spread placement recomputes
+  to a different set every couple of turns, and the index that moves first is the
+  *earliest* — rewriting the head of the prefix and invalidating the whole cache.
+  Modelling it across turns showed the set changing at 6, 10, 14 and 18 messages. Wired
+  as written, the feature would have busted the cache every two turns on exactly the long
+  conversations it exists to help. Fixed anchors are monotone: only ever added, never
+  moved, and there is a test that fails if that stops being true.
+- **Corrected:** X16 (`prompt_cache_key`) was *already* on the request path, in
+  `openai::shape_openai`, byte-faithfully. `stabilization::inject_prompt_cache_key` is a
+  `Value`-shaped duplicate; routing through it would re-serialize the whole body and cost
+  the cache miss the key exists to avoid. It is documented as such rather than wired.
+- **Verified through the release binary:** with `HEADROOM_STABILIZE` unset the request
+  reaches the provider byte-identical; with it set to `1` the tools arrive sorted
+  (`zebra, apple` → `apple, zebra`), breakpoints land at indices 1, 3 and 7, and every
+  unmarked message is still a verbatim byte copy.
+
+---
+
 ## Memory reaches the live-zone tail
 **2026-08-03** · gap row Y3
 

@@ -281,6 +281,66 @@ pub fn insert_top_level_member(body: &[u8], key: &str, value_json: &str) -> Opti
     Some(out)
 }
 
+/// Replaces one top-level member's value, leaving every other byte alone.
+///
+/// The counterpart to [`insert_top_level_member`], and byte-faithful for the same
+/// reason: only the named member is rewritten, so the frozen prefix and every other
+/// member survive as the exact bytes the customer sent.
+///
+/// Returns `None` when nothing should change — the body is not a JSON object, the key is
+/// absent, or the new value is byte-identical to the one already there. That last case
+/// matters: rebuilding a body to write back what it already said would cost a cache miss
+/// to change nothing.
+///
+/// # Example
+///
+/// ```
+/// use headroom_proxy::body::replace_top_level_member;
+///
+/// let out = replace_top_level_member(br#"{"a":1,"tools":[2],"b":3}"#, "tools", "[1,2]").unwrap();
+/// assert_eq!(out, br#"{"a":1,"tools":[1,2],"b":3}"#);
+///
+/// // Unchanged value — no rebuild.
+/// assert!(replace_top_level_member(br#"{"a":1}"#, "a", "1").is_none());
+/// // Absent key — this never inserts.
+/// assert!(replace_top_level_member(br#"{"a":1}"#, "zz", "2").is_none());
+/// ```
+pub fn replace_top_level_member(body: &[u8], key: &str, value_json: &str) -> Option<Vec<u8>> {
+    let members = serde_json::from_slice::<OrderedMembers>(body).ok()?;
+    if !members.0.iter().any(|(existing, _)| *existing == key) {
+        return None;
+    }
+    // Writing back an identical value would rebuild the body to change nothing, and a
+    // rebuilt body is a different byte sequence even when it says the same thing.
+    if members
+        .0
+        .iter()
+        .any(|(existing, value)| *existing == key && value.get() == value_json)
+    {
+        return None;
+    }
+
+    let mut out = String::with_capacity(body.len() + value_json.len());
+    out.push('{');
+    for (position, (member, value)) in members.0.iter().enumerate() {
+        if position > 0 {
+            out.push(',');
+        }
+        // Re-emitted through `serde_json` so escaping stays correct for exotic names.
+        out.push_str(&serde_json::to_string(member).unwrap_or_else(|_| format!("\"{member}\"")));
+        out.push(':');
+        if *member == key {
+            out.push_str(value_json);
+        } else {
+            // Exact byte copy — the reason every value is kept as a `RawValue`.
+            out.push_str(value.get());
+        }
+    }
+    out.push('}');
+
+    Some(out.into_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
