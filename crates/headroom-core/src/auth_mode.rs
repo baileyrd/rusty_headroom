@@ -103,6 +103,22 @@ pub struct CompressionPolicy {
     /// Off outside pay-as-you-go. Lossy compression visibly rewrites content, and on
     /// subscription traffic that is the disclosure to avoid.
     pub lossy_transforms: bool,
+    /// Whether *lossless* reformatting may run.
+    ///
+    /// # Why this is a separate permission, and why subscription still says no
+    ///
+    /// A lossless reformat preserves the decoded meaning exactly, so it is tempting to
+    /// treat it as universally safe. It is not, for the same reason
+    /// `may_strip_accept_encoding` is off here: the byte-level shape of a client's
+    /// request is part of how that client *looks*. A subscription CLI serializes its
+    /// JSON a particular way, and a proxy that reflows the whitespace makes the traffic
+    /// distinguishable from the same client running unproxied — which is the
+    /// fingerprint-class disclosure this whole policy exists to prevent.
+    ///
+    /// OAuth is different: the hazard there is a modification falling outside the
+    /// granted scope, not the account being identified as proxied. A change that
+    /// preserves meaning exactly cannot exceed a scope.
+    pub lossless_transforms: bool,
     /// Whether `cache_control` breakpoints may be placed automatically.
     ///
     /// Off outside pay-as-you-go: an injected breakpoint on OAuth traffic could fall
@@ -125,6 +141,7 @@ impl CompressionPolicy {
         match mode {
             AuthMode::PayAsYouGo => Self {
                 lossy_transforms: true,
+                lossless_transforms: true,
                 auto_cache_control: true,
                 auto_prompt_cache_key: true,
                 forwarded_headers: true,
@@ -132,8 +149,10 @@ impl CompressionPolicy {
             },
             AuthMode::OAuth => Self {
                 // Lossless only, and no automatic markers that could fall outside the
-                // granted scope.
+                // granted scope. A meaning-preserving reformat cannot exceed a scope,
+                // so it is permitted here where it is not on subscription traffic.
                 lossy_transforms: false,
+                lossless_transforms: true,
                 auto_cache_control: false,
                 auto_prompt_cache_key: false,
                 forwarded_headers: true,
@@ -145,11 +164,12 @@ impl CompressionPolicy {
 
     /// Whether any compression at all is permitted.
     ///
-    /// Lossless transforms run on every mode, so this is always `true`. It exists so
-    /// callers do not infer "subscription means no compression" from the all-false
-    /// policy — the restriction is on *lossy* work and on proxy-revealing changes.
+    /// False for subscription mode, and that is the honest answer rather than a
+    /// disappointing one: every transform this crate has either rewrites content or
+    /// reflows its bytes, and both are visible to a provider comparing proxied traffic
+    /// against unproxied. Subscription mode buys safety by giving up compression.
     pub fn compression_permitted(&self) -> bool {
-        true
+        self.lossy_transforms || self.lossless_transforms
     }
 }
 
@@ -255,8 +275,23 @@ mod tests {
     fn oauth_is_lossless_only_and_places_no_markers() {
         let policy = CompressionPolicy::for_mode(AuthMode::OAuth);
         assert!(!policy.lossy_transforms);
+        assert!(
+            policy.lossless_transforms,
+            "a meaning-preserving reformat cannot exceed a scope"
+        );
         assert!(!policy.auto_cache_control, "could fall outside the grant");
         assert!(!policy.auto_prompt_cache_key);
+    }
+
+    #[test]
+    fn subscription_forbids_even_lossless_reformatting() {
+        // The tempting mistake: "lossless preserves meaning, so it must be safe". It is
+        // not, for the same reason `may_strip_accept_encoding` is off here — the
+        // byte-level shape of a request is part of how a client looks, and reflowing it
+        // makes the traffic distinguishable from the same client running unproxied.
+        let policy = CompressionPolicy::for_mode(AuthMode::Subscription);
+        assert!(!policy.lossless_transforms);
+        assert!(!policy.compression_permitted());
     }
 
     #[test]
@@ -283,15 +318,12 @@ mod tests {
     }
 
     #[test]
-    fn lossless_compression_is_permitted_on_every_mode() {
-        // "Subscription" restricts lossy work and proxy-revealing changes, not
-        // compression as such.
-        for mode in [
-            AuthMode::PayAsYouGo,
-            AuthMode::OAuth,
-            AuthMode::Subscription,
-        ] {
-            assert!(CompressionPolicy::for_mode(mode).compression_permitted());
-        }
+    fn only_subscription_gives_up_compression_entirely() {
+        // The honest answer rather than a disappointing one: every transform this crate
+        // has either rewrites content or reflows its bytes, and both are visible to a
+        // provider comparing proxied traffic against unproxied.
+        assert!(CompressionPolicy::for_mode(AuthMode::PayAsYouGo).compression_permitted());
+        assert!(CompressionPolicy::for_mode(AuthMode::OAuth).compression_permitted());
+        assert!(!CompressionPolicy::for_mode(AuthMode::Subscription).compression_permitted());
     }
 }
