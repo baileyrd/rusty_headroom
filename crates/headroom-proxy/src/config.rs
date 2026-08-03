@@ -15,6 +15,8 @@ use std::env;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::RwLock;
 
+use headroom_core::output_shaping::Verbosity;
+
 /// Environment variable names, in one place so they can be documented and tested
 /// rather than scattered as string literals.
 pub mod vars {
@@ -26,6 +28,8 @@ pub mod vars {
     pub const UPSTREAM: &str = "HEADROOM_UPSTREAM";
     /// Set to `0` to forward everything untouched.
     pub const COMPRESSION: &str = "HEADROOM_COMPRESSION";
+    /// Output verbosity steering: `terse`, `full`, or unset for neither.
+    pub const OUTPUT_SHAPER: &str = "HEADROOM_OUTPUT_SHAPER";
 }
 
 /// Default listen port.
@@ -161,6 +165,27 @@ impl Config {
     /// Base URL requests are forwarded to, without a trailing slash.
     pub fn upstream(&self) -> &str {
         &self.upstream
+    }
+
+    /// How much output to ask the model for.
+    ///
+    /// Off unless explicitly set. Output shaping changes what the model *writes*, which
+    /// is a visible change to the customer's product rather than an invisible saving —
+    /// a proxy that quietly made every answer terser would be editing someone's
+    /// application on their behalf.
+    ///
+    /// `1` and `on` mean terse, since that is the reason anyone enables this.
+    pub fn verbosity(&self) -> Verbosity {
+        match setting(vars::OUTPUT_SHAPER)
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "terse" | "1" | "on" | "true" | "yes" => Verbosity::Terse,
+            "full" | "verbose" => Verbosity::Full,
+            _ => Verbosity::Default,
+        }
     }
 
     /// Whether compression runs at all.

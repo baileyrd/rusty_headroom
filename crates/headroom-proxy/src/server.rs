@@ -13,7 +13,7 @@ use axum::Router;
 use headroom_core::ccr::InMemoryCcrStore;
 use headroom_core::tokenizer::{HeuristicEstimator, Tokenizer};
 
-use crate::compression::{compress_request, Compressors};
+use crate::compression::{compress_dialect, Compressors, Dialect};
 use crate::config::Config;
 use crate::guard::{is_self_referential, RateLimiter};
 use crate::headers::{sanitize, HeaderPolicy};
@@ -159,11 +159,13 @@ async fn messages(
         "prepared upstream headers"
     );
 
-    let compressed = compress_request(
+    let compressed = compress_dialect(
+        Dialect::Anthropic,
         &body,
         &state.compressors,
         config.compression_enabled(),
         policy,
+        config.verbosity(),
     );
 
     // Measured on the bytes that actually go out, not on what the compressor claimed.

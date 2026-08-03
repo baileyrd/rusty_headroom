@@ -47,6 +47,7 @@ pub async fn chat_completions(
         state.compressors(),
         config.compression_enabled(),
         policy,
+        config.verbosity(),
     );
 
     // Measured against the bytes that actually leave, before the cache key is added —
@@ -101,6 +102,7 @@ pub async fn responses(
         state.compressors(),
         config.compression_enabled(),
         policy,
+        config.verbosity(),
     );
 
     if compressed.as_ref() == body.as_ref() {
@@ -166,6 +168,7 @@ mod tests {
     use super::*;
     use crate::compression::Compressors;
     use headroom_core::ccr::InMemoryCcrStore;
+    use headroom_core::output_shaping::Verbosity;
     use std::sync::Arc;
 
     fn compressors() -> Compressors {
@@ -210,6 +213,7 @@ mod tests {
             &compressors(),
             true,
             payg(),
+            Verbosity::Default,
         );
 
         assert!(
@@ -231,6 +235,7 @@ mod tests {
             &compressors(),
             true,
             payg(),
+            Verbosity::Default,
         );
         let out = String::from_utf8(out.into_owned()).unwrap();
 
@@ -265,6 +270,7 @@ mod tests {
             &compressors(),
             true,
             payg(),
+            Verbosity::Default,
         );
 
         assert_eq!(
@@ -284,6 +290,7 @@ mod tests {
             &compressors(),
             true,
             restricted,
+            Verbosity::Default,
         );
         assert_eq!(out.as_ref(), source.as_bytes());
     }
@@ -297,6 +304,7 @@ mod tests {
             &compressors(),
             true,
             payg(),
+            Verbosity::Default,
         )
         .into_owned();
 
@@ -307,6 +315,7 @@ mod tests {
                 &compressors(),
                 true,
                 payg(),
+                Verbosity::Default,
             )
             .into_owned();
             assert_eq!(again, first);
@@ -316,7 +325,14 @@ mod tests {
     #[test]
     fn a_malformed_openai_body_forwards_untouched() {
         for source in [&b"{not json"[..], &b""[..], &br#"{"model":"gpt-4o"}"#[..]] {
-            let out = compress_dialect(Dialect::OpenAi, source, &compressors(), true, payg());
+            let out = compress_dialect(
+                Dialect::OpenAi,
+                source,
+                &compressors(),
+                true,
+                payg(),
+                Verbosity::Default,
+            );
             assert_eq!(out.as_ref(), source);
         }
     }

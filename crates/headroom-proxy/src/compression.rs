@@ -39,6 +39,7 @@ use headroom_core::ccr::CcrStore;
 use headroom_core::conversation::{Conversation, Message, Role};
 use headroom_core::detection::{detect, ContentType};
 use headroom_core::live_zone::live_zone;
+use headroom_core::output_shaping::{self, Verbosity};
 use headroom_core::tokenizer::HeuristicEstimator;
 use headroom_core::validate::validated_apply;
 use headroom_core::{DiffCompressor, LogCompressor, SearchCompressor, SmartCrusher, Transform};
@@ -136,7 +137,14 @@ pub fn compress_request<'a>(
     enabled: bool,
     policy: CompressionPolicy,
 ) -> Cow<'a, [u8]> {
-    compress_dialect(Dialect::Anthropic, body, compressors, enabled, policy)
+    compress_dialect(
+        Dialect::Anthropic,
+        body,
+        compressors,
+        enabled,
+        policy,
+        Verbosity::Default,
+    )
 }
 
 /// Compresses a request body written in `dialect`.
@@ -149,6 +157,7 @@ pub fn compress_dialect<'a>(
     compressors: &Compressors,
     enabled: bool,
     policy: CompressionPolicy,
+    verbosity: Verbosity,
 ) -> Cow<'a, [u8]> {
     if !enabled {
         return Cow::Borrowed(body);
@@ -204,6 +213,27 @@ pub fn compress_dialect<'a>(
             Err(err) => {
                 tracing::warn!(%err, "compressor failed; forwarding original block");
             }
+        }
+    }
+
+    // Output shaping runs after compression, and after rather than before deliberately:
+    // the note must survive into the bytes that go out, and a compressor running over a
+    // block that already carries it could summarize the instruction away.
+    if let Some((message, block, shaped)) =
+        output_shaping::verbosity_append(&conversation, verbosity)
+    {
+        match edits
+            .iter_mut()
+            .find(|(m, b, _)| *m == message && *b == block)
+        {
+            // A compressor already rewrote this block. Append to *its* output, not to
+            // the original, or the compression would be discarded.
+            Some((_, _, content)) => {
+                if let Some(note) = verbosity.note() {
+                    content.push_str(note);
+                }
+            }
+            None => edits.push((message, block, shaped)),
         }
     }
 
@@ -565,6 +595,159 @@ mod tests {
             sha(source.as_bytes()),
             "a pinned request was modified"
         );
+    }
+
+    // ---- output shaping ----
+
+    /// A request whose newest message is plain prose, so the note has somewhere to go.
+    fn prose_request() -> String {
+        r#"{"model":"claude-opus-4","system":"You are a careful assistant.","tools":[{"name":"read_file"}],"messages":[{"role":"user","content":"turn one"},{"role":"assistant","content":"reply one"},{"role":"user","content":"what does this function do?"}]}"#.to_owned()
+    }
+
+    #[test]
+    fn the_terseness_note_never_touches_the_cached_prefix() {
+        // The headline constraint. The system prompt is the first thing in the cached
+        // prefix, so a note appended there invalidates the whole cache on every
+        // request — saving a couple of hundred output tokens while re-billing tens of
+        // thousands of input ones, and moving the metric people watch in the wrong
+        // direction invisibly.
+        let source = prose_request();
+        let out = compress_dialect(
+            Dialect::Anthropic,
+            source.as_bytes(),
+            &compressors(),
+            true,
+            payg(),
+            Verbosity::Terse,
+        );
+        let out = String::from_utf8(out.into_owned()).unwrap();
+
+        let before: Value = serde_json::from_str(&source).unwrap();
+        let after: Value = serde_json::from_str(&out).unwrap();
+
+        for member in ["system", "tools", "model"] {
+            assert_eq!(before[member], after[member], "{member} was modified");
+        }
+        assert_eq!(
+            before["messages"][0], after["messages"][0],
+            "a frozen turn was modified"
+        );
+        assert_eq!(before["messages"][1], after["messages"][1]);
+    }
+
+    #[test]
+    fn the_terseness_note_lands_on_the_newest_user_message() {
+        let source = prose_request();
+        let out = compress_dialect(
+            Dialect::Anthropic,
+            source.as_bytes(),
+            &compressors(),
+            true,
+            payg(),
+            Verbosity::Terse,
+        );
+        let parsed: Value = serde_json::from_slice(&out).unwrap();
+
+        let newest = parsed["messages"][2]["content"].as_str().unwrap();
+        assert!(newest.starts_with("what does this function do?"));
+        assert!(newest.contains("briefly"), "the note is missing: {newest}");
+    }
+
+    #[test]
+    fn the_default_verbosity_leaves_the_body_byte_identical() {
+        // Output shaping changes what the model *writes*, which is a visible change to
+        // the customer's product rather than an invisible saving. Off unless asked for.
+        let source = prose_request();
+        let out = compress_dialect(
+            Dialect::Anthropic,
+            source.as_bytes(),
+            &compressors(),
+            true,
+            payg(),
+            Verbosity::Default,
+        );
+
+        assert_eq!(sha(&out), sha(source.as_bytes()));
+        assert!(matches!(out, Cow::Borrowed(_)), "should not have rebuilt");
+    }
+
+    #[test]
+    fn shaping_does_not_discard_a_compressors_work() {
+        // Both want the same block when the newest message is a bulky tool result the
+        // compressor rewrote. Appending to the *original* rather than to the compressed
+        // output would silently throw the compression away.
+        let source = request();
+        let out = compress_dialect(
+            Dialect::Anthropic,
+            source.as_bytes(),
+            &compressors(),
+            true,
+            payg(),
+            Verbosity::Terse,
+        );
+
+        let estimator = HeuristicEstimator::new();
+        let before = estimator.count(&source);
+        let after = estimator.count(&String::from_utf8_lossy(&out));
+        assert!(
+            after < before / 2,
+            "compression was discarded by shaping: {before} -> {after}"
+        );
+    }
+
+    #[test]
+    fn shaping_is_deterministic() {
+        // Invariant I4 — the note must not depend on anything but the input.
+        let source = prose_request();
+        let first = compress_dialect(
+            Dialect::Anthropic,
+            source.as_bytes(),
+            &compressors(),
+            true,
+            payg(),
+            Verbosity::Terse,
+        )
+        .into_owned();
+
+        for _ in 0..20 {
+            let again = compress_dialect(
+                Dialect::Anthropic,
+                source.as_bytes(),
+                &compressors(),
+                true,
+                payg(),
+                Verbosity::Terse,
+            )
+            .into_owned();
+            assert_eq!(sha(&again), sha(&first));
+        }
+    }
+
+    #[test]
+    fn shaping_twice_does_not_append_the_note_twice() {
+        // Invariant I3, and the practical failure it prevents: an agent loop that
+        // accumulates the same instruction a dozen times over a long session.
+        let source = prose_request();
+        let once = compress_dialect(
+            Dialect::Anthropic,
+            source.as_bytes(),
+            &compressors(),
+            true,
+            payg(),
+            Verbosity::Terse,
+        )
+        .into_owned();
+        let twice = compress_dialect(
+            Dialect::Anthropic,
+            &once,
+            &compressors(),
+            true,
+            payg(),
+            Verbosity::Terse,
+        )
+        .into_owned();
+
+        assert_eq!(sha(&twice), sha(&once));
     }
 
     // ---- invariants ----
