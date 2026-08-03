@@ -254,10 +254,6 @@ impl Simulator {
     }
 }
 
-/// Builds a router that answers a specific path and 404s the rest.
-///
-/// For tests that need to prove the proxy routed to the *right* path, where a
-
 /// Turns a [`Reply`] into a response, honouring its stall.
 ///
 /// Shared by both handlers deliberately. They each built their own response once, and a
@@ -300,7 +296,10 @@ fn respond(reply: Reply) -> axum::response::Response {
         .into_response()
 }
 
-/// catch-all would pass whatever path arrived.
+/// Builds a router that answers a specific path and 404s the rest.
+///
+/// For tests that need to prove the proxy routed to the *right* path, where a
+/// catch-all fallback would hide a wrong one.
 pub fn strict_router(path: &'static str, reply: Reply, recorder: Recorder) -> Router {
     Router::new().route(
         path,
