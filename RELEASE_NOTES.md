@@ -6,6 +6,46 @@ the crate starts publishing releases.
 
 ---
 
+## Tokenizer registry
+**2026-08-03** · gap row T4
+
+- **Added:** `tokenizer::registry` — `Family`, `Registry`.
+- **Design note, and the reason the module is worth having before T2/T3:** resolution
+  succeeds trivially for models this build knows about. What decides whether a registry
+  is *safe* is what it does for a model it has never seen — and that case is not rare,
+  because a provider ships a new model well before this crate is rebuilt.
+- **Design note:** `for_model` returns a tokenizer for every input, including an empty
+  string. There is no `Option`, because there is nothing useful a caller could do with
+  `None`: invariant I5 validates every compression against a token count, so a caller
+  without one must either skip compression entirely or skip the check. Both are worse
+  than an approximation documented never to under-count.
+- **Design note:** over-counting costs a missed compression — visible, cheap,
+  self-correcting. Under-counting means a payload that *grew* is measured as having
+  shrunk, so I5's safety net passes something that made the request more expensive,
+  silently. A test asserts the fallback never returns a suspiciously low count.
+- **Design note:** classification keys on *family*, not model identifier. A point
+  release rarely changes the tokenizer, and keying on the exact name means every new
+  release date is an unknown model that falls back.
+- **Design note:** matching is on substrings, because identifiers arrive in several
+  shapes for one model — `claude-opus-4-20250514`, `anthropic/claude-sonnet-5`,
+  `bedrock:anthropic.claude-opus-4`. An exact-match table would treat all but one
+  spelling as unknown.
+- **Design note:** the o-series match requires `o` followed by a *digit*. A bare
+  `starts_with('o')` would classify `openhands`, `olmo` and `orca` as OpenAI models and
+  hand them a tokenizer built for a different vocabulary. Tested in both directions.
+- **Design note:** `is_exact` lets a caller report "counted exactly" versus "counted
+  approximately" rather than presenting an estimate as a measurement.
+- **Design note:** registering twice for one family *replaces*. Two tokenizers for one
+  family is a configuration mistake, and silently keeping the first makes the second
+  call look like it did nothing. Entries are sorted, so two identically configured
+  registries describe themselves identically whatever order they were built in.
+- **Known limitation:** no exact tokenizer is registered yet — every model resolves to
+  the heuristic estimator. T2 (tiktoken BPE) and T3 (HuggingFace) are still open, and
+  until one lands `is_exact_for` correctly answers `false` for everything.
+- **Known limitation:** nothing in the proxy consults the registry; `compress_request`
+  still constructs a `HeuristicEstimator` directly. Wiring it needs the model
+  identifier threaded from the request body, which is a separate change.
+
 ## CLI: perf, deploy, update
 **2026-08-03** · gap rows L4, L9, L11
 
