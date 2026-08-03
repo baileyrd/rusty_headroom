@@ -136,7 +136,16 @@ restart. Compression is a bet that can be unwound; in that state it quietly is n
 
 `POST /admin/runtime-env` (loopback only) retunes a running proxy. Settings marked **no**
 above take effect on the next request; the rest are stored and named under `needs_restart`
-rather than letting you believe the change took.
+rather than letting you believe the change took. All three live settings were checked
+against a running proxy rather than assumed: `HEADROOM_COMPRESSION`,
+`HEADROOM_OUTPUT_SHAPER` and `HEADROOM_STABILIZE` each change the next request's forwarded
+body in both directions.
+
+Calls **merge** over the overrides already in force. Send a setting as an empty value to
+take it back; `{}` changes nothing. It used to replace, which meant an operator who turned
+compression off during an incident had it silently turned back on by their next retune of
+anything else — with `applied: ["HEADROOM_STABILIZE"]`, or whatever they had just set, as
+the only report.
 
 ## Development
 

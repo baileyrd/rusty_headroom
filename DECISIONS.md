@@ -1023,3 +1023,54 @@ process-global set at construction hides the dependency the parameter makes obvi
 
 **Would change if:** a caller outside this repository turns up using `Health::current`. It
 would want the old signature back and a builder instead.
+
+---
+
+## D34 — runtime overrides merge, because the check that guards them already did
+
+**Decision:** `set_overrides` merges over the overrides already in force instead of
+replacing them. Sending a setting as an empty value takes it back; `clear_overrides` drops
+everything; `{}` is now a no-op rather than an undocumented wipe.
+
+Two functions modelled two different configurations. `preview_overrides` merges, and its
+doc says why — *"a call that sets only the upstream still has to be judged against whatever
+listen address is currently overridden."* `set_overrides` replaced. So the self-reference
+check that runs before every apply was validating a configuration that would never exist.
+
+The operator-visible half is worse, and is the scenario `admin.rs` opens by naming:
+*"Turning compression off during an incident should not cost"* a restart. Measured against
+a running proxy, forwarding to a loopback capture upstream:
+
+| step | response | forwarded |
+| --- | --- | --- |
+| `{"HEADROOM_COMPRESSION":"0"}` | `applied: [HEADROOM_COMPRESSION]` | 19500 bytes, compression off |
+| `{"HEADROOM_STABILIZE":"1"}` | `applied: [HEADROOM_STABILIZE]` | 1895 bytes, **compression back on** |
+
+`/health` then reported `compression_enabled: true` — accurate, and nobody asked for it.
+Nothing in the second response mentions that the first setting was dropped. An operator
+retuning a proxy mid-incident is exactly who this hurts, and exactly who cannot afford it.
+
+After the change, the same three steps hold both settings at once: 19500 off, 19606 off
+with `cache_control` present, 1895 on with `cache_control` still present.
+
+**Why merge rather than report what was cleared.** Reporting would leave the preview
+unsound — it would still be judging a merged configuration against a replacing apply. Merge
+fixes both halves with one change, and it is the semantics the surviving function already
+documents.
+
+**Nothing depended on replace.** One non-test caller, and the tests reset with
+`clear_overrides` rather than with an empty POST. The wipe-by-`{}` behaviour was never
+documented or tested; it was a consequence of the implementation.
+
+**Found by checking a different claim.** `STARTUP_ONLY` is a second copy of a decision and
+has been wrong once already — the README records `HEADROOM_UPSTREAM` being listed as live
+when it was not. So all three settings *not* on the list were driven end to end against a
+running proxy, in both directions. All three are genuinely live; that check is clean, and
+this turned up on the way past.
+
+**One wrinkle left alone.** An emptied override is not uniformly "unset": `HEADROOM_UPSTREAM`
+filters empty and falls back, while `HEADROOM_COMPRESSION` reads `""` as *enabled* because
+it is not one of the off spellings. Pre-existing, and a separate decision from this one.
+
+**Would change if:** the endpoint grows an explicit way to express "replace everything", at
+which point `{}` could mean that again — deliberately, and with a test.
