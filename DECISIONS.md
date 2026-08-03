@@ -873,3 +873,54 @@ and the previous version of this file is what happens when nobody checks.
 **Would change if:** a provider starts reporting a cache figure this proxy cannot map onto
 reads and writes. The counter pair is the shared vocabulary; a third kind of number needs
 its own metric rather than a reinterpretation of these two.
+
+---
+
+## D31 — the signals module has one caller, and now says so
+
+**Decision:** correct `signals/`'s documentation to describe its actual reach, keep the
+seven unreached exports, and check the list of them mechanically.
+
+The module doc read: *"Compressors that work line-by-line — logs, diffs, plain text — all
+need the same judgment... This module is that judgment, factored out so the answer is
+consistent across compressors rather than re-invented, slightly differently, in each."*
+Only `text_crusher` has ever imported it. Two functions carried the same shape of claim at
+a smaller scale — `breaks_markup` as *"the check a compressor makes before committing a
+plan"* and `is_removable` as *"the question a compressor actually asks"* — and no
+compressor makes or asks either.
+
+**Nothing was rewired, because the measurement said not to.** A shared-helper module with
+one caller is usually a gap. Here the other compressors turned out not to need this
+judgment, which is a different fact from not having it:
+
+| compressor | what it does instead | measured |
+| --- | --- | --- |
+| logs | pattern digest; rare lines print verbatim with a count | 3 planted failures — a connection error, a panic, a Python traceback — all survived a 400-line log intact |
+| diffs | keeps every `@@` header, marks each elision `... N unchanged lines ...` | 2 hunk headers in, 2 out |
+| search | groups by file rather than ranking lines |  |
+
+So `is_error_line` is unreached and log errors survive anyway; `is_removable` is unreached
+and diffs keep their anchors anyway. Wiring them in would have been motion, not a fix.
+
+**One measured case is real and still not wired.** The diff compressor drops the final line
+of its input when that line is trailing context, so a document whose closing delimiter
+lands there ships unbalanced: 8 opening tags in and 8 out, against 8 closing tags in and 7
+out. `breaks_markup` is exactly that guard. It stays unwired because a diff announces its
+own elisions and a reader is not misled the way they would be in prose — but that is a
+judgment about diffs, not evidence the guard is unnecessary, and the number is recorded so
+the next person does not have to re-derive it.
+
+**The exports stay.** Deleting seven public functions is an API change, and this loop
+merges pure additions unattended and nothing else. Leaving them undocumented is how the
+false claim survived in the first place, so the doc now lists them and audit **check 12**
+compares that list against reality in both directions: wire one up without updating the
+doc and it fires; add an export and forget it and it fires. Verified by mutation both ways.
+
+Types are out of scope for the check. `ScoredLine` and `Importance` appear in the
+signatures of functions that *are* called, so a caller uses them without naming them, and
+demanding a textual reference would cry wolf — the failure this script has now recorded
+three times.
+
+**Would change if:** a second line-dropping compressor appears. That is the moment the
+original claim becomes worth making true rather than worth correcting, and `breaks_markup`
+gets its caller.

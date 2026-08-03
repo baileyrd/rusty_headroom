@@ -169,8 +169,9 @@ pub fn protected_lines(lines: &[&str]) -> Vec<usize> {
 
 /// Whether removing `removed` from `lines` would leave markup unbalanced.
 ///
-/// The check a compressor makes before committing a plan. Cheaper to answer once over
-/// the whole plan than to reason about per line.
+/// Cheaper to answer once over a whole plan than to reason about per line — which is what
+/// it was written for, and no compressor does it. See the "exports with no caller" list in
+/// [`crate::signals`]; the diff compressor has a measured case this would catch.
 pub fn breaks_markup(lines: &[&str], removed: &[usize]) -> bool {
     let protected = protected_lines(lines);
     removed

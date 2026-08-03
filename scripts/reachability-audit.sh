@@ -287,6 +287,51 @@ else
   fail "Observer has $variants dialects and the cache test covers $rows — one reports untested zeros"
 fi
 
+echo "== 12. the signals module's list of unreached exports matches reality"
+# `signals/` reads as shared infrastructure and has one caller — `text_crusher`. Its doc
+# claimed the judgment was "factored out so the answer is consistent across compressors
+# rather than re-invented, slightly differently, in each", and named logs and diffs as
+# consumers. Neither has ever imported it.
+#
+# That was measured rather than assumed, and the measurement is why nothing was rewired:
+# logs produce a pattern digest where rare lines survive by being rare (three planted
+# failures survived a 400-line log intact), diffs keep every `@@` header and mark their
+# elisions. They need a different judgment, not this one.
+#
+# So seven functions and consts are exported with no caller. Deleting them is a public-API
+# change and not this loop's call to make unattended; leaving them undocumented is how the
+# false claim above survived. The module doc now lists them, and this check is what keeps
+# that list a fact rather than a decoration — in either direction. Wire one up and the
+# doc must drop it; add an export and forget, and the doc must gain it.
+#
+# Types are deliberately out of scope. `ScoredLine` and `Importance` appear in the
+# signature of functions that *are* called, so a caller uses them without naming them, and
+# demanding a textual reference would cry wolf — the failure mode this script has now
+# recorded three times.
+exports=$(awk '/^pub use/{print}' crates/headroom-core/src/signals/mod.rs \
+  | grep -oP '\{\K[^}]+' | tr ',' '\n' | tr -d ' ' \
+  | grep -E '^([a-z_]+|[A-Z_]+)$' | sort -u)
+# From the heading to the end of the doc block, then intersected with the export list —
+# rather than matched against a hand-written terminator, so rewording the prose below the
+# list cannot silently empty it. Stray links like [`crate::signals`] drop out of the
+# intersection on their own.
+declared=$(awk '/# Exports with no caller/,/^[^\/]/' crates/headroom-core/src/signals/mod.rs \
+  | grep -oP '\[`\K[a-zA-Z_]+' | sort -u \
+  | grep -Fx -f <(printf '%s\n' "$exports"))
+actual=""
+for sym in $exports; do
+  hits=$(grep -rn "\b$sym\b" --include=*.rs crates/ | grep -vc "^crates/headroom-core/src/signals/")
+  [ "$hits" -eq 0 ] && actual="$actual$sym\n"
+done
+actual=$(printf '%b' "$actual" | grep -v '^$' | sort -u)
+if [ "$declared" = "$actual" ]; then
+  note "✓ $(printf '%s' "$actual" | grep -c .) unreached exports, all declared"
+else
+  fail "the doc's unreached-export list does not match reality"
+  printf '      declared but reached: %s\n' "$(comm -23 <(printf '%s\n' "$declared") <(printf '%s\n' "$actual") | tr '\n' ' ')"
+  printf '      unreached and undeclared: %s\n' "$(comm -13 <(printf '%s\n' "$declared") <(printf '%s\n' "$actual") | tr '\n' ' ')"
+fi
+
 echo
 [ "$status" -eq 0 ] && echo "clean" || echo "findings above — see the header for why this matters"
 exit "$status"

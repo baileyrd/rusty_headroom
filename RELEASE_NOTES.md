@@ -6,6 +6,34 @@ the crate starts publishing releases.
 
 ---
 
+## `signals/` claimed to be shared infrastructure and has one caller
+**2026-08-03** · a confident false claim, corrected rather than papered over
+
+- The module doc said its judgment was *"factored out so the answer is consistent across
+  compressors rather than re-invented, slightly differently, in each"*, naming logs, diffs
+  and plain text. Only `text_crusher` has ever imported it. `breaks_markup` was documented
+  as *"the check a compressor makes before committing a plan"* and `is_removable` as *"the
+  question a compressor actually asks"* — no compressor makes or asks either.
+- **Nothing was rewired**, because measuring first said not to. The other compressors do
+  not drop lines the way prose does:
+
+  | compressor | measured |
+  | --- | --- |
+  | logs | 3 planted failures — connection error, panic, Python traceback — all survived a 400-line log intact; rare lines print verbatim with their count |
+  | diffs | 2 `@@` headers in, 2 out; every elision marked `... N unchanged lines ...` |
+
+- **One real case found and recorded, not fixed:** the diff compressor drops the final line
+  of its input when that line is trailing context, so a document whose closing delimiter
+  lands there ships unbalanced — 8 opening tags in and 8 out, against 8 closing tags in and
+  7 out. `breaks_markup` is that guard. Left unwired because a diff announces its own
+  elisions; the number is in `DECISIONS.md` so nobody re-derives it.
+- The seven unreached exports stay — deleting public API is not something this loop does
+  unattended — but the module doc now lists them, and audit **check 12** compares that list
+  against reality in both directions. Verified by mutation both ways: wiring `breaks_markup`
+  up without updating the doc fires it, and dropping `find_tags` from the list fires it.
+
+---
+
 ## Cache accounting was Anthropic-only, under a comment saying it had to be
 **2026-08-03** · two of three proxied surfaces reported nothing on the headline metric
 
