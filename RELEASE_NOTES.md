@@ -6,6 +6,35 @@ the crate starts publishing releases.
 
 ---
 
+## The one-surface-of-three pattern gets written down, and two more features get checked
+**2026-08-03** · a fourth lesson, after the same gap shipped four times
+
+- Four capabilities have now been built against `/v1/messages`, tested against it, and
+  described in prose as if they covered all three proxied surfaces:
+
+  | capability | true for | false for |
+  | --- | --- | --- |
+  | the compressible-type list | one copy | seven others that drifted |
+  | `volatile::scan` | `/v1/messages` | both OpenAI handlers |
+  | SSE cache accounting | Anthropic | both OpenAI dialects |
+  | `passthrough` help text | `/v1/messages` (69→69) | chat (62→88), responses (59→85) |
+
+- Each was found by asking which surfaces a capability runs on, not by a test failing.
+  **The comment is the tell** — every one carried prose asserting the gap was deliberate.
+- CONTRIBUTING gains the lesson, with the two habits that catch it: write the test as a
+  table over the dialects and pin every row's expected outcome, and where the table can go
+  stale, make an audit check force it complete.
+- **Memory injection and output shaping were checked under the same suspicion and are
+  fine** on all three dialects. Both were previously tested on `Dialect::Anthropic` only,
+  so that is now pinned rather than left as something someone once measured — with a
+  control asserting the same request at default verbosity is left alone, so the terseness
+  assertion is the shaper acting rather than any rewrite at all.
+- Verified by mutation per dialect: blinding `inject_append` and `verbosity_append` each
+  fails the Anthropic row, and with the table scoped to the OpenAI rows, fails those too —
+  so no row is carried by another.
+
+---
+
 ## `passthrough` was documented as "forwarded unchanged" and is not
 **2026-08-03** · a metric describing a guarantee stronger than it can make
 

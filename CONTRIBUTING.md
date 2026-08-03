@@ -100,6 +100,43 @@ A decline test is exempt only when it asserts the *specific* reason. `Declined::
 distinguishes "refused because signed" from "refused because small"; a bare `is_err()`
 does not.
 
+### A capability built for one surface gets described as if it covered all three
+
+Three surfaces are proxied — `/v1/messages`, `/v1/chat/completions`, `/v1/responses`.
+Anything that crosses them tends to get built against the Anthropic one, tested against the
+Anthropic one, and then written up in prose that says "the proxy does X", with no step in
+between where anyone checks the other two. Four times so far:
+
+| capability | true for | false for | what it cost |
+| --- | --- | --- | --- |
+| the compressible-type list | one copy | seven others that drifted | every source file forwarded uncompressed while `detect` reported it as code |
+| `volatile::scan` | `/v1/messages` | both OpenAI handlers | 0 findings on OpenAI shapes; it knew only Anthropic-shaped `system`/`tools` |
+| SSE cache accounting | Anthropic | both OpenAI dialects | `cache_hit_rate` read as *no data* for every OpenAI conversation |
+| `passthrough` help text | `/v1/messages` (69→69) | chat (62→88), responses (59→85) | a metric promising byte-identity it does not have |
+
+Each was found by asking "which surfaces does this actually run on?" rather than by a test
+failing. **The comment is the tell.** Every one carried prose asserting the gap was
+deliberate — *"neither reports cache usage in its stream — the honest answer, not a gap"*
+was guarding a claim that was simply false. A sentence explaining why a capability stops at
+one surface is the thing to go and measure, not the thing that settles it.
+
+Two habits, both cheap:
+
+- **Write the test as a table over the dialects, not as one case.** A table makes the gap
+  visible at the point of writing, and a row that has no assertion to make is itself an
+  answer. `every_dialect_reports_the_cache_usage_its_provider_sends` and
+  `passthrough_is_byte_identical_only_where_nothing_enriches` are the shape to copy — note
+  that the second pins the *expected* outcome per row, including the boring ones, so
+  enrichment leaking onto `/v1/messages` fails it too.
+- **Where the table can go stale, make the audit force it.** Check 11 requires `Observer`
+  to have exactly as many variants as the cache test has rows, so a fourth dialect cannot
+  ship reporting untested zeros.
+
+Not everything cross-cutting is broken this way, and guessing is not the point — memory
+injection and output shaping were checked under the same suspicion and work on all three
+(`memory_and_output_shaping_reach_every_dialect`). Measuring cost less than arguing about
+it would have.
+
 ## Review & merge
 - Every change lands through a PR — no direct pushes to the default branch.
 - CI must be green before merge.
