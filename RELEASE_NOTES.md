@@ -6,6 +6,58 @@ the crate starts publishing releases.
 
 ---
 
+## PR #16 — Token validation with fallback to the original (invariant I5)
+**2026-08-03** · [#16](https://github.com/baileyrd/rusty_headroom/pull/16) · closes [#8](https://github.com/baileyrd/rusty_headroom/issues/8)
+
+- **Added:** `validated_apply` — if a compression does not reduce the token count,
+  the original is forwarded. Wraps transform dispatch, so no compressor can opt out.
+- **Behavior worth knowing:** equal token counts are treated as *not* an improvement
+  and discarded. A compression saving zero tokens still costs a CCR entry and a
+  possible retrieval round-trip.
+- **Behavior worth knowing:** a transform that mutates a block and then declines has
+  its partial mutation reverted unconditionally. Half-finished work never reaches
+  upstream.
+- **Behavior worth knowing:** invariant violations propagate rather than being
+  absorbed by the fallback. Only *declined* and *malformed* outcomes are recoverable.
+- **Known limitation:** counts come from the heuristic estimator, which is
+  deliberately conservative, so some genuine compressions are declined that an exact
+  tokenizer would accept. Safe direction, but savings are left on the table until the
+  tiktoken and HuggingFace backends land.
+- **Known limitation:** two tokenizer passes per attempted compression. Acceptable
+  with the heuristic estimator; worth revisiting alongside an exact BPE tokenizer.
+
+## PR #13 — CCR content addressing, marker format, and in-memory store
+**2026-08-03** · [#13](https://github.com/baileyrd/rusty_headroom/pull/13) · closes [#9](https://github.com/baileyrd/rusty_headroom/issues/9), [#10](https://github.com/baileyrd/rusty_headroom/issues/10)
+
+- **Added:** `ContentHash` (BLAKE3 truncated to 128 bits), the `<<ccr:HASH>>` marker
+  format, the `CcrStore` trait, and an in-memory backend with TTL expiry.
+- **Added:** `store_and_mark`, which stores content under exactly the hash its marker
+  advertises — the two halves cannot drift apart.
+- **Design note:** hashes derive from content alone, with no counter, timestamp, or
+  session identifier. That is what makes markers replay-safe and keeps the provider's
+  prompt cache hitting across identical requests.
+- **Design note:** the store reads a clock for TTL, which does not conflict with
+  invariant I4 — hashing never consults it, so the bytes sent upstream are unaffected.
+- **Known limitation:** in-memory only; SQLite and Redis backends are still open.
+- **Known limitation:** no eviction beyond TTL, and nothing schedules `purge_expired`
+  yet. Expired entries correctly read as absent, but stay resident until something
+  sweeps them.
+
+## PR #12 — Block type and transform traits
+**2026-08-03** · [#12](https://github.com/baileyrd/rusty_headroom/pull/12) · closes [#7](https://github.com/baileyrd/rusty_headroom/issues/7)
+
+- **Added:** `Block` — sibling fields private, one mutable accessor. A transform
+  cannot change what binds a tool result to the call it answers.
+- **Added:** `Transform` as `fn(&mut Block) -> Result<()>`, which makes "reorder the
+  content array", "split this block", and "add a field" unrepresentable rather than
+  merely forbidden.
+- **Added:** `LosslessTransform` / `LossyTransform` as separate traits, so the
+  auth-mode policy gate is a type signature rather than a runtime flag.
+- **Added:** `apply_guarded`, centralizing the refusal of signed, encrypted, and
+  redacted blocks so the check exists in exactly one place.
+- **Known limitation:** `Block` holds content as `String`. Byte-faithful passthrough
+  at the proxy boundary will need `RawValue`-backed storage for untouched blocks.
+
 ## Parity loop — workspace foundation and the first core modules
 **2026-08-03** · closes [#2](https://github.com/baileyrd/rusty_headroom/issues/2), [#3](https://github.com/baileyrd/rusty_headroom/issues/3), [#4](https://github.com/baileyrd/rusty_headroom/issues/4), [#5](https://github.com/baileyrd/rusty_headroom/issues/5), [#6](https://github.com/baileyrd/rusty_headroom/issues/6)
 
