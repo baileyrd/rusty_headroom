@@ -6,6 +6,30 @@ the crate starts publishing releases.
 
 ---
 
+## D9 gets a test; the simulator learns to stall
+**2026-08-03** · a decision with nothing enforcing it
+
+- **Added:** `Reply::stalling(after, pause)`, which streams a body in two chunks with a
+  real pause between them, and `a_stream_that_pauses_mid_generation_still_arrives_whole`.
+- **The gap:** D9 deliberately sets no total-request timeout, because a long generation is
+  a normal outcome rather than a stuck request. **Nothing tested it.** Adding
+  `.timeout(30s)` to the upstream client is a natural review suggestion and would have
+  started truncating real completions in production with every test green.
+- **Verified by mutation:** a 500 ms total timeout fails the new test.
+- **Stated limit:** the pause is short, so this cannot prove the absence of a timeout —
+  only of an aggressive one. What it pins is that the relay holds a stream open across a
+  gap rather than ending it. The test says so rather than implying more.
+- **Design note:** the stall streams two chunks rather than sleeping and then answering.
+  Sleeping first tests nothing — the client sees one fast response that happened to arrive
+  late, which is not the shape of a long generation on the wire.
+- **Design note:** the split lands *mid-frame*, not on an event boundary, so a timeout
+  that only counted whole frames could not slip through.
+- **Found while wiring it:** `Simulator::start` and `strict_router` each built their own
+  response, so a capability added to one silently did nothing in the other. They now share
+  one responder — the same duplicate-implementation shape as the three routing tables.
+
+---
+
 ## The cross-process claim, actually measured
 **2026-08-03** · evidence for D12
 

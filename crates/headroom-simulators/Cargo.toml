@@ -12,7 +12,9 @@ authors.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 axum.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["time"] }
+# For `Reply::stalling`, which streams a body in two chunks with a pause between them.
+futures-util = "0.3"
 http.workspace = true
 
 [dev-dependencies]

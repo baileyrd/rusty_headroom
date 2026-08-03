@@ -108,6 +108,12 @@ pub struct Reply {
     pub body: Vec<u8>,
     /// `content-type` to set.
     pub content_type: &'static str,
+    /// A pause inserted partway through the body, if any.
+    ///
+    /// Models the shape a real long generation has: bytes, a think, more bytes. A
+    /// provider that answered instantly can never exercise the path where something
+    /// between here and the client gives up waiting.
+    pub stall: Option<(usize, std::time::Duration)>,
 }
 
 impl Reply {
@@ -117,6 +123,7 @@ impl Reply {
             status: StatusCode::OK,
             body: body.into().into_bytes(),
             content_type: "application/json",
+            stall: None,
         }
     }
 
@@ -126,7 +133,18 @@ impl Reply {
             status: StatusCode::OK,
             body: body.into().into_bytes(),
             content_type: "text/event-stream",
+            stall: None,
         }
+    }
+
+    /// Pauses for `pause` after the first `after` bytes of the body.
+    ///
+    /// The reply still completes; only its timing changes. That distinction is the point —
+    /// the failure being modelled is something giving up on a stream that was always
+    /// going to finish.
+    pub fn stalling(mut self, after: usize, pause: std::time::Duration) -> Self {
+        self.stall = Some((after, pause));
+        self
     }
 
     /// An error reply in the provider's own shape.
@@ -144,6 +162,7 @@ impl Reply {
             .to_string()
             .into_bytes(),
             content_type: "application/json",
+            stall: None,
         }
     }
 }
@@ -186,11 +205,7 @@ impl Simulator {
                         body: body.to_vec(),
                         headers,
                     });
-                    (
-                        reply.status,
-                        [("content-type", reply.content_type)],
-                        reply.body,
-                    )
+                    respond(reply)
                 }
             },
         ));
@@ -239,10 +254,52 @@ impl Simulator {
     }
 }
 
+/// Turns a [`Reply`] into a response, honouring its stall.
+///
+/// Shared by both handlers deliberately. They each built their own response once, and a
+/// capability added to one silently did nothing in the other — which is how
+/// `Reply::stalling` would have appeared to work in `strict_router` while every test
+/// using `Simulator::start` got an instant answer.
+fn respond(reply: Reply) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let Some((after, pause)) = reply.stall else {
+        return (
+            reply.status,
+            [("content-type", reply.content_type)],
+            axum::body::Body::from(reply.body),
+        )
+            .into_response();
+    };
+
+    // Streamed in two chunks with a real pause between them, rather than returned whole
+    // after a sleep. Sleeping first and answering afterwards tests nothing: the client
+    // sees one fast response that happened to arrive late, which is not the shape of a
+    // long generation on the wire.
+    let split = after.min(reply.body.len());
+    let (head, tail) = reply.body.split_at(split);
+    let (head, tail) = (head.to_vec(), tail.to_vec());
+
+    use futures_util::StreamExt;
+    let stream =
+        futures_util::stream::once(async move { Ok::<_, std::io::Error>(Bytes::from(head)) })
+            .chain(futures_util::stream::once(async move {
+                tokio::time::sleep(pause).await;
+                Ok::<_, std::io::Error>(Bytes::from(tail))
+            }));
+
+    (
+        reply.status,
+        [("content-type", reply.content_type)],
+        axum::body::Body::from_stream(stream),
+    )
+        .into_response()
+}
+
 /// Builds a router that answers a specific path and 404s the rest.
 ///
 /// For tests that need to prove the proxy routed to the *right* path, where a
-/// catch-all would pass whatever path arrived.
+/// catch-all fallback would hide a wrong one.
 pub fn strict_router(path: &'static str, reply: Reply, recorder: Recorder) -> Router {
     Router::new().route(
         path,
@@ -255,11 +312,7 @@ pub fn strict_router(path: &'static str, reply: Reply, recorder: Recorder) -> Ro
                     body: body.to_vec(),
                     headers,
                 });
-                (
-                    reply.status,
-                    [("content-type", reply.content_type)],
-                    reply.body,
-                )
+                respond(reply)
             }
         }),
     )
