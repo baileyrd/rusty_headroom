@@ -84,20 +84,44 @@ invalidated an earlier claim — S4 and S5 had been "closed" by wiring them into
 until prose routed.
 
 **The audit is now a script.** `scripts/reachability-audit.sh` runs in CI ahead of the
-build — it checks that every detected content type reaches a compressor, every proxy
-module is referenced, every CLI command is dispatched, and every declared environment
-variable is read. It was verified to reproduce the #82 defect: delete the code arm from
-the routing table and it fails. Knowledge that lives only in a conversation is knowledge
-that gets re-lost.
+build. Its checks are listed in its own header rather than restated here, because a
+summary of a list is one more thing to drift. It was verified to reproduce the #82 defect:
+delete the code arm from the routing table and it fails. Knowledge that lives only in a
+conversation is knowledge that gets re-lost.
+
+**A later sweep found the same shape twice more, one level up each time.**
+
+*Copies of a decision.* D23 recorded that three copies of the routing table had been
+collapsed into one. There were **eight** — the entry counted them from memory. `headroom
+inspect` mapped prose to `"none"` and answered `compressor: none` for content `headroom
+compress` shrank by 70% in the same shell (#106); `headroom tools` listed code and prose
+under "detected but not compressed", both of which compress (#106); the reformat list
+(#107), `headroom env`'s base URLs (#108), the metrics reason list (#110) and the Python
+binding's reason strings (#111) were the rest. Check 6 of the audit now fails the build on
+a content type paired with a compressor's name.
+
+*Guarantees nothing checked.* The invariant gates themselves. The I4, I5 and I10 property
+tests generated content too short to clear any compressor's threshold, so **nothing ever
+compressed** and all three asserted properties of a no-op (#114). I7's protected system
+block was 29 bytes and the test passed with the guard removed (#115). I3, I6 and both I4
+gates lacked the precondition guard that I2 and I9 carried (#116). `headroom doctor`
+printed `all checks passed` with no sample for two of six compressors (#113).
+
+Check 7 now requires each invariant to have a test naming it, in the file the
+documentation says gates it — but that check confirms a test *exists*, not that it does
+anything, which is why #114 and #116 were still needed after it. Neither check substitutes
+for reading the test.
 
 The audit is now clean: every remaining public symbol is either reached from a request,
 dispatched from the CLI (all commands verified against `main.rs`), listed in the MCP tool
 table (all three), used internally by a compressor that is itself reached, or documented
 here as deliberately library-only.
 
-The lesson is recorded rather than just the fix: *a test proves a function works, not that
-anything calls it.* This document now says what reaches each row, not merely that it was
-built.
+The lessons are recorded in CONTRIBUTING.md rather than just the fixes: *a test proves a
+function works, not that anything calls it*; *a self-consistency test is not coverage for
+anything that crosses a process boundary*; and *assert that the behaviour happened, before
+asserting anything about it*. This document says what reaches each row, not merely that it
+was built.
 
 ## Gap table
 
