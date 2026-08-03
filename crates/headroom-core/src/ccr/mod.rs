@@ -20,9 +20,13 @@
 
 mod hash;
 mod in_memory;
+mod persistent;
+mod retrieve;
 
 pub use hash::{find_markers, marker, parse_marker, ContentHash};
 pub use in_memory::InMemoryCcrStore;
+pub use persistent::FileCcrStore;
+pub use retrieve::{handle_retrieve, retrieve_tool_definition, Retrieval, RETRIEVE_TOOL_NAME};
 
 use std::time::Duration;
 

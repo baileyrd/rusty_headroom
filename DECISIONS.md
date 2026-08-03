@@ -63,3 +63,17 @@ intent.
 
 These were excluded at the start of this run and that has not changed. Noted here so
 the decision log is a complete picture of what is deliberately absent.
+
+## D6 — File-backed CCR store instead of SQLite
+**2026-08-03**
+
+Gap row R3 called for SQLite. A content-addressed store has fixed-size hex keys,
+immutable values, and no query beyond point lookup — almost nothing SQLite offers,
+against `rusqlite` bringing a bundled C library and a long build.
+
+One file per hash, with an expiry sidecar and an atomic rename on write, gives the
+same durability with no dependency. Shipped as `FileCcrStore` and documented as a
+deliberate substitution rather than passed off as the SQLite backend.
+
+**Would change if:** the store needs queries beyond point lookup, or entry counts grow
+past what one directory handles comfortably.
