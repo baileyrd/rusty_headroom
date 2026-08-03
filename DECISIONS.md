@@ -1068,9 +1068,17 @@ when it was not. So all three settings *not* on the list were driven end to end 
 running proxy, in both directions. All three are genuinely live; that check is clean, and
 this turned up on the way past.
 
-**One wrinkle left alone.** An emptied override is not uniformly "unset": `HEADROOM_UPSTREAM`
-filters empty and falls back, while `HEADROOM_COMPRESSION` reads `""` as *enabled* because
-it is not one of the off spellings. Pre-existing, and a separate decision from this one.
+**Emptying a setting works, and was checked rather than reasoned about.** This nearly
+shipped a note claiming the behaviour was non-uniform — that `HEADROOM_UPSTREAM` filters
+empty and falls back while `HEADROOM_COMPRESSION` reads `""` as *enabled*. It does, and
+enabled is also its default, so there is no divergence. Measured for all six settings that
+reach somewhere observable: an empty value is indistinguishable from unset in every case.
+
+That holds by six parsers coinciding, not by a shared rule — one filters empty, one fails
+to parse it, one does not match it against the on-spellings — so `tests/runtime_overrides.rs`
+pins it. Its `HEADROOM_CCR_DIR` case needs a different witness than the others: an
+unopenable directory falls back to memory, which is also the default, so the override map
+is the only evidence anything was set at all.
 
 **Would change if:** the endpoint grows an explicit way to express "replace everything", at
 which point `{}` could mean that again — deliberately, and with a test.
