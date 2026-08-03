@@ -6,6 +6,35 @@ the crate starts publishing releases.
 
 ---
 
+## The invariant gate covers I6 through I9
+**2026-08-03** · gap row E2, extended
+
+- **Added:** end-to-end gates for **I6** (position-preserving), **I7** (tools never
+  compressed), **I8** (signed and encrypted blocks passthrough-only) and **I9**
+  (telemetry observes). E2's row scoped itself honestly to I1–I4; the other six were
+  acceptance criteria with unit and property coverage but nothing asserting them through
+  a real relay.
+- **I5 and I10 stay in `properties.rs`** deliberately. Both are statements about *many*
+  inputs — "never larger, for any body", "never modified, under any restricted policy" —
+  which a single fixture cannot establish.
+- **Two of my own tests were wrong, and the guards caught them.** The I8 fixture
+  interpolated a JSON array into a JSON *string* without escaping, so the body never
+  parsed and the proxy forwarded it untouched — the assertion passed for entirely the
+  wrong reason, and the "nothing was compressed" guard is what exposed it. The I7
+  assertion scanned the whole body for a CCR marker and failed on the tool result, where
+  a marker is compression working correctly.
+- **A test that proved nothing, fixed.** The I8 thinking block originally held the string
+  `"step one"`. No compressor would touch that regardless of any guard, so the test would
+  have passed with I8 entirely absent. It now carries the same bulky JSON as the tool
+  result beside it — the exact shape the compressor handles best.
+- **Corrected a misleading comment.** `Orchestrator::is_eligible` claimed to be one of
+  "two independent checks for invariant I8". It is called by nothing on the request path.
+  The two that genuinely run are `live_zone`'s categorizer and `apply_guarded`, and that
+  pair is real defence in depth — removing either alone still leaves signed content
+  protected, which is why removing one did not fail the new test.
+
+---
+
 ## `/metrics` says why traffic did not compress
 **2026-08-03** · gap row N1's proxy-side half
 
