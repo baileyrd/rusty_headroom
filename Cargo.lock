@@ -636,6 +636,7 @@ dependencies = [
  "clap",
  "headroom-core",
  "headroom-mcp",
+ "headroom-proxy",
  "serde_json",
  "tracing",
 ]
