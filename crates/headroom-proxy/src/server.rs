@@ -205,12 +205,18 @@ async fn messages(
         );
     }
 
+    // Stabilization runs after the savings measurement, deliberately. Normalizing tools
+    // and placing breakpoints makes the *provider's* cache hit more often; neither
+    // removes a token, and counting either as compression would flatter the number this
+    // proxy is judged on.
+    let outgoing = crate::stabilization::stabilize(Dialect::Anthropic, &compressed, policy);
+
     relay(
         &state,
         Method::POST,
         "/v1/messages",
         &upstream_headers,
-        compressed.into_owned(),
+        outgoing.into_owned(),
     )
     .await
 }

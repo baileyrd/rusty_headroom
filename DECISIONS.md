@@ -353,3 +353,35 @@ gets it. Verified through the release binary — the same memory file injects un
 **Would change if:** an agent-facing way to record memories lands, at which point the
 file becomes one source among several rather than the only one. The injection point and
 the permission gate do not change with it.
+
+## D20 — cache stabilization is opt-in, because it modifies the zone I2 protects
+**2026-08-03**
+
+Wiring `stabilization` onto the request path made two I2 integration tests fail. They
+were right, and this is the resolution.
+
+Invariant I2 says the cache hot zone — `system`, `tools[*]`, frozen messages — is never
+modified. Both remaining stabilization features modify it: normalizing tools rewrites
+`tools`, and placing a `cache_control` breakpoint rewrites a frozen message. There is no
+placement that avoids this. A marker on the *newest* message would be in the live zone
+and legal, and would also be worse than useless: the marker moves next turn, so the
+prefix it caused to be cached no longer matches, and Anthropic bills cache writes at a
+premium. It would pay to write a cache that is never read.
+
+So the trade is real but it is a trade — one miss now for hits later — and its sign
+depends on the deployment. A client that already serializes its tools stably pays the
+miss and gains nothing. **The operator decides, via `HEADROOM_STABILIZE`, and the default
+is off.** The I2 tests run against the default, so they keep enforcing the invariant
+rather than being relaxed to accommodate a feature.
+
+**Breakpoints sit at fixed anchors — 1, 3, 7, 15 — not an even spread.** The even spread
+that was implemented recomputes to a *different* set every couple of turns, and the index
+that moves first is the earliest one; moving it rewrites the head of the prefix and
+invalidates the whole cache. Fixed anchors are monotone: breakpoints are only ever added,
+never moved, so every prefix that was cached stays cached. Modelling the old rule across
+turns showed the set changing at 6, 10, 14 and 18 messages — the feature would have busted
+the cache every two turns on exactly the long conversations it exists to help.
+
+**Would change if:** a provider offers a breakpoint mechanism that lives outside the
+request body — a header, or a handle — at which point stabilization stops touching the
+hot zone and the gate is no longer needed.
