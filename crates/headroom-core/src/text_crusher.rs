@@ -21,7 +21,7 @@ use crate::ccr::{store_and_mark, CcrStore};
 use crate::detection::AdaptiveSizer;
 use crate::detection::{detect, ContentType};
 use crate::error::{Declined, Error, Result};
-use crate::signals::{keep_most_important, score_lines};
+use crate::signals::{keep_with_required, protected_lines, score_lines, select_anchors};
 use crate::transform::{LosslessTransform, LossyTransform, Transform};
 
 const CCR_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
@@ -124,6 +124,35 @@ impl Transform for TextCrusher {
 
 impl LosslessTransform for TextCrusher {}
 
+/// Lines the lossy pass must keep whatever the importance heuristic makes of them —
+/// gap rows S4 and S5.
+///
+/// Two structural keep-sets, unioned:
+///
+/// - **Anchors** ([`select_anchors`]) — headings, hunk headers, fence markers, stack
+///   frames, and the first and last lines. Dropping one does not just lose that line, it
+///   changes what the *surrounding* lines mean, and the result reads as though it were
+///   always complete. This is invariant I6: what survives has to stay in position and
+///   stay interpretable.
+/// - **Tag delimiters** ([`protected_lines`]) — dropping `</result>` while keeping
+///   `<result>` hands the model markup that never closes. Agent tool output is full of
+///   tag-wrapped blocks, so this is the common case rather than a corner one.
+///
+/// Returned ascending and deduplicated, which is what [`keep_with_required`] expects.
+fn required_lines(source: &str) -> Vec<usize> {
+    let lines: Vec<&str> = source.lines().collect();
+
+    let mut required: Vec<usize> = select_anchors(&lines)
+        .into_iter()
+        .map(|anchor| anchor.line)
+        .chain(protected_lines(&lines))
+        .collect();
+
+    required.sort_unstable();
+    required.dedup();
+    required
+}
+
 /// Lossy plain-text compression: drops low-importance lines to fit a budget.
 pub struct TextSummarizer {
     config: TextConfig,
@@ -172,7 +201,11 @@ impl Transform for TextSummarizer {
             return Err(Error::declined(Declined::NotSmaller));
         }
 
-        let kept = keep_most_important(&scored, self.config.line_budget);
+        let kept = keep_with_required(
+            &scored,
+            self.config.line_budget,
+            &required_lines(block.content()),
+        );
         let marker = store_and_mark(self.store.as_ref(), block.content().as_bytes(), CCR_TTL)?;
 
         let mut out = format!("[{} lines, {} shown]\n", scored.len(), kept.len());
@@ -275,6 +308,91 @@ mod tests {
             block.content()
         );
         assert!(block.content().contains("lines ..."), "no gap markers");
+    }
+
+    // ---- structural keep-sets (gap rows S4, S5) ----
+
+    #[test]
+    fn a_closing_tag_survives_the_lossy_pass() {
+        // Gap row S5. Agent tool output is routinely wrapped in a tag pair, and the
+        // delimiters score as ordinary prose — so without the tag keep-set the closer
+        // is exactly the kind of line the budget drops, handing the model markup that
+        // opens and never closes.
+        let store = Arc::new(InMemoryCcrStore::new());
+        let source = format!("<result>\n{}\n</result>", prose(200));
+
+        let mut block = Block::new(BlockKind::Text, source);
+        TextSummarizer::new(store)
+            .apply(&mut block)
+            .expect("should summarize");
+
+        assert!(
+            block.content().contains("<result>"),
+            "the opening tag was dropped:\n{}",
+            block.content()
+        );
+        assert!(
+            block.content().contains("</result>"),
+            "the closing tag was dropped, leaving unbalanced markup:\n{}",
+            block.content()
+        );
+    }
+
+    #[test]
+    fn the_last_line_survives_the_lossy_pass() {
+        // Gap row S4, and specifically the *boundary* anchor rather than a heading. A
+        // heading proves nothing here: it already scores as notable, so it survives with
+        // or without the anchor set. The last line of uniform prose scores as routine
+        // like every other line, so ranking falls back to source order and it is always
+        // the first thing dropped — which quietly turns truncated output into output
+        // that reads as complete.
+        let store = Arc::new(InMemoryCcrStore::new());
+        let source = format!("{}\nand that is the end of the report.", prose(200));
+
+        let mut block = Block::new(BlockKind::Text, source);
+        TextSummarizer::new(store)
+            .apply(&mut block)
+            .expect("should summarize");
+
+        assert!(
+            block
+                .content()
+                .contains("and that is the end of the report."),
+            "the boundary anchor was dropped:\n{}",
+            block.content()
+        );
+    }
+
+    #[test]
+    fn a_heading_anchor_survives_the_lossy_pass() {
+        // Also an anchor, though the importance heuristic would have kept it anyway.
+        // Here as a regression guard on the union, not as evidence the wiring works.
+        let store = Arc::new(InMemoryCcrStore::new());
+        let source = format!("{}\n# Findings\n{}", prose(120), prose(120));
+
+        let mut block = Block::new(BlockKind::Text, source);
+        TextSummarizer::new(store)
+            .apply(&mut block)
+            .expect("should summarize");
+
+        assert!(
+            block.content().contains("# Findings"),
+            "the heading anchor was dropped:\n{}",
+            block.content()
+        );
+    }
+
+    #[test]
+    fn the_required_set_is_ascending_and_deduplicated() {
+        // `keep_with_required` binary-searches it. A set that is merely "mostly sorted"
+        // would silently fail to protect some lines rather than misbehave visibly, and
+        // anchors and tag delimiters genuinely overlap — a fenced `<result>` line is
+        // both.
+        let required = required_lines("<result>\n# Heading\nbody\n</result>");
+        let mut sorted = required.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(required, sorted);
     }
 
     #[test]

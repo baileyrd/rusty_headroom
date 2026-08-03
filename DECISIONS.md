@@ -281,3 +281,49 @@ heuristic, which is honest about being an upper bound.
 
 **Would change if:** vocabularies can be vendored at build time rather than fetched, or
 a provider publishes an authoritative tokenizer worth registering as exact.
+
+## D17 — a structural keep-set outranks the line budget
+**2026-08-03**
+
+`signals::keep_with_required` takes a set of line indices that survive whatever the
+importance heuristic makes of them — currently anchors (S4) and tag delimiters (S5). When
+that set is larger than the caller's budget, **the budget loses**.
+
+The alternative — trim the required set to fit — fails in a way nothing downstream can
+detect. Dropping `</result>` hands the model markup that opens and never closes. Dropping
+the last line of a report turns truncated output into output that reads as complete. The
+model cannot tell that something is missing, so the error surfaces as a confidently wrong
+answer rather than as a visible gap.
+
+Overshooting is safe because invariant I5 already validates every compression against a
+token count and forwards the original when the result is not actually smaller. A keep-set
+that swallows the budget produces a block that fails that check and is discarded — a
+missed saving, which is the recoverable direction.
+
+**Consequence for future compressors:** a line-dropping compressor should feed
+`keep_with_required` rather than `keep_most_important`, and should treat an empty required
+set as a claim that nothing in its content type is structurally load-bearing.
+
+**Would change if:** a caller appears whose budget is a hard ceiling rather than a target
+— an output-size limit rather than a cost target. That caller needs its own entry point,
+not a weakening of this one.
+
+## D18 — the stream classifier is chosen by path, and reports only what it sees
+**2026-08-03**
+
+`sse::Observer::for_path` picks the vocabulary from the request path rather than sniffing
+the response. Three surfaces are proxied and reading one with another's classifier does
+not fail — it produces confidently wrong numbers, which is worse than none. A failing
+OpenAI stream reported no failure at all before this, because its error frame carries no
+`type` field for the Anthropic classifier to recognize.
+
+Sniffing was rejected: it would have to buffer or guess from the first frame, and the
+path is already known, unambiguous, and free.
+
+**Cache usage is reported only where the provider sends it.** Neither OpenAI surface
+carries cache figures in its stream, so both report zero. Deriving a number from request
+size or a prior response would put a figure this proxy invented into the one metric it
+exists to move.
+
+**Would change if:** a provider adds cache reporting to its stream, which is a new field
+to read rather than a change to this rule.

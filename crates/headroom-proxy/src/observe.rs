@@ -29,7 +29,7 @@ use bytes::Bytes;
 use futures_core::Stream;
 
 use crate::metrics::Metrics;
-use crate::sse::{SseParser, StreamObserver};
+use crate::sse::{Observer, SseParser};
 
 /// A relayed byte stream that reports on itself as it passes.
 pub struct ObservingStream<S> {
@@ -38,18 +38,22 @@ pub struct ObservingStream<S> {
     /// a network round trip.
     inner: Pin<Box<S>>,
     parser: SseParser,
-    observer: StreamObserver,
+    /// Chosen from the request path, because the three proxied surfaces frame their
+    /// streams differently and the wrong classifier reports a healthy stream as
+    /// unfinished and unrecognizable rather than failing. See [`Observer`].
+    observer: Observer,
     metrics: Arc<Metrics>,
     recorded: bool,
 }
 
 impl<S> ObservingStream<S> {
-    /// Wraps `inner`, reporting into `metrics`.
-    pub fn new(inner: S, metrics: Arc<Metrics>) -> Self {
+    /// Wraps `inner`, reporting into `metrics`, reading the stream as `path`'s
+    /// vocabulary.
+    pub fn new(inner: S, metrics: Arc<Metrics>, path: &str) -> Self {
         Self {
             inner: Box::pin(inner),
             parser: SseParser::new(),
-            observer: StreamObserver::default(),
+            observer: Observer::for_path(path),
             metrics,
             recorded: false,
         }
@@ -62,24 +66,23 @@ impl<S> ObservingStream<S> {
         }
         self.recorded = true;
 
-        self.metrics.record_cache_usage(
-            self.observer.cache_read_tokens,
-            self.observer.cache_creation_tokens,
-        );
+        let (read, creation) = self.observer.cache_tokens();
+        self.metrics.record_cache_usage(read, creation);
 
         // A stream that ended in a provider error did not succeed however many events
         // it produced. Counting it as a success is how a real failure rate stays
         // invisible.
-        if self.observer.error.is_some() {
+        if self.observer.failure().is_some() {
             self.metrics.record_stream_error();
         }
 
-        if !self.observer.unknown_types.is_empty() {
+        if !self.observer.unknown_types().is_empty() {
             // Not an error — the provider is allowed to add event types. But it should
             // surface as a line in a log rather than as silence, because silence is
             // indistinguishable from handling it.
             tracing::info!(
-                unknown_event_types = ?self.observer.unknown_types,
+                dialect = self.observer.dialect(),
+                unknown_event_types = ?self.observer.unknown_types(),
                 "provider sent stream event types this build does not model"
             );
         }
@@ -204,6 +207,7 @@ mod tests {
         let out = drain(ObservingStream::new(
             from_chunks(vec![source.clone()]),
             metrics,
+            "/v1/messages",
         ))
         .await;
 
@@ -216,6 +220,7 @@ mod tests {
         drain(ObservingStream::new(
             from_chunks(vec![STREAM.as_bytes().to_vec()]),
             metrics.clone(),
+            "/v1/messages",
         ))
         .await;
 
@@ -236,6 +241,7 @@ mod tests {
             drain(ObservingStream::new(
                 from_chunks(vec![source[..split].to_vec(), source[split..].to_vec()]),
                 metrics.clone(),
+                "/v1/messages",
             ))
             .await;
 
@@ -262,6 +268,7 @@ mod tests {
         drain(ObservingStream::new(
             from_chunks(vec![stream.as_bytes().to_vec()]),
             metrics.clone(),
+            "/v1/messages",
         ))
         .await;
 
@@ -283,6 +290,7 @@ mod tests {
             let stream = ObservingStream::new(
                 from_chunks(vec![STREAM.as_bytes().to_vec()]),
                 metrics.clone(),
+                "/v1/messages",
             );
             let mut stream = pin!(stream);
             // Exactly one chunk, then walk away.
@@ -300,6 +308,7 @@ mod tests {
         drain(ObservingStream::new(
             from_chunks(vec![STREAM.as_bytes().to_vec()]),
             metrics.clone(),
+            "/v1/messages",
         ))
         .await;
 
@@ -324,6 +333,7 @@ mod tests {
         let out = drain(ObservingStream::new(
             from_chunks(vec![body.clone()]),
             metrics.clone(),
+            "/v1/messages",
         ))
         .await;
 

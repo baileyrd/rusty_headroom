@@ -260,7 +260,10 @@ pub(crate) async fn relay(
     // Wrapped, not buffered. The observer reads frames as they pass and yields the
     // bytes it received — invariant I9 — which is the only way to read the cache usage
     // in `message_start` without holding the response back.
-    let observed = ObservingStream::new(relayed.into_stream(), state.metrics.clone());
+    // The path picks the stream vocabulary. An OpenAI response read with the Anthropic
+    // classifier does not fail — it reports a healthy stream as unfinished and every
+    // ordinary frame as unrecognized, which is telemetry that is confidently wrong.
+    let observed = ObservingStream::new(relayed.into_stream(), state.metrics.clone(), path);
 
     response
         .body(Body::from_stream(observed))
