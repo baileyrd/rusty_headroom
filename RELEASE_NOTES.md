@@ -6,6 +6,40 @@ the crate starts publishing releases.
 
 ---
 
+## Cache stabilization primitives and proxy observability
+**2026-08-03** · gap rows X14, X15, X16, X19
+
+- **Added:** `stabilization` — `sort_keys`, `normalize_tools`, `place_cache_control`,
+  and `inject_prompt_cache_key`. These are the transforms that make a request's prefix
+  byte-stable across turns, which is what lets the provider's cache actually hit.
+- **Added:** `metrics` — a `Metrics` counter set over atomics, rendered in Prometheus
+  text exposition format.
+- **Design note:** object keys sort recursively, arrays never do. An array is ordered
+  data; reordering one changes meaning rather than presentation. The distinction is the
+  whole reason this is a hand-written walk rather than a blanket canonicalization.
+- **Design note:** `cache_control` breakpoints go on the *earliest* eligible messages,
+  not the latest. The prefix before a breakpoint is what gets cached, so a marker placed
+  late caches almost nothing. The newest turn is never marked — it is the live zone, and
+  pinning it would freeze the only thing compression is allowed to touch.
+- **Design note:** a customer-set `cache_control` marker suppresses automatic placement
+  entirely rather than adding to it. Anthropic caps breakpoints at four; competing with
+  a customer's own placement risks exceeding the cap and losing theirs.
+- **Design note:** `cache_hit_rate()` returns `Option<f64>` and is `None` before any
+  data, deliberately not `0.0`. A gauge reporting zero for "nothing yet" is
+  indistinguishable on a dashboard from a cache that has completely stopped working —
+  which is exactly the alarm this metric exists to raise.
+- **Design note:** `inject_prompt_cache_key` never overwrites a customer-supplied key.
+  The key partitions the provider's cache; overwriting one silently moves a customer's
+  traffic to a different partition and cold-starts it.
+- **Known limitation:** nothing calls either module from the request path yet. The
+  stabilization transforms re-serialize the body, which is in direct tension with
+  invariant I1's byte-faithful passthrough — applying them is only safe under a policy
+  that permits proxy-visible modification, and deciding where that gate sits is its own
+  change rather than a mechanical hookup. Shipped as tested primitives with the wiring
+  called out as outstanding.
+- **Known limitation:** `MAX_BREAKPOINTS` is hard-coded to 4, matching Anthropic's
+  current cap. A provider with a different limit needs this parameterized.
+
 ## Auth-mode classification and policy gating
 **2026-08-03** · gap rows A1, A2
 
