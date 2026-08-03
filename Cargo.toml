@@ -1,0 +1,67 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/headroom-core",
+    "crates/headroom-proxy",
+    "crates/headroom-mcp",
+    "crates/headroom-cli",
+    "crates/headroom-simulators",
+]
+
+# `headroom-py` is a Python extension module built with maturin, not plain cargo.
+# pyo3's `extension-module` feature tells it not to link libpython, which is what
+# makes `import headroom` work from Python but leaves an unlinkable artifact for a
+# bare `cargo build`. Keeping it out of `default-members` means the everyday
+# `cargo build`/`cargo test` loop stays green without a Python toolchain present.
+default-members = [
+    "crates/headroom-core",
+    "crates/headroom-proxy",
+    "crates/headroom-mcp",
+    "crates/headroom-cli",
+    "crates/headroom-simulators",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.80"
+license = "Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_headroom"
+authors = ["rusty_headroom contributors"]
+
+[workspace.dependencies]
+headroom-core = { path = "crates/headroom-core" }
+
+serde = { version = "1", features = ["derive"] }
+
+# The three non-default features here are load-bearing for invariant I1
+# (byte-faithful passthrough). They are set at the workspace level so no crate can
+# accidentally opt out — a single crate parsing request JSON without them silently
+# reintroduces the corruption this project exists to avoid.
+#
+# `preserve_order`   — backs `Value::Object` with an insertion-ordered map. Without
+#                      it, serde_json sorts keys, so any Value round-trip reorders
+#                      the caller's JSON and busts the upstream prompt cache.
+# `arbitrary_precision`
+#                    — keeps the literal numeric token from the source bytes. Without
+#                      it `1.0` collapses to `1` and integers past 2^53 lose
+#                      precision through f64, both of which change the bytes we
+#                      forward upstream.
+# `raw_value`        — exposes `RawValue`, an unparsed JSON fragment. This is how
+#                      untouched `messages[*]` entries get forwarded as exact byte
+#                      copies instead of being re-serialized.
+serde_json = { version = "1", features = [
+    "preserve_order",
+    "arbitrary_precision",
+    "raw_value",
+] }
+
+thiserror = "2"
+anyhow = "1"
+bytes = "1"
+tracing = "0.1"
+blake3 = "1"
+
+[profile.release]
+strip = "symbols"
+lto = "thin"
+codegen-units = 1

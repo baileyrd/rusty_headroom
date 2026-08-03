@@ -1,0 +1,16 @@
+[package]
+name = "headroom-proxy"
+description = "Byte-faithful compressing reverse proxy for LLM provider APIs."
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+headroom-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

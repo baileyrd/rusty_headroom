@@ -1,0 +1,18 @@
+[package]
+name = "headroom-cli"
+description = "The headroom command-line interface."
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "headroom"
+path = "src/main.rs"
+
+[dependencies]
+headroom-core.workspace = true
+anyhow.workspace = true
+tracing.workspace = true

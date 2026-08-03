@@ -1,0 +1,6 @@
+[toolchain]
+# Pinned so CI, local development, and the parity loop all compile with the same
+# compiler. Bump deliberately, not incidentally — an unpinned toolchain turns a
+# clippy lint added upstream into a surprise CI failure on an unrelated PR.
+channel = "stable"
+components = ["rustfmt", "clippy"]
