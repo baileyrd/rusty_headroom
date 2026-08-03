@@ -62,6 +62,13 @@ pub struct Compressors {
     memories: headroom_core::memory::MemoryStore,
     /// How many memories one injection may carry.
     memory_limit: usize,
+    /// Where routing outcomes are counted, when the caller wants them.
+    ///
+    /// Optional so a test — or the CLI, or a library caller — can build a compressor set
+    /// without inventing a metrics sink it will never read. `None` means the routing
+    /// reason is computed for the decision and not recorded, which is what every caller
+    /// outside the proxy wants.
+    metrics: Option<Arc<crate::metrics::Metrics>>,
 }
 
 impl Compressors {
@@ -71,6 +78,7 @@ impl Compressors {
             orchestrator: Orchestrator::new(store),
             memories: Default::default(),
             memory_limit: crate::config::DEFAULT_MEMORY_LIMIT,
+            metrics: None,
         }
     }
 
@@ -83,7 +91,16 @@ impl Compressors {
             orchestrator: Orchestrator::new(store).with_recommendations(recommendations),
             memories: Default::default(),
             memory_limit: crate::config::DEFAULT_MEMORY_LIMIT,
+            metrics: None,
         }
+    }
+
+    /// Records routing outcomes into `metrics`.
+    ///
+    /// Invariant I9: observation only. Nothing here changes what is compressed.
+    pub fn with_metrics(mut self, metrics: Arc<crate::metrics::Metrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     /// Attaches memories for live-zone injection.
@@ -234,6 +251,17 @@ pub fn compress_dialect<'a>(
         else {
             continue;
         };
+        // The reason is recorded whether or not a compressor runs. An operator whose
+        // traffic is not shrinking needs to tell "nothing handles this type" from "your
+        // credential forbids it" from "we measured this shape and it does not help" —
+        // three answers with three different actions, and two of them are "no action".
+        //
+        // Invariant I9: this observes. It takes the reason the router already computed
+        // and changes no decision and no byte.
+        if let Some(metrics) = compressors.metrics.as_ref() {
+            metrics.record_routing(compressors.routing(block.content(), policy, model).as_str());
+        }
+
         // Block-aware: prose is compressed only when the block is tool output. The
         // prose compressor is lossy, and `BlockKind::Text` is what somebody typed.
         let Some(transform) = compressors.route_block(block, policy, model) else {
@@ -733,6 +761,59 @@ mod tests {
             sha(source.as_bytes()),
             "a pinned request was modified"
         );
+    }
+
+    // ---- routing telemetry ----
+
+    #[test]
+    fn observing_the_routing_reason_changes_no_byte() {
+        // Invariant I9: telemetry observes, it never alters. The reason is the one the
+        // router already computed for the decision, so recording it must not be able to
+        // move a byte.
+        let source = code_request();
+        let plain = compress_dialect(
+            Dialect::Anthropic,
+            source.as_bytes(),
+            &compressors(),
+            true,
+            payg(),
+            Verbosity::Default,
+        );
+
+        let metrics = std::sync::Arc::new(crate::metrics::Metrics::new());
+        let observed = compress_dialect(
+            Dialect::Anthropic,
+            source.as_bytes(),
+            &compressors().with_metrics(metrics.clone()),
+            true,
+            payg(),
+            Verbosity::Default,
+        );
+
+        assert_eq!(sha(&observed), sha(&plain));
+        assert!(
+            metrics.render().contains(r#"reason="compress"} 1"#),
+            "nothing was recorded, so this test proves nothing"
+        );
+    }
+
+    #[test]
+    fn a_declined_block_is_still_counted() {
+        // The whole point. A compressed block is visible in the savings numbers already;
+        // the one an operator cannot otherwise explain is the block that was declined.
+        let metrics = std::sync::Arc::new(crate::metrics::Metrics::new());
+        let restricted = CompressionPolicy::for_mode(headroom_core::AuthMode::Subscription);
+
+        let _ = compress_dialect(
+            Dialect::Anthropic,
+            code_request().as_bytes(),
+            &compressors().with_metrics(metrics.clone()),
+            true,
+            restricted,
+            Verbosity::Default,
+        );
+
+        assert!(metrics.render().contains(r#"reason="policy_forbids"} 1"#));
     }
 
     // ---- code compression (gap rows C11-C13) ----
