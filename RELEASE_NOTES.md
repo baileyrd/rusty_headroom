@@ -6,6 +6,24 @@ the crate starts publishing releases.
 
 ---
 
+## Both lessons written into CONTRIBUTING
+**2026-08-03** · documentation
+
+- **Added:** two sections recording what mutation testing found here, and a line in the
+  workflow: *watch the test fail before you trust it*.
+- **"A test proves a function works, not that anything calls it."** Five capabilities were
+  shipped, tested, documented as done, and reached by nothing. The audit script checks the
+  mechanical part; the rest is a habit, so it is now written where a contributor meets it.
+- **"A self-consistency test is not coverage for anything that crosses a process
+  boundary."** `of(x) == of(x)`, `parse(format(x)) == x` and `of(a) != of(b)` all survive
+  a format change intact — both halves move together. The five formats that cross a
+  boundary here are tabulated with where each is pinned.
+- **Added to the review checklist:** ask what mutation a new test would catch. If the
+  answer is "none that could plausibly happen", it is documentation rather than a gate —
+  which is fine, as long as it says so.
+
+---
+
 ## Two more wire formats pinned
 **2026-08-03** · same shape as the `StructureHash` gap, one layer out
 
