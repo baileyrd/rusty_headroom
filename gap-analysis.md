@@ -163,12 +163,12 @@ Every row is a gap: the target repo is empty, so all rows are new implementation
 | X4 | `cache_control` → `frozen_message_count` | fn | spec | all | REALIGNMENT §2.1 step 4 | no | M | Honor customer-set markers. Depends on X2. |
 | X5 | `/v1/messages` (Anthropic) handler | fn | spec | all | `docs/proxy.mdx` | no | L | Passthrough first, then live-zone compression. Depends on P2, X2, X4. Includes upstream relay (`upstream::Upstream`) — streamed response body, per-hop header rebuild, provider-shaped 502 on failure. |
 | X6 | `/v1/chat/completions` (OpenAI) handler | fn | spec | all | `docs/openai-sdk.mdx` | no | L | Depends on P2, X2. |
-| X7 | `/v1/responses` handler | fn | spec | all | `docs/openai-sdk.mdx` | no | L | Output items, reasoning summary; per-item-type passthrough preservation. |
+| X7 | `/v1/responses` handler | fn | spec | all | `docs/openai-sdk.mdx` | no | L | Output items, reasoning summary; per-item-type passthrough preservation. Done — `Dialect::OpenAiResponses`; `function_call_output` compressed, `function_call` never. |
 | X8 | `/v1/conversations` + `/v1/responses/compact` passthrough | fn | spec | all | REALIGNMENT §2.6 | no | S | Explicitly never compressed. |
 | X9 | SSE framing + byte-level state machine | fn | spec | all | REALIGNMENT §2.1 step 10 | no | L | **High risk.** Must survive UTF-8 splits mid-codepoint and single-`\n` splits. |
 | X10 | SSE Anthropic events | fn | spec | all | REALIGNMENT Phase C | no | M | All delta types incl. `thinking_delta`, `signature_delta`, `citations_delta`. Depends on X9. |
 | X11 | SSE OpenAI chat events | fn | spec | all | REALIGNMENT Phase C | no | M | `tool_call` accumulation across chunks. Depends on X9. |
-| X12 | SSE OpenAI responses events | fn | spec | all | REALIGNMENT Phase C | no | M | Output items + reasoning summary. Depends on X9. |
+| X12 | SSE OpenAI responses events | fn | spec | all | REALIGNMENT Phase C | no | M | Output items + reasoning summary. Depends on X9. Done as `sse::responses`; stem/suffix split so future event types stay classifiable. Not yet attached to the relayed stream. |
 | X13 | WebSocket flow | fn | spec | all | `crates/headroom-proxy/src/websocket.rs` (name only) | no | M | Codex WS transport. |
 | X14 | tool array sort + JSON Schema key sort | fn | spec | all | REALIGNMENT I7 | no | M | Deterministic recursive sort. Normalize, never compress. |
 | X15 | `cache_control` auto-placement | fn | spec | all | REALIGNMENT Phase E | no | M | Anthropic, ≤4 ephemeral breakpoints. PAYG only per I10. |

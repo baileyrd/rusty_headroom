@@ -163,9 +163,14 @@ fn effort_for(body: &[u8]) -> Option<Effort> {
 
 /// `POST /v1/responses`.
 ///
-/// Compressed on the same terms as chat completions. The body carries `input` rather
-/// than `messages`, which [`crate::body::FaithfulBody`] does not model, so in practice
-/// this currently relays untouched — stated plainly rather than implied by silence.
+/// # A different shape, not just a different name
+///
+/// The Responses API carries its conversation in `input` rather than `messages`, and a
+/// tool result arrives as a standalone item with **no `role` at all** —
+/// `{"type":"function_call_output","call_id":...,"output":"..."}`. Read through the
+/// chat-completions path that item has no content and no recognized kind, so the
+/// bulkiest thing in a Responses conversation would be forwarded uncompressed while
+/// everything looked like it was working.
 ///
 /// # Errors
 ///
@@ -179,7 +184,7 @@ pub async fn responses(
     let policy = CompressionPolicy::for_mode(classify_auth_mode(&headers));
 
     let compressed = compress_dialect(
-        Dialect::OpenAi,
+        Dialect::OpenAiResponses,
         &body,
         state.compressors(),
         config.compression_enabled(),
@@ -189,16 +194,17 @@ pub async fn responses(
 
     if compressed.as_ref() == body.as_ref() {
         state.metrics().record_passthrough();
+    } else {
+        let estimator = HeuristicEstimator::new();
+        state.metrics().record_compressed(
+            estimator.count(&String::from_utf8_lossy(&body)) as u64,
+            estimator.count(&String::from_utf8_lossy(&compressed)) as u64,
+        );
     }
 
-    relay_to(
-        &state,
-        &headers,
-        "/v1/responses",
-        compressed.into_owned(),
-        policy,
-    )
-    .await
+    let outgoing = shape_openai(&compressed, policy);
+
+    relay_to(&state, &headers, "/v1/responses", outgoing, policy).await
 }
 
 /// Relays a request that must never be compressed.
@@ -524,6 +530,140 @@ mod tests {
         for source in [&b"{not json"[..], &b""[..], &b"[1,2,3]"[..]] {
             assert_eq!(shape_openai(source, payg()), source);
         }
+    }
+
+    // ---- the Responses API ----
+
+    /// A Responses request whose newest item is a bulky `function_call_output`.
+    fn responses_request() -> String {
+        format!(
+            r#"{{"model":"gpt-5","input":[{{"role":"user","content":[{{"type":"input_text","text":"list the files"}}]}},{{"type":"function_call","call_id":"c1","name":"read","arguments":"{{}}"}},{{"type":"function_call_output","call_id":"c1","output":"{}"}}]}}"#,
+            bulky()
+        )
+    }
+
+    #[test]
+    fn a_responses_function_call_output_is_compressed() {
+        // A tool result here is a standalone item with no `role` at all. Read through
+        // the chat-completions path it has no content and no recognized kind, so the
+        // bulkiest thing in the conversation would be forwarded uncompressed while
+        // everything looked like it was working.
+        let source = responses_request();
+        let out = compress_dialect(
+            Dialect::OpenAiResponses,
+            source.as_bytes(),
+            &compressors(),
+            true,
+            payg(),
+            Verbosity::Default,
+        );
+
+        assert!(
+            out.len() < source.len(),
+            "a Responses tool result was left uncompressed: {} -> {}",
+            source.len(),
+            out.len()
+        );
+    }
+
+    #[test]
+    fn the_call_id_survives_compression() {
+        // The provider matches a result to its call by `call_id`. Losing it turns a
+        // compressed tool result into an orphan the model cannot attribute — a failure
+        // that looks like the model ignoring its own tool call.
+        let source = responses_request();
+        let out = compress_dialect(
+            Dialect::OpenAiResponses,
+            source.as_bytes(),
+            &compressors(),
+            true,
+            payg(),
+            Verbosity::Default,
+        );
+
+        let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let item = &parsed["input"][2];
+        assert_eq!(item["call_id"], "c1");
+        assert_eq!(item["type"], "function_call_output");
+    }
+
+    #[test]
+    fn a_function_call_is_never_compressed() {
+        // The *request* to run a tool carries arguments the provider parses as JSON.
+        // Compressing those produces a call the provider rejects rather than a shorter
+        // one.
+        let source = format!(
+            r#"{{"model":"gpt-5","input":[{{"type":"function_call","call_id":"c1","name":"read","arguments":"{}"}},{{"role":"user","content":[{{"type":"input_text","text":"go"}}]}}]}}"#,
+            bulky()
+        );
+        let out = compress_dialect(
+            Dialect::OpenAiResponses,
+            source.as_bytes(),
+            &compressors(),
+            true,
+            payg(),
+            Verbosity::Default,
+        );
+
+        assert_eq!(out.as_ref(), source.as_bytes());
+    }
+
+    #[test]
+    fn earlier_responses_items_survive_byte_identical() {
+        let source = responses_request();
+        let out = compress_dialect(
+            Dialect::OpenAiResponses,
+            source.as_bytes(),
+            &compressors(),
+            true,
+            payg(),
+            Verbosity::Default,
+        );
+
+        let before: serde_json::Value = serde_json::from_str(&source).unwrap();
+        let after: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        for index in 0..2 {
+            assert_eq!(
+                before["input"][index], after["input"][index],
+                "item {index} was modified"
+            );
+        }
+    }
+
+    #[test]
+    fn a_body_carrying_both_messages_and_input_is_forwarded_untouched() {
+        // Picking one and rewriting it would leave the other untouched, and the two
+        // would then disagree about what the conversation contains — a corruption the
+        // provider acts on rather than rejects.
+        let source = format!(
+            r#"{{"model":"gpt-5","messages":[{{"role":"user","content":"a"}}],"input":[{{"type":"function_call_output","call_id":"c","output":"{}"}}]}}"#,
+            bulky()
+        );
+        let out = compress_dialect(
+            Dialect::OpenAiResponses,
+            source.as_bytes(),
+            &compressors(),
+            true,
+            payg(),
+            Verbosity::Default,
+        );
+
+        assert_eq!(out.as_ref(), source.as_bytes());
+    }
+
+    #[test]
+    fn a_string_valued_input_is_forwarded_untouched() {
+        // `"input": "just a prompt"` is legal and carries no items to compress.
+        let source = r#"{"model":"gpt-5","input":"just a prompt"}"#;
+        let out = compress_dialect(
+            Dialect::OpenAiResponses,
+            source.as_bytes(),
+            &compressors(),
+            true,
+            payg(),
+            Verbosity::Default,
+        );
+        assert_eq!(out.as_ref(), source.as_bytes());
     }
 
     #[test]

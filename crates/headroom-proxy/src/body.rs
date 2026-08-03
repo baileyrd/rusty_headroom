@@ -96,6 +96,14 @@ struct Parsed<'a> {
     messages: Vec<&'a RawValue>,
 }
 
+/// Top-level members that can hold a conversation, most preferred first.
+///
+/// `messages` is the Anthropic and OpenAI chat-completions spelling; `input` is the
+/// OpenAI Responses one. They are checked in order rather than merged, because a body
+/// carrying both is one this code does not understand well enough to rewrite — and the
+/// safe reading of "I do not understand this" is verbatim passthrough.
+const CONVERSATION_MEMBERS: [&str; 2] = ["messages", "input"];
+
 impl<'a> FaithfulBody<'a> {
     /// Parses `source`, retaining the original bytes.
     ///
@@ -105,7 +113,19 @@ impl<'a> FaithfulBody<'a> {
         let parsed = serde_json::from_slice::<OrderedMembers>(source)
             .ok()
             .and_then(|OrderedMembers(members)| {
-                let messages_at = members.iter().position(|(key, _)| *key == "messages")?;
+                // The first recognized member wins, and a body carrying more than one is
+                // rejected outright. Picking one and rewriting it would leave the other
+                // untouched and the two disagreeing about what the conversation contains
+                // — a corruption the provider would act on rather than reject.
+                let present: Vec<usize> = CONVERSATION_MEMBERS
+                    .iter()
+                    .filter_map(|name| members.iter().position(|(key, _)| key == name))
+                    .collect();
+                if present.len() != 1 {
+                    return None;
+                }
+                let messages_at = present[0];
+
                 let messages: Vec<&RawValue> =
                     serde_json::from_str(members[messages_at].1.get()).ok()?;
                 Some(Parsed {
@@ -116,6 +136,15 @@ impl<'a> FaithfulBody<'a> {
             });
 
         Self { source, parsed }
+    }
+
+    /// Which top-level member the conversation was found in.
+    ///
+    /// `None` when the body was not understood. Exposed so a caller rebuilding a
+    /// message knows which dialect it is looking at without re-parsing.
+    pub fn conversation_member(&self) -> Option<&'a str> {
+        let parsed = self.parsed.as_ref()?;
+        parsed.members.get(parsed.messages_at).map(|(key, _)| *key)
     }
 
     /// Whether the body was recognized as a message-carrying request.
