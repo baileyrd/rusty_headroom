@@ -5,12 +5,21 @@
 //! that a refactor which upholds every module contract but breaks the *system* property
 //! still fails here.
 //!
-//! Four invariants are gated:
+//! The invariants gated here:
 //!
 //! | I1 | Byte-faithful passthrough — SHA-256 equality on unmutated bytes |
 //! | I2 | The cache hot zone is never modified |
 //! | I3 | Append-only — compressing twice reaches no further back than once |
 //! | I4 | Determinism — same input, byte-equal output |
+//! | I6 | Position-preserving — surviving content keeps its order and its block |
+//! | I7 | Tool definitions are never compressed |
+//! | I8 | Signed and encrypted blocks are passthrough-only |
+//! | I9 | Telemetry observes and never alters |
+//!
+//! I5 (token-aware) and I10 (auth mode gates policy) are gated by `properties.rs`
+//! instead, because both are statements about *many* inputs rather than one: "never
+//! larger, for any body" and "never modified, under any restricted policy" are
+//! properties a single fixture cannot establish.
 //!
 //! # Why they run against the simulator rather than against `compress_request`
 //!
@@ -300,5 +309,200 @@ async fn compression_measurably_helps_while_every_invariant_holds() {
         ratio > 0.5,
         "only {:.1}% smaller; the invariants are being met by doing nothing",
         ratio * 100.0
+    );
+}
+
+/// A request carrying a signed thinking block and an encrypted reasoning block beside
+/// compressible bulk.
+///
+/// The bulk is what makes the test meaningful: without it the compressor would decline
+/// for lack of anything to do, and the assertion would pass while proving nothing.
+///
+/// Built through `serde_json` rather than by formatting a string. The first version
+/// interpolated a JSON array into a JSON *string* without escaping it, so the body never
+/// parsed, the proxy forwarded it untouched, and the invariant assertion passed for
+/// entirely the wrong reason. The "nothing was compressed" guard below is what caught it.
+fn sacrosanct_request() -> String {
+    let bulk: Vec<serde_json::Value> = (0..300)
+        .map(
+            |i| serde_json::json!({"path": format!("src/f{i}.rs"), "size": i * 10, "kind": "file"}),
+        )
+        .collect();
+
+    serde_json::json!({
+        "model": "claude-opus-4",
+        "messages": [
+            {"role": "user", "content": "first"},
+            // The thinking block carries the *same* bulky JSON as the tool result below.
+            // That is the whole point: if the sacrosanct guard were removed, a compressor
+            // would happily rewrite this block, because the content is exactly the shape
+            // it compresses best. A short thinking block would be left alone by the size
+            // threshold alone, and the test would pass without the guard existing.
+            {"role": "assistant", "content": [
+                {"type": "thinking",
+                 "thinking": serde_json::to_string(&bulk).unwrap(),
+                 "signature": "SIG-DO-NOT-TOUCH-abc123"},
+                {"type": "redacted_thinking", "data": "REDACTED-DO-NOT-TOUCH-xyz789"}
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1",
+                 "content": serde_json::to_string(&bulk).unwrap()}
+            ]}
+        ]
+    })
+    .to_string()
+}
+
+#[tokio::test]
+async fn i8_signed_and_encrypted_blocks_arrive_untouched() {
+    // The invariant with the loudest failure mode. A signature covers the exact bytes of
+    // the thinking block; alter one and the provider rejects the whole request as
+    // tampered-with. The customer sees a hard error, not a smaller saving.
+    let simulator = Simulator::anthropic().await.unwrap();
+    let source = sacrosanct_request();
+
+    through_proxy(&simulator, &source, "sk-ant-api03-x").await;
+    let received = simulator.recorder().last().expect("nothing arrived");
+
+    assert!(
+        received.body.len() < source.len(),
+        "nothing was compressed, so this assertion proves nothing"
+    );
+    assert!(
+        received.text().contains("SIG-DO-NOT-TOUCH-abc123"),
+        "the signature was altered or dropped"
+    );
+    assert!(
+        received.text().contains("REDACTED-DO-NOT-TOUCH-xyz789"),
+        "redacted thinking data was altered or dropped"
+    );
+
+    // Stronger than substring presence: the whole block must survive verbatim, since a
+    // signature covers its bytes and not merely its content.
+    let before: serde_json::Value = serde_json::from_str(&source).unwrap();
+    let after: serde_json::Value = serde_json::from_slice(&received.body).unwrap();
+    assert_eq!(
+        sha(serde_json::to_string(&before["messages"][1])
+            .unwrap()
+            .as_bytes()),
+        sha(serde_json::to_string(&after["messages"][1])
+            .unwrap()
+            .as_bytes()),
+        "the signed message was re-serialized"
+    );
+}
+
+#[tokio::test]
+async fn i7_tool_definitions_are_never_compressed() {
+    // Tools sit in the cache hot zone and are normalized at most, never compressed —
+    // and normalization is opt-in (D20), so the default path must leave them alone.
+    // A compressed tool schema is a tool the model can no longer call correctly.
+    let simulator = Simulator::anthropic().await.unwrap();
+    let source = compressible_request();
+
+    through_proxy(&simulator, &source, "sk-ant-api03-x").await;
+    let received = simulator.recorder().last().expect("nothing arrived");
+
+    let before: serde_json::Value = serde_json::from_str(&source).unwrap();
+    let after: serde_json::Value = serde_json::from_slice(&received.body).unwrap();
+
+    assert_eq!(before["tools"], after["tools"], "tools were modified");
+    assert_eq!(
+        before["system"], after["system"],
+        "the system block was modified"
+    );
+
+    // Scoped to the hot zone rather than the whole body. A marker in the *tool result*
+    // is compression working; the first version of this assertion scanned everything and
+    // failed on exactly that, which would have read as an invariant breach.
+    for member in ["tools", "system"] {
+        assert!(
+            !serde_json::to_string(&after[member])
+                .unwrap()
+                .contains("<<ccr:"),
+            "a CCR marker reached {member}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn i6_surviving_content_keeps_its_position() {
+    // Position-preserving. A compressor may replace a block's content, but the messages
+    // must stay in order, keep their roles, and keep their block counts — a model
+    // reading a reordered conversation is reading a different conversation.
+    let simulator = Simulator::anthropic().await.unwrap();
+    let source = compressible_request();
+
+    through_proxy(&simulator, &source, "sk-ant-api03-x").await;
+    let received = simulator.recorder().last().expect("nothing arrived");
+
+    let before: serde_json::Value = serde_json::from_str(&source).unwrap();
+    let after: serde_json::Value = serde_json::from_slice(&received.body).unwrap();
+
+    let (before_msgs, after_msgs) = (
+        before["messages"].as_array().unwrap(),
+        after["messages"].as_array().unwrap(),
+    );
+    assert_eq!(
+        before_msgs.len(),
+        after_msgs.len(),
+        "a message was added or dropped"
+    );
+
+    for (index, (b, a)) in before_msgs.iter().zip(after_msgs).enumerate() {
+        assert_eq!(b["role"], a["role"], "message {index} changed role");
+
+        if let (Some(b_blocks), Some(a_blocks)) = (b["content"].as_array(), a["content"].as_array())
+        {
+            assert_eq!(
+                b_blocks.len(),
+                a_blocks.len(),
+                "message {index} changed block count"
+            );
+            for (block, (bb, ab)) in b_blocks.iter().zip(a_blocks).enumerate() {
+                assert_eq!(
+                    bb["type"], ab["type"],
+                    "message {index} block {block} changed type"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn i9_telemetry_records_without_altering_the_request() {
+    // Observation must be observation. The same request is sent twice through separate
+    // proxies; the bytes that reach the provider must be identical, and the metrics must
+    // be non-empty — otherwise this passes by recording nothing.
+    let simulator = Simulator::anthropic().await.unwrap();
+    let source = compressible_request();
+
+    let state = AppState::new(simulator.base_url());
+    let metrics_before = state.metrics().render();
+
+    let app = router_with(state.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("x-api-key", "sk-ant-api03-x")
+                .header("content-type", "application/json")
+                .body(Body::from(source.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let _ = axum::body::to_bytes(response.into_body(), 1024 * 1024).await;
+    let first = simulator.recorder().last().expect("nothing arrived").body;
+
+    through_proxy(&simulator, &source, "sk-ant-api03-x").await;
+    let second = simulator.recorder().last().expect("nothing arrived").body;
+
+    assert_eq!(sha(&first), sha(&second), "observation changed the bytes");
+    assert_ne!(
+        state.metrics().render(),
+        metrics_before,
+        "nothing was recorded, so this test proves nothing"
     );
 }

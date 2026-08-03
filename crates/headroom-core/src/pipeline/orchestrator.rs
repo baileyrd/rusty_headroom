@@ -315,10 +315,20 @@ impl Orchestrator {
 
     /// Whether a block is worth offering to a compressor at all.
     ///
-    /// Sacrosanct blocks — signed thinking, encrypted content — are excluded here as
-    /// well as by the live-zone dispatcher. Two independent checks for invariant I8 is
-    /// deliberate: this one is cheap, and the cost of the guarantee failing is content
-    /// the provider will reject as tampered-with.
+    /// # This is a helper, not one of the guards
+    ///
+    /// The comment here used to claim it was one of "two independent checks" for
+    /// invariant I8. It is not called by anything on the request path. The two checks
+    /// that genuinely run are [`live_zone`]'s categorizer, which never offers a
+    /// sacrosanct block to the pipeline, and [`apply_guarded`], which refuses one even
+    /// if it is handed over — and that pair is real defence in depth: removing either
+    /// alone leaves signed content protected, which is exactly what it is for.
+    ///
+    /// Kept as public API for callers assembling their own pipeline, described
+    /// accurately so nobody counts it as a guard that is running.
+    ///
+    /// [`live_zone`]: crate::live_zone::live_zone
+    /// [`apply_guarded`]: crate::transform::apply_guarded
     pub fn is_eligible(block: &Block) -> bool {
         !block.kind().is_sacrosanct()
     }
