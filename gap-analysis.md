@@ -240,10 +240,10 @@ Every row is a gap: the target repo is empty, so all rows are new implementation
 
 | ID | Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| E1 | upstream simulators | infra | spec | all | `crates/headroom-simulators` (name only) | no | M | Fake Anthropic/OpenAI endpoints for e2e without network. |
-| E2 | invariant test gates I1–I4 | infra | spec | all | REALIGNMENT §2.2 | no | M | SHA-256 round-trip; hot-zone-unchanged; append-only; determinism. |
-| E3 | SSE corner-case fixtures | infra | spec | all | REALIGNMENT Phase I | no | M | UTF-8 split, ping, all delta types, `[DONE]`, mid-stream error. |
-| E4 | property tests | infra | spec | all | REALIGNMENT Phase I | no | M | No-panic SSE parser; tokens-non-increasing. |
+| E1 | upstream simulators | infra | spec | all | `crates/headroom-simulators` (name only) | no | M | Fake Anthropic/OpenAI endpoints for e2e without network. Done — real loopback server recording exact bytes; binds port 0 so tests parallelize. |
+| E2 | invariant test gates I1–I4 | infra | spec | all | REALIGNMENT §2.2 | no | M | SHA-256 round-trip; hot-zone-unchanged; append-only; determinism. Done as `tests/invariants.rs`, run end to end through the relay rather than against `compress_request`. |
+| E3 | SSE corner-case fixtures | infra | spec | all | REALIGNMENT Phase I | no | M | UTF-8 split, ping, all delta types, `[DONE]`, mid-stream error. Done as `headroom_simulators::fixtures` — ten cases, each documenting the defect it guards. |
+| E4 | property tests | infra | spec | all | REALIGNMENT Phase I | no | M | No-panic SSE parser; tokens-non-increasing. Done as `tests/properties.rs`; fixed-seed generator so failures reproduce from the test name. |
 
 ---
 

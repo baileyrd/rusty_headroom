@@ -29,5 +29,6 @@ futures-core = "0.3"
 [dev-dependencies]
 headroom-core = { workspace = true }
 sha2 = "0.10"
+headroom-simulators = { path = "../headroom-simulators" }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-stream = "0.1.19"

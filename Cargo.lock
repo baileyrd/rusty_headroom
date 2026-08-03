@@ -585,6 +585,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "headroom-core",
+ "headroom-simulators",
  "http",
  "reqwest",
  "serde",
@@ -601,8 +602,12 @@ dependencies = [
 name = "headroom-simulators"
 version = "0.1.0"
 dependencies = [
+ "axum",
+ "http",
+ "reqwest",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
