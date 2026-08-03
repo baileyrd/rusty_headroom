@@ -17,3 +17,13 @@ tracing.workspace = true
 blake3.workspace = true
 http.workspace = true
 tiktoken-rs = "0.11.0"
+
+# Optional — see the `redis` feature below. `default-features = false` keeps out the
+# async runtimes and TLS stacks the default build pulls in; CCR does one round trip per
+# compressed block on a store that is deliberately synchronous, so none of that is used.
+redis = { version = "0.27", default-features = false, optional = true }
+
+[features]
+# Gap row R4. Off by default: the Redis backend only earns its keep in a multi-worker
+# deployment, and a single-worker build should not carry a client it will never open.
+redis = ["dep:redis"]

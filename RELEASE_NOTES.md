@@ -6,6 +6,43 @@ the crate starts publishing releases.
 
 ---
 
+## A shared CCR store, and the proxy stops losing originals on restart
+**2026-08-03** · gap row R4
+
+- **Added:** `ccr::RedisCcrStore`, behind an **off-by-default** `redis` feature on
+  `headroom-core`, forwarded by `headroom-proxy` and `headroom-mcp`.
+- **Added:** `Config::ccr_store()` — Redis, then a directory, then memory — plus
+  `HEADROOM_REDIS_URL` and `HEADROOM_CCR_DIR` on the proxy.
+- **Added:** a CI job with a real Redis service, since the store's tests skip when
+  nothing answers and "it compiles" would otherwise be the only thing checked.
+- **Fixed, and this is the bigger half:** the proxy constructed an in-memory CCR store
+  **unconditionally**. Every stored original was dropped on restart, leaving any
+  `<<ccr:HASH>>` marker the model still held unretrievable — and with two workers the
+  marker is created on one process and requested from another that never saw it. That
+  failure is intermittent by construction and reads as data loss. `FileCcrStore` was
+  reachable from the MCP server but never from the proxy.
+- **Design note:** the feature gate answers the objection that deferred this row rather
+  than overriding it. A build that does not ask for the backend does not compile it or
+  carry it, and `default-features = false` keeps out the async runtimes and TLS stacks
+  the client's default build pulls in.
+- **Design note:** the MCP server selects the same way, because it is the *retrieval*
+  half. A local store there answers "expired" for everything the proxy compressed.
+- **Design note:** expiry is the server's job — `SET ... EX`, and `purge_expired` returns
+  zero as the truth rather than a stub. Sweeping from every worker would be several
+  processes racing to delete the same keys while disagreeing about a clock none of them
+  owns, which is what a shared store exists to remove.
+- **Design note:** a build *without* the feature that finds `HEADROOM_REDIS_URL` set says
+  so instead of falling back silently. That symptom — retrievals failing on some workers
+  — is identical to a Redis that is down, and an operator would debug the wrong thing.
+- **Design note:** one mutexed connection rather than a pool. CCR does one round trip per
+  compressed block, against a model call costing orders of magnitude more; a pool would
+  add a dependency and an exhaustion failure mode for throughput this path does not have.
+- **Verified across processes:** the proxy compressed a tool result to a marker with
+  Redis configured and exited; the key survived, and a separate `headroom-mcp` process
+  retrieved the original **byte-identical** — `303310e7145adcb6…`, 24,579 bytes.
+
+---
+
 ## D2's premise corrected
 **2026-08-03** · documentation only
 

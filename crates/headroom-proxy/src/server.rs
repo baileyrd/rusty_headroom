@@ -10,7 +10,6 @@ use axum::http::{HeaderMap, Method};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use headroom_core::ccr::InMemoryCcrStore;
 use headroom_core::tokenizer::{HeuristicEstimator, Tokenizer};
 
 use crate::compression::{compress_dialect, Compressors, Dialect};
@@ -63,7 +62,10 @@ impl AppState {
         Self {
             compressors: Arc::new(
                 Compressors::with_recommendations(
-                    Arc::new(InMemoryCcrStore::new()),
+                    // Selected from configuration rather than hardcoded. An in-memory
+                    // store loses every original on restart, and on a second worker the
+                    // marker created here is requested from a process that never saw it.
+                    Config::ccr_store(),
                     // Read once, here, at construction. See `Config::recommendations`.
                     Config::recommendations(),
                 )

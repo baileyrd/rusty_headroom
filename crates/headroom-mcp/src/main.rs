@@ -17,12 +17,53 @@ use headroom_mcp::McpServer;
 /// Where originals are cached, if a persistent location is configured.
 const STORE_DIR_VAR: &str = "HEADROOM_CCR_DIR";
 
+/// A shared CCR store, for retrieving originals another process compressed.
+const REDIS_URL_VAR: &str = "HEADROOM_REDIS_URL";
+
+/// Opens the shared store named by [`REDIS_URL_VAR`].
+///
+/// # Why this matters more here than in the proxy
+///
+/// This binary is the *retrieval* half. The proxy stores an original and sends the model
+/// a `<<ccr:HASH>>` marker; the model later calls `headroom_retrieve` with that hash, and
+/// it arrives here — in a different process. A local store answers "expired" for
+/// everything the proxy compressed, which reads to the model as content that vanished.
+#[cfg(feature = "redis")]
+fn open_redis(url: &str) -> Option<Arc<dyn headroom_core::ccr::CcrStore>> {
+    match headroom_core::ccr::RedisCcrStore::connect(url) {
+        Ok(store) => Some(Arc::new(store)),
+        Err(err) => {
+            eprintln!("headroom-mcp: could not connect to {url}: {err}; falling back");
+            None
+        }
+    }
+}
+
+/// The same, for a build without the `redis` feature.
+///
+/// Named explicitly rather than silently ignored: an operator who set the variable and
+/// got a local store would see retrievals fail exactly as if the server were down.
+#[cfg(not(feature = "redis"))]
+fn open_redis(_url: &str) -> Option<Arc<dyn headroom_core::ccr::CcrStore>> {
+    eprintln!("headroom-mcp: this build has no redis support; rebuild with --features redis");
+    None
+}
+
 fn main() -> std::io::Result<()> {
     // Persistence is opt-in. A model that asks to retrieve content after a restart
     // should get it, but writing files to an unasked-for location is worse than not,
     // so this only happens when a directory is named.
-    let store: Arc<dyn headroom_core::ccr::CcrStore> = match std::env::var(STORE_DIR_VAR) {
-        Ok(dir) if !dir.trim().is_empty() => match FileCcrStore::open(dir.trim()) {
+    // A shared store wins over a local directory: anyone who configured one has more
+    // than one process, which is the case a local directory cannot serve.
+    let shared = std::env::var(REDIS_URL_VAR)
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+        .and_then(|url| open_redis(url.trim()));
+
+    let store: Arc<dyn headroom_core::ccr::CcrStore> = match (shared, std::env::var(STORE_DIR_VAR))
+    {
+        (Some(store), _) => store,
+        (None, Ok(dir)) if !dir.trim().is_empty() => match FileCcrStore::open(dir.trim()) {
             Ok(store) => Arc::new(store),
             Err(err) => {
                 eprintln!("headroom-mcp: could not open {dir}: {err}; using memory");

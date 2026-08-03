@@ -19,3 +19,8 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 bytes.workspace = true
+
+[features]
+# Forwards `headroom-core`'s Redis-backed CCR store (gap row R4). This binary is the
+# retrieval half, so a shared store matters here whenever the proxy uses one.
+redis = ["headroom-core/redis"]

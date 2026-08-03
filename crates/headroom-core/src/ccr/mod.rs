@@ -21,11 +21,18 @@
 mod hash;
 mod in_memory;
 mod persistent;
+// Gap row R4. Feature-gated because it is the one backend that needs a service to run:
+// a single-worker deployment is better served by `FileCcrStore`, and should not carry a
+// Redis client it will never open. See DECISIONS D22.
+#[cfg(feature = "redis")]
+mod redis_store;
 mod retrieve;
 
 pub use hash::{find_markers, marker, parse_marker, ContentHash};
 pub use in_memory::InMemoryCcrStore;
 pub use persistent::FileCcrStore;
+#[cfg(feature = "redis")]
+pub use redis_store::RedisCcrStore;
 pub use retrieve::{handle_retrieve, retrieve_tool_definition, Retrieval, RETRIEVE_TOOL_NAME};
 
 use std::time::Duration;

@@ -46,6 +46,9 @@ becomes available to test against.
 >
 > Recorded this way deliberately. A deferral resting on a false premise reads as settled
 > when it is not, and that is precisely how B1/B2 stayed unbuilt for no reason.
+>
+> **Superseded on 2026-08-03 by D22.** R4 is implemented behind an off-by-default
+> feature, so no build takes the dependency unless it asks for it.
 
 ## D3 — Code compression is heuristic, not tree-sitter
 **2026-08-03**
@@ -441,3 +444,45 @@ was worried about.
 **Would change if:** nothing foreseeable. If a Python toolchain became unavailable, the
 Rust jobs would still pass and only the `python` job would fail, which is the correct
 signal rather than a silent regression.
+
+## D22 — the Redis CCR backend ships behind an off-by-default feature
+**2026-08-03**
+
+D2 deferred gap row R4 twice over: first on a false premise (no Redis here — there is),
+then on a real concern, that the `redis` crate is a dependency this run's scope did not
+name for a backend the reference calls optional.
+
+**The feature gate resolves the concern rather than overriding it.** `redis` is off by
+default, so a build that does not ask for the backend does not compile it, does not
+resolve it, and does not carry it. `default-features = false` on the crate keeps out the
+async runtimes and TLS stacks its default build pulls in — CCR does one round trip per
+compressed block against a deliberately synchronous store, so none of that is used.
+
+**What R4 actually fixes turned out to be broken already.** The proxy constructed an
+in-memory CCR store *unconditionally*. That drops every stored original on restart, so a
+`<<ccr:HASH>>` marker the model is still holding becomes unretrievable; and with two
+workers the marker is created on one process and requested from another that never saw
+it. `Config::ccr_store()` now selects Redis, then a directory, then memory — which also
+made `FileCcrStore` reachable from the proxy for the first time.
+
+**The MCP server selects the same way**, because it is the *retrieval* half: the proxy
+stores and the model calls `headroom_retrieve`, which arrives in a different process. A
+local store there answers "expired" for everything the proxy compressed.
+
+**Expiry is the server's job.** Entries are written with `SET ... EX`, and
+`purge_expired` returns zero — the truth, not a stub. Sweeping from every worker would be
+several processes racing to delete the same keys while disagreeing about a clock none of
+them owns, which is the problem a shared store exists to remove.
+
+**A feature-off build with `HEADROOM_REDIS_URL` set says so.** It does not silently fall
+back to memory: the symptom of that — retrievals failing on some workers — is identical
+to a Redis that is down, and an operator would debug the wrong thing.
+
+**Verified across processes, not just in tests.** The proxy compressed a tool result to a
+marker with Redis configured, then exited; the key survived, and a separate
+`headroom-mcp` process retrieved the original byte-identical
+(`303310e7145adcb6…`, 24,579 bytes).
+
+**Would change if:** CCR traffic ever approached the volume where one mutexed connection
+matters, at which point the store wants a pool. It is far below that today — one round
+trip per compressed block, against a model call that costs orders of magnitude more.

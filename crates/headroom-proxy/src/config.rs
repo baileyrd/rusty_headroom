@@ -38,6 +38,10 @@ pub mod vars {
     pub const MEMORY_LIMIT: &str = "HEADROOM_MEMORY_LIMIT";
     /// Set to `1` to normalize tools and place `cache_control` breakpoints.
     pub const STABILIZE: &str = "HEADROOM_STABILIZE";
+    /// Directory for a file-backed CCR store. Unset means memory only.
+    pub const CCR_DIR: &str = "HEADROOM_CCR_DIR";
+    /// Redis URL for a shared CCR store. Takes precedence over `CCR_DIR`.
+    pub const REDIS_URL: &str = "HEADROOM_REDIS_URL";
 }
 
 /// Default listen port.
@@ -280,6 +284,59 @@ impl Config {
             .unwrap_or(DEFAULT_MEMORY_LIMIT)
     }
 
+    /// The CCR store this process should use.
+    ///
+    /// # Why the proxy needs a choice here at all
+    ///
+    /// It used to construct an [`InMemoryCcrStore`] unconditionally, which is wrong in
+    /// two ways that only show up in deployment. A restart drops every stored original,
+    /// so a `<<ccr:HASH>>` marker the model is still holding becomes unretrievable. And
+    /// with more than one worker, the marker is created on one process and requested from
+    /// another that has never seen it — an intermittent failure that depends on load
+    /// balancing and reads as data loss.
+    ///
+    /// # Precedence, and why Redis wins
+    ///
+    /// Redis first, then a directory, then memory. Anyone who has configured a shared
+    /// store has a multi-worker deployment, which is the one problem a local directory
+    /// cannot solve — so naming both is not ambiguous, it is a deployment that needs the
+    /// shared one.
+    ///
+    /// # A misconfigured store never stops the proxy
+    ///
+    /// Every failure here falls back to memory and logs. CCR is a *recovery* path for
+    /// content a compressor elided; losing it costs retrievability, while refusing to
+    /// start costs the customer their whole service. The wrong trade would be to treat a
+    /// cache as a hard dependency.
+    ///
+    /// [`InMemoryCcrStore`]: headroom_core::ccr::InMemoryCcrStore
+    pub fn ccr_store() -> std::sync::Arc<dyn headroom_core::ccr::CcrStore> {
+        use headroom_core::ccr::{FileCcrStore, InMemoryCcrStore};
+
+        if let Some(url) = setting(vars::REDIS_URL).filter(|raw| !raw.trim().is_empty()) {
+            match connect_redis(url.trim()) {
+                Ok(store) => return store,
+                Err(err) => {
+                    tracing::warn!(%err, "could not use the redis CCR store; falling back");
+                }
+            }
+        }
+
+        if let Some(dir) = setting(vars::CCR_DIR).filter(|raw| !raw.trim().is_empty()) {
+            match FileCcrStore::open(dir.trim()) {
+                Ok(store) => {
+                    tracing::info!(dir = %dir.trim(), "using a file-backed CCR store");
+                    return std::sync::Arc::new(store);
+                }
+                Err(err) => {
+                    tracing::warn!(dir = %dir.trim(), %err, "could not open the CCR directory; using memory");
+                }
+            }
+        }
+
+        std::sync::Arc::new(InMemoryCcrStore::new())
+    }
+
     /// Whether cache stabilization may rewrite the hot zone.
     ///
     /// # Off by default, and this one is not timidity
@@ -310,6 +367,32 @@ impl Config {
     pub fn compression_enabled(&self) -> bool {
         self.compression_enabled
     }
+}
+
+/// Opens the Redis-backed CCR store.
+///
+/// # Why this is two functions rather than one `cfg` block inline
+///
+/// The feature-off arm has to be a *distinct* outcome from a connection failure. A build
+/// without the `redis` feature that silently fell back to memory would leave an operator
+/// who set `HEADROOM_REDIS_URL` believing they had a shared store, and the symptom —
+/// retrievals failing on some workers — looks identical to a Redis that is down. Naming
+/// the real reason is the whole point.
+#[cfg(feature = "redis")]
+fn connect_redis(url: &str) -> Result<std::sync::Arc<dyn headroom_core::ccr::CcrStore>, String> {
+    match headroom_core::ccr::RedisCcrStore::connect(url) {
+        Ok(store) => {
+            tracing::info!("using a redis-backed CCR store");
+            Ok(std::sync::Arc::new(store))
+        }
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+/// The same, for a build without the `redis` feature.
+#[cfg(not(feature = "redis"))]
+fn connect_redis(_url: &str) -> Result<std::sync::Arc<dyn headroom_core::ccr::CcrStore>, String> {
+    Err("this build has no redis support; rebuild with --features redis".to_owned())
 }
 
 #[cfg(test)]
