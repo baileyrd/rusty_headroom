@@ -6,6 +6,35 @@ the crate starts publishing releases.
 
 ---
 
+## SmartCrusher formatter and transform — JSON actually compresses
+**2026-08-03** · closes [#25](https://github.com/baileyrd/rusty_headroom/issues/25)
+
+- **Added:** `format_plan` — renders a `CrushPlan` into text for a language model:
+  record and elision counts, constants stated once, low-cardinality fields
+  enumerated, anchor records verbatim with their original indices, and the CCR marker.
+- **Added:** `SmartCrusher`, implementing `Transform` + `LossyTransform` and holding a
+  `CcrStore`. The pipeline now runs end to end — detect, analyze, rank, plan, format,
+  store, token-validate.
+- **Measured:** on a realistic file-listing tool result, estimated token reduction of
+  **77% at 20 records, 91% at 50, 98% at 200**. The reference claims 60–95% on
+  structured data.
+- **Design note:** anchors are serialized from their original values, so key order and
+  numeric literals survive exactly. An anchor that came back reformatted would not be
+  the record the output promised.
+- **Design note:** the original goes to the CCR store via `store_and_mark` before the
+  marker is emitted, so a marker can never advertise a hash nothing was stored under.
+- **Design note:** no special casing for the flagship compressor — it goes through
+  `apply_guarded` (I8) and `validated_apply` (I5) like any other transform.
+- **Known limitation:** the head sample is a fixed count, not a proportion. A
+  1000-record array is summarized to the same handful of anchors as a 50-record one,
+  so information density falls as arrays grow. Outliers are still always kept, which
+  is what keeps this safe rather than merely aggressive.
+- **Known limitation:** output is written for a model to read, not to be parsed. There
+  is no path back from the rendered text to JSON — recovery is via CCR retrieval, and
+  only while the entry lives (24h TTL).
+- **Known limitation:** only record-set JSON compresses. Wide objects, deep nests, and
+  scalar-heavy documents are classified but have no compressor, so they decline.
+
 ## SmartCrusher planning — decide before mutating
 **2026-08-03** · closes [#24](https://github.com/baileyrd/rusty_headroom/issues/24)
 
