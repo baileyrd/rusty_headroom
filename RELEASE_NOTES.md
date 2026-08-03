@@ -6,6 +6,57 @@ the crate starts publishing releases.
 
 ---
 
+## Test infrastructure: simulators, invariant gates, fixtures, property tests
+**2026-08-03** · gap rows E1, E2, E3, E4
+
+- **Added (E1):** `headroom-simulators` — `Simulator`, `Recorder`, `Reply`. A real
+  loopback server that records the exact bytes it received.
+- **Added (E2):** `crates/headroom-proxy/tests/invariants.rs` — I1 through I4 asserted
+  **end to end through a real proxy talking to a real socket**, not against
+  `compress_request`.
+- **Added (E3):** `headroom_simulators::fixtures` — ten SSE corner cases, each naming
+  the specific defect it guards against.
+- **Added (E4):** `crates/headroom-proxy/tests/properties.rs` — 8 property tests over
+  generated input.
+- **Design note, and the reason E2 exists at all:** `compress_request` was already
+  unit-tested for all four invariants. What those tests cannot show is that the property
+  survives the *relay* — header rebuilding, hyper's framing, chunked transfer encoding
+  and the `Cow` passthrough all sit between the pure function and the provider, and a
+  regression in any of them breaks the guarantee while every unit test stays green.
+- **Design note:** a real server on a real socket rather than a mock. The proxy's central
+  claim is about bytes crossing a network boundary, and a mock that stands in for the
+  transport asserts everything except the thing under test.
+- **Design note:** `i2_the_hot_zone_survives_a_compressed_request_unchanged` asserts
+  compression *actually happened* before checking the hot zone. All four invariants are
+  satisfiable by doing nothing, so there is also a test that the proxy is not passing
+  them that way — it requires a >50% reduction.
+- **Design note:** `i4_holds_across_separate_proxy_instances` sends two requests through
+  one warm state and compares against a cold one. If they differ, accumulated CCR state
+  is leaking into the output and a recorded hash stops being a property of the request.
+- **Design note:** the property generator is a **fixed-seed xorshift**, not a
+  clock-seeded harness. A failure reproduces from the test name alone. The trade is real
+  — a random seed explores more over many runs — but a flaky test that cannot be
+  reproduced gets disabled rather than fixed, and this project's whole thesis is that
+  non-reproducible behavior is the expensive kind.
+- **Design note:** one generator emits uniformly random bytes and another emits
+  *fragments of SSE syntax*. Random bytes almost never form a `data:` line, so they
+  exercise the rejection path and little else; a state machine has states to get wrong
+  only when it is fed something that looks like input.
+- **Design note:** every fixture is parsed at **every byte offset** and again **one byte
+  at a time**, and must yield identical events. A chunk boundary is a network artifact
+  and must not change what the parser sees.
+- **Design note:** `compression_never_errors_on_arbitrary_bodies` asserts the output is
+  either the input verbatim or valid JSON — never something that is neither. That is the
+  property that makes `compress_request` safe on the request path, and it is worth
+  checking rather than trusting the signature.
+- **Design note:** simulators bind port 0. A fixed port turns concurrent tests into an
+  intermittent bind failure that looks like a flake in whichever test lost the race.
+- **Known limitation:** the simulators answer every path with one canned reply. A test
+  needing different responses per path builds its own router; `strict_router` is
+  provided for the case where the path itself is what needs asserting.
+- **Known limitation:** the fixtures cover framing and event vocabulary, not provider
+  behavior — no rate-limit headers, retries, or connection resets.
+
 ## CLI: wrap, unwrap, and savings
 **2026-08-03** · gap rows L5, L6, L7, L8, L12
 
