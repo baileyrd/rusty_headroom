@@ -227,3 +227,33 @@ Taken: `CompressionPolicy` gains an explicit `lossless_transforms` field.
 
 **Would change if:** a transform appears that reduces tokens without altering a single
 byte of what the client sent, which is a contradiction in terms — so, in practice, not.
+
+## D15 — WebSocket traffic is relayed, never compressed
+**2026-08-03**
+
+Gap row X13 asks for the Codex WebSocket flow. The implementation relays frames in both
+directions and compresses nothing, which needs saying explicitly rather than reading as
+an unfinished feature.
+
+Two reasons, and the first is structural:
+
+**There is no request boundary.** HTTP compression works because a request arrives
+whole: the live zone can be identified, and the frozen prefix left alone. A socket is a
+conversation with no such marker. A compressor would have to infer what had "already
+been sent" from message content alone, and would be wrong the first time a client resent
+context — which is exactly when it matters, because that is the expensive case.
+
+**The client frames the messages.** A relay that recombined or split frames would have
+changed the protocol beneath a library counting on it, and the failure would look like a
+client bug.
+
+Taken: `websocket::relay_socket`, a faithful bidirectional pipe. The value is that Codex
+works through the proxy at all, not that its traffic shrinks. It records a passthrough
+in the metrics so the savings ratio stays a claim about traffic something actually
+compressed.
+
+Dependencies: `tokio-tungstenite` (rustls, no default features) and `futures-util`,
+both already in the tree transitively via axum.
+
+**Would change if:** the transport gains a request-boundary marker, or the reference
+demonstrates a safe way to identify a frozen prefix inside a socket conversation.

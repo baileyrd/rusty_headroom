@@ -30,5 +30,6 @@ pub mod sse;
 pub mod stabilization;
 pub mod upstream;
 pub mod volatile;
+pub mod websocket;
 
 pub use config::Config;
