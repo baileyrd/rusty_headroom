@@ -43,6 +43,7 @@
 pub mod auth_mode;
 pub mod block;
 pub mod ccr;
+pub mod code_compressor;
 pub mod conversation;
 pub mod detection;
 pub mod diff_compressor;
@@ -60,6 +61,7 @@ pub mod validate;
 pub use auth_mode::{classify_auth_mode, AuthMode, CompressionPolicy};
 pub use block::{Block, BlockKind};
 pub use ccr::{CcrStore, ContentHash};
+pub use code_compressor::CodeCompressor;
 pub use conversation::{Conversation, Message, Role};
 pub use diff_compressor::DiffCompressor;
 pub use error::{Declined, Error, Result};
