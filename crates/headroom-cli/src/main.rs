@@ -76,6 +76,23 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// List the compressors, content types and MCP tools this build carries.
+    Tools,
+    /// Write a starter configuration file.
+    Init {
+        /// Where to write it.
+        #[arg(long, default_value = ".headroom.env")]
+        path: std::path::PathBuf,
+        /// Replace an existing file.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Aggregate request bodies from stdin and publish compression recommendations.
+    Learn {
+        /// How many observations a shape needs before it is published.
+        #[arg(long, default_value_t = 5)]
+        min_samples: u64,
+    },
 }
 
 fn main() -> std::process::ExitCode {
@@ -96,6 +113,9 @@ fn main() -> std::process::ExitCode {
         Command::Perf { iterations } => commands::perf(iterations),
         Command::Deploy { port, upstream } => commands::deploy(port, &upstream),
         Command::Update { check } => commands::update(check),
+        Command::Tools => commands::tools(),
+        Command::Init { path, force } => commands::init(&path, force),
+        Command::Learn { min_samples } => commands::learn(min_samples),
     };
 
     match outcome {

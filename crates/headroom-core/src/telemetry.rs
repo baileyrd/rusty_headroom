@@ -258,20 +258,24 @@ impl Aggregator {
             .observations
             .iter()
             .filter(|(_, observation)| observation.samples >= min_samples)
-            .filter_map(|(key, observation)| {
-                observation.ratio().map(|ratio| {
-                    (
-                        key.clone(),
-                        Recommendation {
-                            mean_ratio: ratio,
-                            samples: observation.samples,
-                            // A shape that mostly declines is worth not attempting: the
-                            // work costs latency on every request and returns nothing.
-                            worth_compressing: ratio > 0.10
-                                && observation.declines * 2 < observation.samples,
-                        },
-                    )
-                })
+            .map(|(key, observation)| {
+                // A shape that *never* compressed has no ratio, and publishing nothing
+                // for it would be the wrong way round: that is precisely the shape worth
+                // recording as not worth attempting. Absent data reads as "unmeasured",
+                // and an unmeasured shape is always retried.
+                let ratio = observation.ratio().unwrap_or(0.0);
+
+                (
+                    key.clone(),
+                    Recommendation {
+                        mean_ratio: ratio,
+                        samples: observation.samples,
+                        // A shape that mostly declines is worth not attempting: the work
+                        // costs latency on every request and returns nothing.
+                        worth_compressing: ratio > 0.10
+                            && observation.declines * 2 < observation.samples,
+                    },
+                )
             })
             .collect();
 
@@ -554,6 +558,22 @@ mod tests {
 
         assert!(aggregator.recommend(10).entries.is_empty());
         assert_eq!(aggregator.recommend(2).entries.len(), 1);
+    }
+
+    #[test]
+    fn a_shape_that_never_compressed_is_published_as_not_worth_attempting() {
+        // The case `learn` surfaced. Publishing nothing for an all-decline shape is the
+        // wrong way round: absent data reads as "unmeasured", and an unmeasured shape is
+        // always retried — so the one shape most worth skipping would be retried forever.
+        let mut aggregator = Aggregator::new();
+        let key = key("claude-opus-4", r#"[{"a":1}]"#);
+        for _ in 0..6 {
+            aggregator.record_decline(&key);
+        }
+
+        let recommendations = aggregator.recommend(5);
+        assert_eq!(recommendations.entries.len(), 1, "nothing was published");
+        assert!(!recommendations.worth_compressing(&key));
     }
 
     #[test]
