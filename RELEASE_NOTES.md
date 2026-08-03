@@ -6,6 +6,47 @@ the crate starts publishing releases.
 
 ---
 
+## The estimator's "never under-counts" claim was false
+**2026-08-03** · I5's safety rested on it, and nothing had ever measured it
+
+- Four files stated that `HeuristicEstimator` never under-counts. `validated_apply`
+  discards a compression whose result is not smaller **in estimated tokens**, so an
+  estimator that under-counts the compressed form forwards a "compression" that grew the
+  prompt. The module's own header called that failure *"much worse"* and *silent*.
+- **It had never been checked against the tokenizer it approximates.** Measured against
+  `gpt-4o`:
+
+  | content | heuristic | tiktoken | ratio |
+  | --- | --- | --- | --- |
+  | log lines | 1051 | 1139 | 0.92 |
+  | hex digests | 183 | 220 | 0.83 |
+  | base64 | 220 | 421 | 0.52 |
+  | whitespace runs | 1 | 501 | 0.00 |
+
+- Logs mattered most — a first-class content type with its own compressor, under by 8%, so
+  a log compression measuring a 5% saving could have grown the real prompt.
+- **Fixed for realistic content:** digits charged separately (they group in threes, and
+  timestamps make a log line mostly digits); long alphanumeric runs charged at the density
+  measured for base64; whitespace runs *sized* rather than counted, separating uniform runs
+  (64 spaces is one token) from mixed runs (2.99 chars per token).
+- **Not fixed, and not fixable this way:** random alphanumeric strings still under-count —
+  25.8% of 12,000 inputs, worst `"EYM3Dgnc6"` at 3 against 7. `"Dgnc"` and `"Word"` are the
+  same string to a character-class heuristic and cost 4 tokens and 1.
+- **The claim is corrected in all four places rather than softened**, and D29 records the
+  reasoning. The test file is named `tokenizer_differential.rs`, not for the property it
+  disproved.
+- **Three tests:** the realistic property (pinned over 20 content classes), a bound on the
+  random-string exposure that can only be tightened, and a closeness bound so a future
+  "safety" fix cannot suppress compression everywhere.
+- **My first attempt over-corrected and the closeness test caught it** — charging whitespace
+  by length alone put 24 spaces of indentation at 12 tokens against an actual 1, a 3.3×
+  over-count on exactly the content this proxy compresses.
+- Verified by reverting each of the three fixes independently; each is caught by name.
+  `doctor` and `perf` confirm all six compressors still compress, each reporting *more*
+  saved than before.
+
+---
+
 ## Cache stabilization is now tested with the opt-in turned on
 **2026-08-03** · 899 tests pass with its dialect condition inverted
 

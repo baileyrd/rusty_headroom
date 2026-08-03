@@ -35,8 +35,9 @@ pub trait Tokenizer: Send + Sync {
 
     /// Whether this tokenizer is exact for its model family, or an approximation.
     ///
-    /// Approximate tokenizers must never under-count — see [`HeuristicEstimator`]
-    /// for why that direction is the safe one.
+    /// Approximate tokenizers must err toward over-counting — see
+    /// [`HeuristicEstimator`] for why that direction is the safe one, and for the
+    /// measured limits of how far it holds.
     fn is_exact(&self) -> bool {
         false
     }

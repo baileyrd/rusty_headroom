@@ -12,7 +12,7 @@
 //! why this is a per-model-family registration rather than the default: a build that
 //! never sees OpenAI traffic should not carry OpenAI's vocabulary.
 //!
-//! # It still never under-counts
+//! # This one really does not under-count
 //!
 //! `is_exact()` returns `true`, and the encoder is the same one OpenAI uses — so the
 //! count is the count. The one place it could go wrong is a *newer* model whose encoding
