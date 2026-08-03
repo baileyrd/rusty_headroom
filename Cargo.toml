@@ -64,6 +64,7 @@ axum = "0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 tower = "0.5"
 http = "1"
+clap = { version = "4", features = ["derive"] }
 
 [profile.release]
 strip = "symbols"
