@@ -6,6 +6,28 @@ the crate starts publishing releases.
 
 ---
 
+## The MCP server could advertise a tool it then rejects
+**2026-08-03** · the ninth copy of a name list, and the one nothing checked
+
+- **The hole:** the tool names existed in three places — `TOOL_NAMES`, the advertised
+  definitions in `tool_definitions()`, and `call_tool`'s match arms. One test tied the
+  first two. **Nothing tied the third.**
+- **Demonstrated end to end.** Renaming a tool in `TOOL_NAMES` and its definition produced
+  a server that advertised `headroom_squash` on `tools/list` and answered
+  `{"code":-32602,"message":"unknown tool: headroom_squash"}` when asked for it — with
+  `cargo test --all-features` returning **0**. Every test called the tools by their old
+  literal names, and the dispatcher still knew those.
+- `headroom tools` prints `TOOL_NAMES`, so the CLI would have listed the broken tool too.
+- **Changed:** the definitions take their names from `TOOL_NAMES`, and the dispatcher uses
+  match guards against the same const, so all three copies are now one.
+- **Added:** `every_advertised_tool_can_actually_be_called`, driven from `tools/list`'s own
+  output rather than from `TOOL_NAMES` — what a client can call is what the client was
+  told about. It distinguishes a dispatched tool declining (`missing 'content'`) from one
+  the dispatcher has never heard of.
+- Verified by re-applying the exact original bug and watching it fail.
+
+---
+
 ## No invariant gate can now pass by doing nothing
 **2026-08-03** · finishing the sweep across the whole file
 
