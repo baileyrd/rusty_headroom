@@ -87,6 +87,15 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Register the headroom MCP server in a host's config.
+    Mcp {
+        /// The host's MCP config file.
+        #[arg(long)]
+        config: std::path::PathBuf,
+        /// Remove the entry instead of adding it.
+        #[arg(long)]
+        uninstall: bool,
+    },
     /// Aggregate request bodies from stdin and publish compression recommendations.
     Learn {
         /// How many observations a shape needs before it is published.
@@ -115,6 +124,7 @@ fn main() -> std::process::ExitCode {
         Command::Update { check } => commands::update(check),
         Command::Tools => commands::tools(),
         Command::Init { path, force } => commands::init(&path, force),
+        Command::Mcp { config, uninstall } => commands::mcp_install(&config, uninstall),
         Command::Learn { min_samples } => commands::learn(min_samples),
     };
 
