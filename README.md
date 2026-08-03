@@ -102,6 +102,23 @@ breakdown of *why* traffic was or was not compressed. `headroom_expanded_total` 
 requests this proxy made **larger**: memory injection adds content by design, so that is a
 real outcome and not an error, but it is not compression and is no longer counted as it.
 
+`headroom_cache_read_tokens_total` and `headroom_cache_creation_tokens_total` are read off
+the response stream, in each provider's own vocabulary, for all three proxied surfaces.
+Two cases report a zero that means *the provider said nothing* rather than *the provider
+said zero*, and the metric cannot tell them apart:
+
+- **Chat completions send their usage chunk only when the client asks for it** — the
+  request has to carry `stream_options: {"include_usage": true}`. A client that omits it
+  gets a stream with no totals in it at all, and this proxy will not add the field to
+  someone else's request to make its own numbers look better.
+- **`cache_write_tokens` exists only on the model families that bill for cache writes.**
+  On older models a fully-cached prompt reports reads with no writes, so
+  `headroom_cache_hit_rate` reads 1.0 — correct under the ratio's definition (reads over
+  reads-plus-writes), and worth knowing before treating it as a fraction of the prompt.
+
+Neither is something a proxy can fix from where it sits, and substituting a guess for
+either would corrupt the one number the whole thing exists to move.
+
 `POST /admin/runtime-env` (loopback only) retunes a running proxy. Settings marked **no**
 above take effect on the next request; the rest are stored and named under `needs_restart`
 rather than letting you believe the change took.

@@ -259,6 +259,34 @@ for f in $(grep -rl "compress_dialect(" --include=*.rs crates/headroom-proxy/src
   fi
 done
 
+echo "== 11. every stream dialect is exercised by the cache-accounting test"
+# The third gap with this shape, after the routing table (check 6) and the volatile scan
+# (check 10): a capability implemented for one surface out of three, with a comment
+# asserting the other two did not need it.
+#
+# `Observer::cache_tokens` returned a hardcoded `(0, 0)` for both OpenAI dialects under
+# the claim that neither provider reports cache usage in its stream. Both do — chat
+# completions in a final chunk with no choices, Responses on `response.completed` — so
+# every OpenAI conversation read as no-cache-data on the one metric this proxy exists to
+# move, and the whole suite was green. The test named for the behaviour fed a stream
+# carrying no usage in the first place, so it could not tell a missing parser from an
+# absent field.
+#
+# The replacement test is a table over the dialects. A table only proves what its rows
+# cover, so this is what makes its comment ("a fourth dialect fails on this line") true:
+# one row per `Observer` variant, or the table is silently partial again.
+variants=$(awk '/^pub enum Observer \{/,/^\}/' crates/headroom-proxy/src/sse/observer.rs \
+  | grep -cE '^\s{4}[A-Z][A-Za-z]*\(')
+rows=$(awk '/fn streams_reporting_900_reads_and_100_writes/,/^    \}/' \
+  crates/headroom-proxy/src/sse/observer.rs | grep -c '^\s*"/v1/')
+if [ "$variants" -eq 0 ] || [ "$rows" -eq 0 ]; then
+  fail "could not locate the Observer variants ($variants) or the test's table ($rows)"
+elif [ "$variants" -eq "$rows" ]; then
+  note "✓ $variants dialects, $rows covered"
+else
+  fail "Observer has $variants dialects and the cache test covers $rows — one reports untested zeros"
+fi
+
 echo
 [ "$status" -eq 0 ] && echo "clean" || echo "findings above — see the header for why this matters"
 exit "$status"

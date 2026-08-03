@@ -6,6 +6,41 @@ the crate starts publishing releases.
 
 ---
 
+## Cache accounting was Anthropic-only, under a comment saying it had to be
+**2026-08-03** · two of three proxied surfaces reported nothing on the headline metric
+
+- `Observer::cache_tokens` returned a hardcoded `(0, 0)` for OpenAI chat completions and
+  the Responses API, explained by: *"neither reports cache usage in its stream — the
+  honest answer, not a gap."* Both report it:
+
+  | surface | field path |
+  | --- | --- |
+  | Anthropic | `usage.cache_read_input_tokens` / `cache_creation_input_tokens` |
+  | chat completions | `usage.prompt_tokens_details.{cached_tokens,cache_write_tokens}` |
+  | Responses | `usage.input_tokens_details.{cached_tokens,cache_write_tokens}` |
+
+- So `headroom_cache_hit_rate` reported *no data* for every OpenAI conversation, and
+  `headroom_cache_read_tokens_total` stayed at zero no matter how well the cache performed.
+- The test named for the behaviour fed `data: [DONE]` — a stream carrying no usage at all,
+  so it passed with the parser and without it. The end-to-end cache test covered
+  `/v1/messages` only.
+- OpenAI puts the numbers in a final chunk whose `choices` array is **empty**, so the
+  choice-first classifier dropped it; the parse now runs ahead of the `choices` lookup, and
+  tests for a `usage` *object* because every other chunk carries `"usage": null` once
+  `include_usage` is set.
+- Cache usage is now also read from `response.incomplete` and the other terminal Responses
+  events — a truncated turn still read its prefix from cache and was still billed for it.
+- Verified by mutation, six times: restoring the hardcoded zero, blinding each Responses
+  arm, reordering the chat classifier, and dropping a dialect row from the new table each
+  turn the corresponding test or audit check red.
+- Audit **check 11** added: `Observer` must have exactly as many variants as the cache
+  test has rows, so a fourth dialect cannot ship reporting untested zeros.
+- README documents the two zeros that are still honest: chat completions only send usage
+  when the client sets `stream_options.include_usage`, and `cache_write_tokens` exists only
+  on model families that bill for cache writes.
+
+---
+
 ## Stabilization was a one-shot, and gave long conversations half its breakpoints
 **2026-08-03** · the feature under-delivering on exactly what it exists for
 

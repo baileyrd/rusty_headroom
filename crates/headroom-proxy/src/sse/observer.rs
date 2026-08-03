@@ -20,11 +20,15 @@
 //! fail, what did it say that this build does not model. It deliberately does **not**
 //! invent the rest:
 //!
-//! - **Cache usage is Anthropic-only.** Neither OpenAI surface reports cache hits in its
-//!   stream. Reporting zero for them is the truth; synthesizing a number would corrupt
-//!   the one metric this proxy exists to move.
+//! - **Cache usage is common, but spelled three ways.** Every dialect reports it; each
+//!   uses different field names, in a different frame. This module's job is to answer
+//!   the question once, not to decide the answer is unavailable — see
+//!   [`Observer::cache_tokens`], which for a long time returned a hardcoded zero for
+//!   both OpenAI surfaces under a comment claiming neither provider reported the number
+//!   at all.
 //! - **OpenAI chat has no unknown-type list.** Its chunks are not tagged with an event
-//!   name to collect, so the list is empty rather than fabricated.
+//!   name to collect, so the list is empty rather than fabricated. Unlike the above,
+//!   this one is genuinely absent from the wire rather than merely unparsed.
 
 use super::{Event, OpenAiObserver, ResponsesObserver, StreamObserver};
 
@@ -73,15 +77,27 @@ impl Observer {
 
     /// Cache tokens the stream reported, as `(read, creation)`.
     ///
-    /// Zero for both OpenAI surfaces because neither reports cache usage in its stream —
-    /// the honest answer, not a gap. Anything else would be a number this proxy made up
-    /// about the metric it exists to move.
+    /// All three dialects report this, in three vocabularies: Anthropic as
+    /// `cache_read_input_tokens` / `cache_creation_input_tokens` on `message_start`,
+    /// chat completions as `cached_tokens` / `cache_write_tokens` under
+    /// `usage.prompt_tokens_details`, Responses as the same pair under
+    /// `usage.input_tokens_details`.
+    ///
+    /// A zero here means the provider reported zero *or* reported nothing, and the two
+    /// are not separable downstream. Two cases produce the second: chat completions only
+    /// send their usage chunk when the client sets `stream_options.include_usage`, and
+    /// `cache_write_tokens` exists only on the model families that bill for cache
+    /// writes. Neither is something a proxy can make the client or the model do, and
+    /// substituting a guess for either would corrupt the one number this exists to move.
     pub fn cache_tokens(&self) -> (u64, u64) {
         match self {
             Self::Anthropic(observer) => {
                 (observer.cache_read_tokens, observer.cache_creation_tokens)
             }
-            Self::Chat(_) | Self::Responses(_) => (0, 0),
+            Self::Chat(observer) => (observer.cache_read_tokens, observer.cache_creation_tokens),
+            Self::Responses(observer) => {
+                (observer.cache_read_tokens, observer.cache_creation_tokens)
+            }
         }
     }
 
@@ -253,23 +269,103 @@ mod tests {
         );
     }
 
+    /// One stream per dialect, each carrying 900 cache reads and 100 cache writes in
+    /// that dialect's own vocabulary.
+    fn streams_reporting_900_reads_and_100_writes() -> [(&'static str, String); 3] {
+        [
+            (
+                "/v1/messages",
+                concat!(
+                    "event: message_start\n",
+                    r#"data: {"type":"message_start","message":{"usage":"#,
+                    r#"{"cache_read_input_tokens":900,"cache_creation_input_tokens":100}}}"#,
+                    "\n\n",
+                )
+                .to_owned(),
+            ),
+            (
+                "/v1/chat/completions",
+                concat!(
+                    r#"data: {"choices":[{"index":0,"delta":{"content":"hi"}}],"usage":null}"#,
+                    "\n\n",
+                    r#"data: {"choices":[],"usage":{"prompt_tokens":1000,"#,
+                    r#""prompt_tokens_details":{"cached_tokens":900,"cache_write_tokens":100}}}"#,
+                    "\n\n",
+                    "data: [DONE]\n\n",
+                )
+                .to_owned(),
+            ),
+            (
+                "/v1/responses",
+                concat!(
+                    r#"data: {"type":"response.completed","response":{"usage":"#,
+                    r#"{"input_tokens":1000,"output_tokens":12,"input_tokens_details":"#,
+                    r#"{"cached_tokens":900,"cache_write_tokens":100}}}}"#,
+                    "\n\n",
+                )
+                .to_owned(),
+            ),
+        ]
+    }
+
     #[test]
-    fn cache_usage_is_reported_only_where_the_provider_sends_it() {
-        let anthropic = observe(
-            "/v1/messages",
+    fn every_dialect_reports_the_cache_usage_its_provider_sends() {
+        // Written as a table over all three rather than as one test per dialect,
+        // because the defect it guards is a dialect that gets *skipped*: both OpenAI
+        // surfaces returned a hardcoded `(0, 0)` under a comment asserting that neither
+        // provider reports cache usage at all. Both do. Every OpenAI conversation read
+        // as no-cache-data on the one metric this proxy exists to move, and the whole
+        // suite was green — the test here fed a stream carrying no usage in the first
+        // place, so it could not tell a parser that was missing from one that was
+        // absent.
+        //
+        // A fourth dialect wired up without cache accounting fails on this line rather
+        // than shipping quiet zeros.
+        for (path, stream) in streams_reporting_900_reads_and_100_writes() {
+            let observer = observe(path, &stream);
+            assert_eq!(
+                observer.cache_tokens(),
+                (900, 100),
+                "{path} did not report the cache usage its stream carried"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dialect_reports_zero_when_its_stream_carries_no_usage() {
+        // The control for the test above. If `cache_tokens` returned 900 regardless —
+        // or if the reads were coming from somewhere other than the stream — every
+        // assertion up there would pass without the parsers doing anything.
+        for (path, stream) in [
+            ("/v1/messages", "event: message_stop\ndata: {}\n\n"),
+            ("/v1/chat/completions", "data: [DONE]\n\n"),
+            ("/v1/responses", "data: {\"type\":\"response.created\"}\n\n"),
+        ] {
+            assert_eq!(
+                observe(path, stream).cache_tokens(),
+                (0, 0),
+                "{path} reported cache usage its stream never carried"
+            );
+        }
+    }
+
+    #[test]
+    fn a_truncated_responses_turn_still_reports_what_it_read_from_cache() {
+        // `response.incomplete` is how a turn that hit its output-token limit ends. It
+        // read its prefix from the cache and was billed for it all the same, so
+        // counting cache usage only on `response.completed` undercounts every
+        // truncated request — the common shape for a long agent turn.
+        let observer = observe(
+            "/v1/responses",
             concat!(
-                "event: message_start\n",
-                r#"data: {"type":"message_start","message":{"usage":"#,
-                r#"{"cache_read_input_tokens":900,"cache_creation_input_tokens":100}}}"#,
+                r#"data: {"type":"response.incomplete","response":{"usage":"#,
+                r#"{"input_tokens_details":{"cached_tokens":512}}}}"#,
                 "\n\n",
             ),
         );
-        assert_eq!(anthropic.cache_tokens(), (900, 100));
 
-        // Neither OpenAI surface reports cache usage in its stream. Zero is the truth;
-        // a synthesized number would corrupt the one metric this proxy exists to move.
-        let chat = observe("/v1/chat/completions", "data: [DONE]\n\n");
-        assert_eq!(chat.cache_tokens(), (0, 0));
+        assert!(observer.failure().is_some(), "not treated as unsuccessful");
+        assert_eq!(observer.cache_tokens(), (512, 0));
     }
 
     #[test]

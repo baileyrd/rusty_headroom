@@ -38,6 +38,37 @@ pub enum Phase {
     Lifecycle,
 }
 
+/// Cache accounting from a terminal event's `response.usage`.
+///
+/// `None` for a field the provider did not report, which is not the same as a reported
+/// zero: `cache_write_tokens` only exists on the model families that bill for cache
+/// writes, and reading its absence as "nothing was written" would be this proxy
+/// inventing a number about the metric it exists to move.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CacheTokens {
+    /// Input tokens the provider served from its cache.
+    pub read: Option<u64>,
+    /// Input tokens the provider wrote to it.
+    pub creation: Option<u64>,
+}
+
+/// Reads `response.usage.input_tokens_details` out of a terminal event's payload.
+fn cache_tokens(payload: Option<&Value>) -> CacheTokens {
+    let details = payload
+        .and_then(|payload| payload.get("response"))
+        .and_then(|response| response.get("usage"))
+        .and_then(|usage| usage.get("input_tokens_details"));
+
+    CacheTokens {
+        read: details
+            .and_then(|details| details.get("cached_tokens"))
+            .and_then(Value::as_u64),
+        creation: details
+            .and_then(|details| details.get("cache_write_tokens"))
+            .and_then(Value::as_u64),
+    }
+}
+
 /// A classified Responses stream event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResponsesEvent {
@@ -47,11 +78,15 @@ pub enum ResponsesEvent {
     Completed {
         /// Output tokens reported, if present.
         output_tokens: Option<u64>,
+        /// What the response cost the cache, if reported.
+        cache: CacheTokens,
     },
     /// The response failed or was cancelled.
     Terminated {
         /// Which terminal state — `failed`, `incomplete`, or `cancelled`.
         reason: String,
+        /// What the response cost the cache before it stopped, if reported.
+        cache: CacheTokens,
     },
     /// Prose the model produced.
     OutputText {
@@ -134,12 +169,18 @@ pub fn classify(event: &Event) -> ResponsesEvent {
                 .and_then(|r| r.get("usage"))
                 .and_then(|u| u.get("output_tokens"))
                 .and_then(Value::as_u64),
+            cache: cache_tokens(payload.as_ref()),
         },
         // Distinguished from `completed` because a response that failed is not one that
         // finished, however many tokens it produced first — the same reason the
         // Anthropic observer separates `error` from `message_stop`.
+        //
+        // Its cache numbers are read all the same. A turn that ran out of output tokens
+        // still read its prefix from the cache and was still billed for it, so skipping
+        // the usage here would undercount every truncated request.
         ("response", "failed" | "incomplete" | "cancelled") => ResponsesEvent::Terminated {
             reason: suffix.to_owned(),
+            cache: cache_tokens(payload.as_ref()),
         },
         ("output_text", _) => ResponsesEvent::OutputText {
             phase,
@@ -196,6 +237,10 @@ pub struct ResponsesObserver {
     pub call_item_indices: Vec<usize>,
     /// Output tokens the provider reported.
     pub output_tokens: Option<u64>,
+    /// Input tokens the provider served from its cache.
+    pub cache_read_tokens: u64,
+    /// Input tokens the provider wrote to its cache.
+    pub cache_creation_tokens: u64,
     /// Whether a terminal event arrived.
     pub completed: bool,
     /// The provider's error or terminal reason, if it did not succeed.
@@ -211,18 +256,23 @@ impl ResponsesObserver {
 
         match classify(event) {
             ResponsesEvent::Created => {}
-            ResponsesEvent::Completed { output_tokens } => {
+            ResponsesEvent::Completed {
+                output_tokens,
+                cache,
+            } => {
                 self.completed = true;
                 if output_tokens.is_some() {
                     self.output_tokens = output_tokens;
                 }
+                self.record_cache(cache);
             }
-            ResponsesEvent::Terminated { reason } => {
+            ResponsesEvent::Terminated { reason, cache } => {
                 // Terminal either way, but not a success. A stream that failed is still
                 // over, and reporting it as unfinished would be as wrong as reporting
                 // it as complete.
                 self.completed = true;
                 self.failure = Some(reason);
+                self.record_cache(cache);
             }
             ResponsesEvent::OutputText { phase, text } => {
                 if phase == Phase::Delta {
@@ -253,6 +303,15 @@ impl ResponsesObserver {
             }
             ResponsesEvent::Other { .. } => {}
         }
+    }
+
+    /// Adds one terminal event's cache accounting.
+    ///
+    /// Summed rather than assigned, so a relay carrying more than one response's frames
+    /// reports both rather than only the last.
+    fn record_cache(&mut self, cache: CacheTokens) {
+        self.cache_read_tokens += cache.read.unwrap_or(0);
+        self.cache_creation_tokens += cache.creation.unwrap_or(0);
     }
 
     /// How many distinct tool calls the stream carried.
@@ -291,7 +350,8 @@ mod tests {
                 r#"{"response":{"usage":{"output_tokens":42}}}"#
             )),
             ResponsesEvent::Completed {
-                output_tokens: Some(42)
+                output_tokens: Some(42),
+                cache: CacheTokens::default(),
             }
         );
     }
