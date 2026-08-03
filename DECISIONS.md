@@ -1121,3 +1121,53 @@ names.
 
 **Would change if:** a third binary grows a CCR store. It would need adding to check 13
 rather than being trusted to copy the strings correctly.
+
+---
+
+## D36 — the Python binding honours the block-kind gate, and lets the caller set it
+
+**Decision:** `compress()` gains a `kind` argument, defaulting to `"tool_output"`, used for
+both the block it builds and the routing question it asks.
+
+The module built a `BlockKind::Text` block and then routed with `transform_for`, which
+ignores block kind. Measured on 300 lines of prose:
+
+| call | result |
+| --- | --- |
+| `transform_for` (what this used) | `Some("text_summarizer")` |
+| `transform_for_block` with a `Text` block (what the proxy uses) | `None` |
+| `transform_for_block` with a `ToolResult` block | `Some("text_summarizer")` |
+
+So the binding lossily summarized prose the proxy refuses to touch, while telling
+`validated_apply` the block was text — internally inconsistent, and inconsistent with the
+proxy for the same input.
+
+**Why this is worse in a library than in the proxy.** The gate exists because
+`BlockKind::Text` is *what somebody typed*. In the proxy, lossy prose compression is at
+least recoverable: the store persists and the model can redeem the marker. Here the store
+is deliberately per-call and discarded — this module's own docs say the marker "refers to
+content nothing can return". So the binding was doing irreversibly what the proxy declines
+to do reversibly.
+
+**Why the default is `"tool_output"` rather than the safe value.** A library caller is
+almost always holding a scraped page, a command's output, a file dump. Defaulting to
+`"text"` would silently stop compressing for every existing caller — turning a correctness
+fix into a capability removal — and only the prose summarizer is gated, so the default
+changes nothing for any other content type. `"text"` is now reachable for callers passing a
+person's words, and declines with `reason == "tool_output_only"`.
+
+**A second binding-local reason, and why it is needed.** `route` answers a question about
+*content*; the gate is about where the content came from, which only the caller knows. So
+routing says `compress` for prose the gate then declines, and reporting that unchanged
+would tell a caller their text was compressed when nothing touched it. `TEXT_ONLY_COMPRESSOR`
+joins `NOT_SMALLER` in the exported `REASONS` list, so a caller branching on it finds it
+documented.
+
+**Verified against a built wheel**, not against the Rust surface: `maturin build --release`,
+install, `pytest`. 15 pass. Reverting to `transform_for` fails
+`test_typed_text_is_not_summarised_but_tool_output_is` on `assert not as_text.compressed`.
+The test carries its control — compressing the same prose as tool output must succeed
+first, or declining proves nothing.
+
+**Would change if:** a second compressor becomes tool-output-only. The reason string would
+need to name which one, rather than reporting the category.

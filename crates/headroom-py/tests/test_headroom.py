@@ -11,6 +11,8 @@ Run with:  maturin build --release && pip install <wheel> && pytest
 
 import json
 
+import pytest
+
 import headroom
 
 
@@ -149,3 +151,39 @@ def test_every_reason_is_one_the_module_declares():
     assert len(observed) >= 4, observed
     # And the vocabulary is underscored throughout, which is what the drift was about.
     assert not any("-" in reason for reason in headroom.REASONS), headroom.REASONS
+
+
+def test_typed_text_is_not_summarised_but_tool_output_is():
+    """The prose summariser is lossy and this module's CCR store is discarded, so
+    compressing somebody's own words here loses them for good. The proxy declines that
+    even though its store persists; this used to do it anyway, because it built a text
+    block and then routed with a call that ignores block kind.
+    """
+    prose = "\n".join(
+        f"The quick brown fox jumps over the lazy dog, sentence {i}." for i in range(300)
+    )
+
+    # The control. Without it, a build where nothing compresses at all would satisfy
+    # every assertion below.
+    as_tool_output = headroom.compress(prose, kind="tool_output")
+    assert as_tool_output.compressed, "nothing compressed, so declining proves nothing"
+    assert len(as_tool_output.content) < len(prose)
+
+    as_text = headroom.compress(prose, kind="text")
+    assert not as_text.compressed
+    assert as_text.content == prose, "typed text came back altered"
+    assert as_text.reason == "tool_output_only"
+    assert as_text.reason in headroom.REASONS, "a reason absent from the documented list"
+
+
+def test_kind_defaults_to_tool_output():
+    """Existing callers passed no kind and got prose compression; that still holds."""
+    prose = "\n".join(
+        f"The quick brown fox jumps over the lazy dog, sentence {i}." for i in range(300)
+    )
+    assert headroom.compress(prose).compressed
+
+
+def test_an_unknown_kind_is_refused_rather_than_guessed():
+    with pytest.raises(ValueError):
+        headroom.compress("hello", kind="tool-output")
