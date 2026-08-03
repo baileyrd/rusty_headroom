@@ -3,11 +3,15 @@
 //! Every command that produces data writes it to stdout and nothing else, so
 //! `headroom compress < big.json > small.txt` works. Diagnostics go to stderr.
 
+use anyhow::Context as _;
 use std::io::{Read, Write};
 use std::sync::Arc;
 
+use headroom_core::auth_mode::{AuthMode, CompressionPolicy};
 use headroom_core::ccr::{CcrStore, InMemoryCcrStore};
 use headroom_core::detection::{detect, AdaptiveSizer, ContentType};
+use headroom_core::pipeline::Orchestrator;
+use headroom_core::telemetry::{AggregationKey, Aggregator, StructureHash, Telemetry};
 use headroom_core::tokenizer::{HeuristicEstimator, Tokenizer};
 use headroom_core::transform::Transform;
 use headroom_core::{
@@ -665,4 +669,231 @@ pub fn update(check_only: bool) -> anyhow::Result<()> {
 
     stdout.flush()?;
     Ok(())
+}
+
+/// `headroom tools` — list what this build can actually do.
+///
+/// # Why introspection is worth a command
+///
+/// Which compressors exist, which content types route to them, and which MCP tools are
+/// registered are all compile-time facts that a user otherwise learns by reading source
+/// or by trial. A build that was compiled without a compressor, or with a different
+/// detection threshold, should be able to say so itself.
+///
+/// # Errors
+///
+/// Returns an error if stdout cannot be written.
+pub fn tools() -> anyhow::Result<()> {
+    let mut stdout = std::io::stdout().lock();
+
+    writeln!(stdout, "compressors")?;
+    for (content_type, compressor) in [
+        (ContentType::Json, "smart_crusher"),
+        (ContentType::Log, "log_compressor"),
+        (ContentType::SearchResults, "search_compressor"),
+        (ContentType::Diff, "diff_compressor"),
+    ] {
+        let sizer = AdaptiveSizer::default();
+        writeln!(
+            stdout,
+            "  {:<16} {:<20} min {} bytes",
+            content_type.as_str(),
+            compressor,
+            sizer.threshold(content_type)
+        )?;
+    }
+
+    // Listed explicitly as unhandled rather than omitted. A content type absent from the
+    // output reads as "not detected"; one listed with no compressor reads as "detected
+    // and forwarded", which is what actually happens.
+    writeln!(stdout)?;
+    writeln!(stdout, "detected but not compressed")?;
+    for content_type in [ContentType::Code, ContentType::Prose, ContentType::Unknown] {
+        writeln!(stdout, "  {}", content_type.as_str())?;
+    }
+
+    writeln!(stdout)?;
+    writeln!(stdout, "mcp tools")?;
+    for name in headroom_mcp::TOOL_NAMES {
+        writeln!(stdout, "  {name}")?;
+    }
+
+    writeln!(stdout)?;
+    writeln!(
+        stdout,
+        "lossless transforms (every auth mode except subscription)"
+    )?;
+    writeln!(stdout, "  minify_json")?;
+    writeln!(stdout, "  tidy_lines")?;
+
+    stdout.flush()?;
+    Ok(())
+}
+
+/// `headroom init` — write a starter configuration file.
+///
+/// # Why it refuses to overwrite
+///
+/// A config file is something a user edits. `init` running a second time — in a script,
+/// or because someone forgot they had run it — must not silently replace a file
+/// somebody tuned. Refusing costs one error message; overwriting costs work nobody can
+/// recover.
+///
+/// # Errors
+///
+/// Returns an error if the file already exists or cannot be written.
+pub fn init(path: &std::path::Path, force: bool) -> anyhow::Result<()> {
+    if path.exists() && !force {
+        anyhow::bail!(
+            "{} already exists; pass --force to replace it",
+            path.display()
+        );
+    }
+
+    let contents = concat!(
+        "# headroom configuration\n",
+        "#\n",
+        "# Read live on every request, so changes take effect without a restart —\n",
+        "# which matters because a restart truncates in-flight streaming responses.\n",
+        "\n",
+        "# Where the proxy listens. Loopback by default: the proxy forwards provider\n",
+        "# credentials, and binding every interface would expose an open relay.\n",
+        "HEADROOM_HOST=127.0.0.1\n",
+        "HEADROOM_PORT=8787\n",
+        "\n",
+        "# The provider to forward to.\n",
+        "HEADROOM_UPSTREAM=https://api.anthropic.com\n",
+        "\n",
+        "# Set to 0 to forward everything untouched.\n",
+        "HEADROOM_COMPRESSION=1\n",
+        "\n",
+        "# Output verbosity steering: terse, full, or unset.\n",
+        "# Off by default — it changes what the model *writes*, which is a visible\n",
+        "# change to your application rather than an invisible saving.\n",
+        "# HEADROOM_OUTPUT_SHAPER=terse\n",
+        "\n",
+        "# Log verbosity. Defaults to warn: the proxy logs a line per request at info,\n",
+        "# and a default that fills a terminal is one people turn off entirely.\n",
+        "# HEADROOM_LOG=headroom_proxy=info\n",
+    );
+
+    std::fs::write(path, contents).with_context(|| format!("writing {}", path.display()))?;
+
+    eprintln!("wrote {}", path.display());
+    eprintln!("Apply it with:  set -a && . {} && set +a", path.display());
+    Ok(())
+}
+
+/// `headroom learn` — aggregate request bodies and publish compression recommendations.
+///
+/// Reads newline-delimited request bodies from stdin.
+///
+/// # What this mines, and what it does not
+///
+/// The gap row calls for mining *failed sessions*. There is no session-log format in
+/// this project for it to read, and inventing one so there is something to mine would be
+/// building the easy half of the feature. What this does instead is real and useful: it
+/// runs a corpus of request bodies through the same detection and compression the proxy
+/// uses, aggregates the outcome by structural shape, and publishes what it learned.
+///
+/// The output is a configuration input read at startup, never consulted per request —
+/// see [`headroom_core::telemetry`] for why that boundary is load-bearing.
+///
+/// # Errors
+///
+/// Returns an error if stdin cannot be read or the report cannot be written.
+pub fn learn(min_samples: u64) -> anyhow::Result<()> {
+    let corpus = read_stdin()?;
+    let store = Arc::new(InMemoryCcrStore::new());
+    let orchestrator = Orchestrator::new(store);
+    let estimator = HeuristicEstimator::new();
+    let policy = CompressionPolicy::for_mode(AuthMode::PayAsYouGo);
+
+    let mut aggregator = Aggregator::new();
+    let mut seen = 0usize;
+
+    for line in corpus.lines().filter(|line| !line.trim().is_empty()) {
+        seen += 1;
+        let Ok(body) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+
+        let model = body
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+
+        for content in compressible_content(&body) {
+            let detected = detect(content.as_bytes()).content_type;
+            let key = AggregationKey::new(
+                AuthMode::PayAsYouGo,
+                model,
+                StructureHash::of(&content, detected),
+            );
+
+            let mut block = Block::new(BlockKind::Text, content.clone());
+            match orchestrator.transform_for(&content, policy) {
+                Some(transform) => match validated_apply(transform, &mut block, &estimator) {
+                    Ok(outcome) if outcome.is_compressed() => aggregator.record(
+                        &key,
+                        estimator.count(&content) as u64,
+                        estimator.count(block.content()) as u64,
+                    ),
+                    // A decline is data. A shape that consistently declines is one worth
+                    // not attempting, and recording only successes would make every
+                    // measured shape look worth compressing.
+                    _ => aggregator.record_decline(&key),
+                },
+                None => aggregator.record_decline(&key),
+            }
+        }
+    }
+
+    let recommendations = aggregator.recommend(min_samples);
+
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{}", recommendations.to_json()?)?;
+    stdout.flush()?;
+
+    eprintln!(
+        "read {seen} requests, {} distinct shapes, {} met the {min_samples}-sample floor",
+        aggregator.observations().len(),
+        recommendations.entries.len()
+    );
+    Ok(())
+}
+
+/// Extracts every compressible string from a request body.
+///
+/// Message content only. A system prompt or a tool definition is in the cache hot zone
+/// and never compressed, so measuring it would produce recommendations about content
+/// the proxy will never act on.
+fn compressible_content(body: &serde_json::Value) -> Vec<String> {
+    let mut found = Vec::new();
+
+    let messages = body
+        .get("messages")
+        .or_else(|| body.get("input"))
+        .and_then(serde_json::Value::as_array);
+
+    for message in messages.into_iter().flatten() {
+        // The three shapes a tool result arrives in: a plain string body (OpenAI chat),
+        // an `output` member (OpenAI Responses), or a typed block (Anthropic).
+        for key in ["content", "output"] {
+            if let Some(text) = message.get(key).and_then(serde_json::Value::as_str) {
+                found.push(text.to_owned());
+            }
+        }
+        if let Some(blocks) = message.get("content").and_then(serde_json::Value::as_array) {
+            for block in blocks {
+                for key in ["content", "text"] {
+                    if let Some(text) = block.get(key).and_then(serde_json::Value::as_str) {
+                        found.push(text.to_owned());
+                    }
+                }
+            }
+        }
+    }
+
+    found
 }
