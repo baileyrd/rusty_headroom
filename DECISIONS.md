@@ -486,3 +486,31 @@ marker with Redis configured, then exited; the key survived, and a separate
 **Would change if:** CCR traffic ever approached the volume where one mutexed connection
 matters, at which point the store wants a pool. It is far below that today — one round
 trip per compressed block, against a model call that costs orders of magnitude more.
+
+## D23 — one routing table, asked rather than restated
+**2026-08-03**
+
+The pipeline refactor moved routing into `headroom-core` so the proxy and the CLI could
+not disagree. It did not remove their copies. Three existed — `Orchestrator`,
+`headroom-cli`'s private `route()`, and `McpServer::compress` — and they had already
+drifted: the core's table had no `ContentType::Code` arm while the other two did.
+
+The consequence was not subtle. The proxy forwarded every source file uncompressed, and
+`headroom compress --dry-run` — the command whose entire purpose is to predict what the
+proxy will do — reported a 32% saving for the same content.
+
+All three now go through `Orchestrator::transform_for`.
+
+**Inside the orchestrator there were two lists as well.** `route` matched on content type
+to decide "is this compressible", and `for_type` matched again to pick the compressor.
+Adding a code arm to `for_type` alone did not make code route — the first list still said
+no. `route` now asks `for_type` rather than restating it, so there is one place that
+knows which types have a compressor.
+
+**The CLI and MCP paths pass `AuthMode::PayAsYouGo`.** That is the operator compressing
+their own content on their own machine, not a relayed request whose credential decides
+what is permitted. Invariant I10 governs traffic the proxy relays, and the proxy still
+applies the real policy there.
+
+**Would change if:** a fourth caller appears. It should take an `Orchestrator` rather
+than build a compressor set, and this entry is the reason why.

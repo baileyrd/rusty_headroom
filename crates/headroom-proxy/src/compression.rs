@@ -733,6 +733,67 @@ mod tests {
         );
     }
 
+    // ---- code compression (gap rows C11-C13) ----
+
+    /// A source file large enough to clear the code size threshold.
+    fn code_request() -> String {
+        let code = concat!(
+            "pub fn handle(input: &str) -> Result<String, Error> {\n",
+            "    let parsed = parse(input)?;\n",
+            "    let checked = validate(&parsed)?;\n",
+            "    Ok(render(&checked))\n",
+            "}\n"
+        )
+        .repeat(80);
+
+        format!(
+            r#"{{"model":"claude-opus-4","messages":[{{"role":"user","content":"a"}},{{"role":"assistant","content":"b"}},{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"t1","content":{}}}]}}]}}"#,
+            serde_json::to_string(&code).unwrap()
+        )
+    }
+
+    #[test]
+    fn the_proxy_compresses_code() {
+        // It did not, for the whole life of the pipeline refactor. `Orchestrator` held
+        // no code compressor, so every source file a tool returned was forwarded whole
+        // — the largest single category of agent traffic, silently exempt.
+        let source = code_request();
+        let out = compress_dialect(
+            Dialect::Anthropic,
+            source.as_bytes(),
+            &compressors(),
+            true,
+            payg(),
+            Verbosity::Default,
+        );
+
+        assert!(
+            out.len() < source.len(),
+            "code was forwarded unchanged: {} -> {} bytes",
+            source.len(),
+            out.len()
+        );
+    }
+
+    #[test]
+    fn code_routing_agrees_with_the_orchestrator_the_cli_uses() {
+        // `headroom compress --dry-run` exists to predict this. It used to carry its own
+        // routing table with a code arm the orchestrator lacked, so it promised a saving
+        // the proxy never delivered. One table now answers both.
+        let code = concat!(
+            "pub fn handle(input: &str) -> Result<String, Error> {\n",
+            "    let parsed = parse(input)?;\n",
+            "    Ok(render(&parsed))\n",
+            "}\n"
+        )
+        .repeat(80);
+
+        assert!(
+            compressors().routing(&code, payg(), "").will_compress(),
+            "the proxy would not compress content the CLI reports a saving for"
+        );
+    }
+
     // ---- memory injection (gap row Y3) ----
 
     /// A compressor set carrying two memories.

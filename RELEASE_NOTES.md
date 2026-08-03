@@ -6,6 +6,36 @@ the crate starts publishing releases.
 
 ---
 
+## The proxy compresses code, and three routing tables become one
+**2026-08-03** · gap rows C11–C13
+
+- **Fixed:** `Orchestrator` held **no code compressor**. `ContentType::Code` fell through
+  to `NoCompressor`, so the proxy forwarded every source file whole — the largest single
+  category of agent tool-result traffic, silently exempt for the entire life of the
+  pipeline refactor. Measured on an 11 KB Rust file in a tool result: **11,783 → 7,258
+  bytes**, and `headroom_passthrough_total` went 1 → 0.
+- **Fixed:** `headroom compress --dry-run` carried its own routing table, *with* a code
+  arm, and reported "would save 1752 (32%)" for content the proxy would forward
+  untouched. That command exists to predict the proxy; it was contradicting it.
+- **Changed:** the CLI and the MCP server now route through `Orchestrator`. Three copies
+  of the routing decision existed — `headroom-core`, `headroom-cli`, `headroom-mcp` — and
+  they had already drifted.
+- **Changed:** `Orchestrator::route` asked `for_type` which content types are
+  compressible instead of restating the list. There were **two** lists inside the
+  orchestrator alone, and adding the code arm to one was not enough to make code route.
+  One list, one answer.
+- **A blind spot in the #76 audit, and worth recording.** That audit looked for
+  references *outside the defining file*, and `CodeCompressor` had them — from the CLI and
+  the MCP server. **Reachable from somewhere is not reachable from the request path.**
+  The same check that caught three unreachable subsystems was structurally unable to
+  catch this one.
+- **Design note:** the CLI and MCP paths pass `AuthMode::PayAsYouGo`. That is the
+  operator compressing their own content deliberately, not a relayed request whose
+  credential decides what is permitted — the proxy applies the real policy to real
+  traffic (I10).
+
+---
+
 ## A shared CCR store, and the proxy stops losing originals on restart
 **2026-08-03** · gap row R4
 
