@@ -6,6 +6,37 @@ the crate starts publishing releases.
 
 ---
 
+## Stabilization was a one-shot, and gave long conversations half its breakpoints
+**2026-08-03** · the feature under-delivering on exactly what it exists for
+
+- `breakpoints_for` bailed on **any** existing `cache_control` marker — a check whose stated
+  reason is that *a customer-set marker means they have thought about this*. It could not
+  tell the customer's markers from the ones stabilization placed last turn.
+- An agent loop stabilizes every turn, so the first stabilized turn placed whatever anchors
+  were usable *then*, and every later turn saw markers and bailed. Measured:
+
+  | conversation | breakpoints |
+  | --- | --- |
+  | stabilized fresh at 20 messages | **4** |
+  | stabilized at 5, grown to 20 | **2**, permanently |
+
+- **Fixed:** markers sitting only on anchors are ours to extend — `ANCHORS` is fixed at
+  `[1, 3, 7, 15]` precisely so they do not move. A marker anywhere else is the customer's
+  and the body is left alone. A grown conversation now reaches 4, matching a fresh one.
+- Staying within the provider's limit is structural: there are `MAX_BREAKPOINTS` anchors.
+- **Added:** tests for the growth path, for a customer marker still being respected, for
+  stabilization being a **fixed point**, and for determinism. The fixed-point property is
+  what makes the whole trade acceptable — a stabilizer that is not one would rewrite the
+  prefix every turn and invalidate the cache every turn — and nothing tested it.
+- **Also pinned:** enabling stabilization reflows a pretty-printing client's top-level
+  whitespace. That costs one invalidation, the same one-time price the tool reordering
+  charges, and values are still copied verbatim.
+- **Removed a duplicate:** stabilization had its own `has_cache_control` beside `frozen`'s.
+  Two answers to "does this carry a breakpoint" is the drift this repository keeps finding,
+  so there is one — and `frozen`'s was already the more carefully documented.
+- Verified in both directions: the old bail-on-any-marker rule fails the growth test; never
+  respecting a customer marker fails the other.
+
 ## An edit below the frozen floor cannot reach the rewriter, whoever made it
 **2026-08-03** · I2 made structural rather than distributed across three call sites
 

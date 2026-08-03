@@ -132,17 +132,41 @@ pub fn place_cache_control(body: &mut Value, policy: CompressionPolicy) -> usize
 /// Empty when the policy forbids it, when the customer has already set a marker, or when
 /// there is not enough history to be worth caching.
 pub fn breakpoints_for(body: &Value) -> Vec<usize> {
-    // A customer-set marker means they have thought about this. Adding more could push
-    // past the provider's limit and silently invalidate the ones they chose.
-    if has_cache_control(body) {
-        return Vec::new();
-    }
-
     let Some(messages) = body.get("messages").and_then(Value::as_array) else {
         return Vec::new();
     };
     // Nothing to cache if there is no history to speak of.
     if messages.len() < 4 {
+        return Vec::new();
+    }
+
+    // A marker anywhere but an anchor is the customer's, and they have thought about it.
+    // Adding more could push past the provider's limit and silently invalidate the ones
+    // they chose, so the whole body is left alone.
+    //
+    // # Why this is not "any marker at all"
+    //
+    // It used to be, and that made stabilization a one-shot. An agent loop stabilizes
+    // every turn, so the first stabilized turn placed whatever anchors were usable *then*
+    // and every later turn saw markers and bailed — the conversation grew past anchors 7
+    // and 15 and never got them.
+    //
+    // Measured: a conversation stabilized fresh at 20 messages gets 4 breakpoints. One
+    // stabilized at 5 and grown to 20 gets 2, permanently. Half the breakpoints, on
+    // exactly the long conversations this feature exists to help.
+    //
+    // Markers sitting only on anchors are ours — `ANCHORS` is fixed precisely so they do
+    // not move — so extending to the anchors that have since become usable is safe and is
+    // what the fixed anchors were for. A customer who happens to have marked exactly an
+    // anchor prefix gets the same treatment, which stays within the provider's limit of
+    // `MAX_BREAKPOINTS` because that is how many anchors there are.
+    let marked: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| crate::frozen::has_cache_control(message))
+        .map(|(index, _)| index)
+        .collect();
+    if marked.iter().any(|index| !ANCHORS.contains(index)) {
         return Vec::new();
     }
 
@@ -152,7 +176,7 @@ pub fn breakpoints_for(body: &Value) -> Vec<usize> {
     ANCHORS
         .iter()
         .copied()
-        .filter(|index| *index < usable)
+        .filter(|index| *index < usable && !marked.contains(index))
         .collect()
 }
 
@@ -235,20 +259,6 @@ pub fn inject_prompt_cache_key(body: &mut Value, policy: CompressionPolicy, key:
     }
     object.insert("prompt_cache_key".into(), Value::String(key.to_owned()));
     true
-}
-
-/// Whether the body already carries a `cache_control` marker anywhere.
-fn has_cache_control(body: &Value) -> bool {
-    let Some(messages) = body.get("messages").and_then(Value::as_array) else {
-        return false;
-    };
-    messages.iter().any(|message| {
-        message.get("cache_control").is_some()
-            || message
-                .get("content")
-                .and_then(Value::as_array)
-                .is_some_and(|blocks| blocks.iter().any(|b| b.get("cache_control").is_some()))
-    })
 }
 
 /// Applies every cache-stabilizing rewrite to a request body.
