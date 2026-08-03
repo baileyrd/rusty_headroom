@@ -35,6 +35,9 @@ pub struct AppState {
     /// *why* it is down. Booting and answering 502 on the request path says more.
     upstream: Option<Upstream>,
     limiter: Arc<RateLimiter>,
+    /// The store that was built, not the one that was configured — see
+    /// [`Config::ccr_store_with_kind`].
+    ccr_store_kind: crate::config::CcrStoreKind,
 }
 
 /// Requests permitted per [`RATE_WINDOW`].
@@ -64,13 +67,24 @@ impl AppState {
         // reads from, or half the numbers would be invisible.
         let metrics = Arc::new(Metrics::new());
 
+        // Destructured here so the kind reaching `/health` is the one this store was
+        // built as. Re-reading the configuration downstream would report the store the
+        // operator asked for, which is precisely the case worth telling them about.
+        let (ccr_store, ccr_store_kind) = Config::ccr_store_with_kind();
+        if !ccr_store_kind.survives_restart() && Config::persistent_store_requested() {
+            tracing::warn!(
+                "a persistent CCR store was configured and could not be used; markers \
+                 handed out from now on will not be redeemable after a restart"
+            );
+        }
+
         Self {
             compressors: Arc::new(
                 Compressors::with_recommendations(
                     // Selected from configuration rather than hardcoded. An in-memory
                     // store loses every original on restart, and on a second worker the
                     // marker created here is requested from a process that never saw it.
-                    Config::ccr_store(),
+                    ccr_store,
                     // Read once, here, at construction. See `Config::recommendations`.
                     Config::recommendations(),
                 )
@@ -85,7 +99,13 @@ impl AppState {
             metrics,
             upstream,
             limiter: Arc::new(RateLimiter::new(RATE_CAPACITY, RATE_WINDOW)),
+            ccr_store_kind,
         }
+    }
+
+    /// Which CCR store this process actually built.
+    pub fn ccr_store_kind(&self) -> crate::config::CcrStoreKind {
+        self.ccr_store_kind
     }
 
     /// Builds state with a specific rate limit, for tests that need to reach it.
