@@ -6,6 +6,34 @@ the crate starts publishing releases.
 
 ---
 
+## Cache stabilization is now tested with the opt-in turned on
+**2026-08-03** · 899 tests pass with its dialect condition inverted
+
+- **The hole:** `stabilize` is gated on `HEADROOM_STABILIZE`, and the gate is the first
+  thing it does. Every test in the workspace runs with the flag unset, so the function was
+  reached exactly once — by `stabilization_is_off_unless_the_operator_opts_in`, which
+  asserts it does **nothing**.
+- Everything past that guard clause — tool normalization, breakpoint placement, the
+  dialect condition — was tested only by calling the private helpers directly. The
+  wiring into `stabilize` was not. This is the shape the reachability audit exists for:
+  *a test proves a function works, not that anything calls it.*
+- **Added:** `crates/headroom-proxy/tests/stabilization.rs`, its own binary and therefore
+  its own process. Turning the flag on in-process would leak into the handler tests
+  running in parallel and break their I2 byte-identity assertions — the exact flakiness
+  this sweep introduced once already and had to back out.
+- Five tests: enabling it changes the request; tools are reordered; Anthropic gets
+  breakpoints; **both OpenAI dialects get normalized tools and no breakpoints**, because
+  they cache prefixes automatically and a marker they cannot read is bytes changed for
+  nothing; and a subscription policy gets no breakpoints even with the flag on, because
+  I10 outranks the opt-in.
+- **Verified by mutation.** Removing the tool-normalization call fails 2; inverting the
+  dialect condition fails 2 — and **899 other tests pass** in both cases.
+- The tests themselves landed early, in #125, carried along by a `git add -A` during a
+  conflict resolution. That is noted on #125; this PR is their description and their
+  release note.
+
+---
+
 ## A proxy bound to every interface could point at itself
 **2026-08-03** · the container deployment shape, and the guard missed it
 
