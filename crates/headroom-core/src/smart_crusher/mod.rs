@@ -14,12 +14,14 @@
 
 mod analyzer;
 mod config;
+mod formatter;
 mod ir;
 mod outliers;
 mod planning;
 
 pub use analyzer::{analyze_record_set, classify, FieldKind, FieldStat, Pattern, RecordSetStats};
 pub use config::CrushConfig;
+pub use formatter::{format_plan, SmartCrusher};
 pub use ir::{Document, Shape};
 pub use outliers::{rank_outliers, Outlier, OutlierReason};
 pub use planning::{plan, CrushPlan, FieldPlan};
