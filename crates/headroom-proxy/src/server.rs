@@ -96,6 +96,15 @@ impl AppState {
         }
     }
 
+    /// Whether a request can actually be relayed.
+    ///
+    /// False when the upstream client failed to build at startup, in which case every
+    /// request errors. `/health` reports this rather than answering `"ok"` regardless —
+    /// see [`crate::health::Health::status`].
+    pub fn relay_available(&self) -> bool {
+        self.upstream.is_some()
+    }
+
     /// The process metrics.
     pub fn metrics(&self) -> &Arc<Metrics> {
         &self.metrics

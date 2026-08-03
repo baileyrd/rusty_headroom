@@ -6,6 +6,29 @@ the crate starts publishing releases.
 
 ---
 
+## `/health` stops reporting `ok` on a proxy that cannot relay
+**2026-08-03** · the self-report with the widest blast radius
+
+- **Fixed:** `/health` answered `{"status":"ok"}` with a `200` regardless. If the upstream
+  client failed to build at startup the relay is disabled and **every** request returns an
+  error — and the endpoint said the proxy was fine.
+- **Why this one matters most:** load balancers and orchestrators route traffic on this
+  signal. A proxy that cannot serve a single request would keep being handed them, and the
+  operator debugging it would have a health check pointing them elsewhere.
+- **Added:** `"degraded"` status, a `relay_available` field, and a **503** — most
+  orchestrators read the code and never look at the body, so reporting the problem only in
+  JSON reports it to nobody.
+- **Named rather than folded in:** `status` tells an operator to look, `relay_available`
+  tells them where.
+- **The trigger is narrower than it sounds, and the doc comment says so.**
+  `Upstream::new` fails only when `reqwest::Client::builder().build()` does — a TLS
+  backend that will not initialize. **A malformed upstream URL does not trigger it**,
+  checked by pointing a proxy at `"not a url at all"` and watching it report
+  `relay_available: true`. So this state is covered by unit test rather than an
+  end-to-end reproduction, which is stated instead of implied.
+
+---
+
 ## `headroom doctor` checks the router, not a compressor it picked
 **2026-08-03** · the self-test was the fourth routing table
 
