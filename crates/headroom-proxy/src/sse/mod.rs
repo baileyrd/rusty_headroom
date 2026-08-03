@@ -6,10 +6,12 @@
 
 mod anthropic;
 mod framing;
+mod observer;
 mod openai;
 mod responses;
 
 pub use anthropic::{classify, AnthropicEvent, DeltaKind, StreamObserver};
 pub use framing::{render, Event, SseParser};
+pub use observer::Observer;
 pub use openai::{classify as classify_openai, OpenAiEvent, OpenAiObserver};
 pub use responses::{classify as classify_responses, Phase, ResponsesEvent, ResponsesObserver};

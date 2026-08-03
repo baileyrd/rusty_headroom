@@ -6,6 +6,40 @@ the crate starts publishing releases.
 
 ---
 
+## Each surface is read by its own stream vocabulary; anchors and tags now bind
+**2026-08-03** · gap rows X12, S4, S5 — the last three open rows
+
+- **Added:** `sse::Observer`, which picks the stream classifier from the request path,
+  and `ObservingStream::new` now takes that path.
+- **Added:** `signals::keep_with_required`, and `TextSummarizer` feeds it the union of
+  `select_anchors` and `protected_lines`.
+- **Fixed:** every relayed response was read with the Anthropic classifier. **A failing
+  OpenAI stream reported no failure** — its error frame is `{"error":{…}}` with no
+  `type`, which the Anthropic classifier files under "something else". Measured through
+  the release binary against a fake provider returning a failing chat stream:
+  `headroom_stream_errors_total` went `0` → `1`. The proxy's error rate was pinned at
+  zero for two of the three supported surfaces.
+- **Design note:** the Responses vocabulary has no `[DONE]` sentinel and no
+  `message_stop`, so an Anthropic-read Responses stream also never completed and piled
+  every ordinary frame into the unknown-type log. The wrong classifier never errors — it
+  reports confidently wrong numbers, which is worse than reporting none.
+- **Design note:** `Observer::cache_tokens()` returns zero for both OpenAI surfaces
+  because neither reports cache usage in its stream. That is the truth rather than a
+  gap; a synthesized number would corrupt the one metric this proxy exists to move.
+- **Design note:** the required keep-set is a **floor**, not a suggestion. When it
+  exceeds the line budget the budget loses, because an anchor dropped to fit a line
+  count leaves content whose meaning depended on it and nothing downstream can tell —
+  the remainder reads as though it were always complete. Invariant I5 is what makes
+  overshooting safe: a result no smaller in tokens is discarded rather than sent.
+- **A test that proved nothing, replaced:** the first S4 test asserted a `# Heading`
+  survived the lossy pass. It passed *without* the wiring, because headings already
+  score as notable. The real case is the **boundary** anchor: in uniform prose every
+  line scores the same, ranking falls back to source order, and the last line is always
+  the first thing dropped — quietly turning truncated output into output that reads as
+  complete. Both S4 and S5 tests were then confirmed to fail with the wiring removed.
+
+---
+
 ## `headroom mcp` registers the MCP server; the gap analysis is swept to closure
 **2026-08-03** · gap row M5, plus a documentation pass over every row
 

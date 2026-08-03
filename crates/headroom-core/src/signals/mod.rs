@@ -19,4 +19,4 @@ mod tiered;
 pub use anchors::{is_removable, select_anchors, Anchor, AnchorKind};
 pub use keywords::{is_error_line, keyword_score, ERROR_KEYWORDS};
 pub use tags::{breaks_markup, find_tags, protected_lines, Tag};
-pub use tiered::{keep_most_important, score_lines, Importance, ScoredLine};
+pub use tiered::{keep_most_important, keep_with_required, score_lines, Importance, ScoredLine};
