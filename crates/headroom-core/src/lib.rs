@@ -40,6 +40,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod auth_mode;
 pub mod block;
 pub mod ccr;
 pub mod conversation;
@@ -56,6 +57,7 @@ pub mod tokenizer;
 pub mod transform;
 pub mod validate;
 
+pub use auth_mode::{classify_auth_mode, AuthMode, CompressionPolicy};
 pub use block::{Block, BlockKind};
 pub use ccr::{CcrStore, ContentHash};
 pub use conversation::{Conversation, Message, Role};

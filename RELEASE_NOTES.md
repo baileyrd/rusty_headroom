@@ -6,6 +6,32 @@ the crate starts publishing releases.
 
 ---
 
+## Auth-mode classification and policy gating
+**2026-08-03** · gap rows A1, A2
+
+- **Added:** `classify_auth_mode` and `CompressionPolicy`, and wired both into the
+  proxy so compression aggressiveness is now decided by how a request authenticated
+  (invariant I10).
+- **Added:** `DiffCompressor` to the proxy's compressor dispatch.
+- **Design note:** unrecognized auth classifies as `Subscription`, the *most*
+  restricted mode. Misclassifying subscription traffic as pay-as-you-go applies
+  aggressive compression to the account least able to afford the exposure; the reverse
+  merely leaves tokens uncompressed. Not symmetric, so the uncertain path takes the
+  safe side.
+- **Design note:** every `CompressionPolicy` field is a permission, so all-false is the
+  restrictive default and matches subscription mode. A policy nobody configured is not
+  the permissive one.
+- **Design note:** the policy gate lives at the dispatch point, not inside each
+  compressor. Every compressor currently wired is lossy, so a restricted policy routes
+  nothing — enforced once rather than trusted to each.
+- **Bug caught in development:** `sk-ant-oat...` also starts with `sk-`, so testing the
+  generic API-key prefix first classified OAuth tokens as pay-as-you-go and handed them
+  the aggressive policy. Specific prefixes now precede general ones, with a regression
+  test asserting the OAuth path forbids lossy transforms.
+- **Known limitation:** prefix-based classification against Anthropic-shaped tokens
+  only. Another provider's key format falls to `Subscription` and is under-compressed —
+  the safe direction, but it means the classifier needs extending per provider.
+
 ## Text compression, persistent CCR, and the retrieval tool
 **2026-08-03** · gap rows C10, R3, R5
 
