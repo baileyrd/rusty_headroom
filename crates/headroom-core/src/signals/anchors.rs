@@ -195,8 +195,9 @@ fn opens_structure(line: &str) -> bool {
 
 /// Whether the line at `index` may be removed.
 ///
-/// The question a compressor actually asks. Equivalent to "not in `anchors`", exposed
-/// so the check reads as intent at the call site rather than as a set lookup.
+/// Equivalent to "not in `anchors`", exposed so the check reads as intent at a call site
+/// rather than as a set lookup. There is no such call site yet — see the "exports with no
+/// caller" list in [`crate::signals`].
 pub fn is_removable(anchors: &[Anchor], index: usize) -> bool {
     anchors
         .binary_search_by_key(&index, |anchor| anchor.line)
