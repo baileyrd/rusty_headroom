@@ -35,3 +35,8 @@ sha2 = "0.10"
 headroom-simulators = { path = "../headroom-simulators" }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-stream = "0.1.19"
+
+[features]
+# Forwards `headroom-core`'s Redis-backed CCR store (gap row R4). Off by default; see
+# DECISIONS D22.
+redis = ["headroom-core/redis"]
