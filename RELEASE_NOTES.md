@@ -6,6 +6,52 @@ the crate starts publishing releases.
 
 ---
 
+## The OpenAI Responses API
+**2026-08-03** · gap rows X7, X12
+
+- **Added:** `Dialect::OpenAiResponses`, Responses-item handling in `compress_dialect`,
+  and `sse::responses` — `ResponsesEvent`, `ResponsesObserver`, `Phase`.
+- **Verified through the release binary:** a 10,464-byte `/v1/responses` request reached
+  the provider as **698 bytes** — 93.3% smaller, where before it was forwarded untouched.
+- **Design note, and the reason this is not just a field rename:** the Responses API
+  carries a tool result as a standalone item with **no `role` at all** —
+  `{"type":"function_call_output","call_id":...,"output":"..."}`. Read through the
+  chat-completions path it has no content and no recognized kind, so the bulkiest thing
+  in a Responses conversation would be forwarded uncompressed while everything looked
+  like it was working.
+- **Design note:** the rewrite writes back to `output` and leaves `call_id` alone. The
+  provider matches a result to its call by `call_id`; losing it turns a compressed tool
+  result into an orphan the model cannot attribute — which surfaces as the model
+  ignoring its own tool call.
+- **Design note:** a `function_call` is never compressed. It is the *request* to run a
+  tool, and its `arguments` are JSON the provider parses — compressing them produces a
+  call the provider rejects rather than a shorter one.
+- **Design note:** a body carrying **both** `messages` and `input` is forwarded
+  untouched. Picking one and rewriting it would leave the other alone, and the two would
+  then disagree about what the conversation contains — a corruption the provider acts on
+  rather than rejects.
+- **Design note, SSE:** Responses events are a dotted namespace that grows with the API
+  (`response.output_item.added`, `response.function_call_arguments.delta`). Matching the
+  full string against a fixed list makes every event added tomorrow unrecognized;
+  matching only the last segment collapses `output_text.done` and
+  `reasoning_summary_text.done` into one. Both parts are kept — the stem says what the
+  event is about, the suffix says what happened to it.
+- **Design note:** a **reasoning summary is not output text**. Both arrive as deltas, and
+  counting them together inflates any measurement of how much the model actually said
+  while hiding how much was spent thinking — the same reason `signature_delta` is not
+  counted as prose in the Anthropic observer.
+- **Design note:** `response.output_text.done` repeats the whole text, so it is not
+  counted as a delta. Counting it would double every measurement of output length.
+- **Design note:** `failed`, `incomplete` and `cancelled` are terminal *and* not
+  successes. A stream that failed is still over, and reporting it as unfinished would be
+  as wrong as reporting it as complete.
+- **Known limitation:** `ResponsesObserver` is not attached to the relayed stream.
+  `ObservingStream` still models only the Anthropic vocabulary, so Responses streams
+  relay correctly and report nothing.
+- **Known limitation:** `"input": "just a prompt"` — a plain string rather than an item
+  array — is forwarded untouched. There is nothing to compress in it, but it also means
+  the string form never benefits.
+
 ## Volatile-content detector — and the logging that was going nowhere
 **2026-08-03** · gap row X17, and a real defect in X20
 

@@ -102,6 +102,8 @@ pub enum Dialect {
     Anthropic,
     /// `POST /v1/chat/completions`. Caching is automatic and prefix-based.
     OpenAi,
+    /// `POST /v1/responses`. Items in `input`, caching automatic and prefix-based.
+    OpenAiResponses,
 }
 
 impl Dialect {
@@ -122,7 +124,9 @@ impl Dialect {
     fn frozen_floor(self, body: &[u8], message_count: usize) -> usize {
         match self {
             Self::Anthropic => frozen_message_count(body),
-            Self::OpenAi => message_count.saturating_sub(1),
+            // Both OpenAI surfaces cache prefixes automatically, so the reasoning is
+            // identical: everything already sent is a candidate cached prefix.
+            Self::OpenAi | Self::OpenAiResponses => message_count.saturating_sub(1),
         }
     }
 }
@@ -276,6 +280,8 @@ enum ContentShape {
     Scalar,
     /// `"content": [ ... ]`.
     Blocks,
+    /// A Responses-API item whose payload lives in `output`.
+    ResponsesOutput,
 }
 
 /// Builds a [`Conversation`] view for deciding what is live.
@@ -303,6 +309,22 @@ fn read_conversation(
             _ => Role::User,
         };
 
+        // The Responses API carries a tool result as a standalone item with no `role`
+        // at all: `{"type":"function_call_output","call_id":...,"output":"..."}`. Read
+        // through the chat-completions path it has no content and no kind, so the
+        // bulkiest item in a Responses conversation would never be compressed.
+        if dialect == Dialect::OpenAiResponses {
+            if let Some(kind) = responses_item_kind(&value) {
+                let output = value
+                    .get("output")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                messages.push(Message::new(role, vec![Block::new(kind, output)]));
+                shapes.push(ContentShape::ResponsesOutput);
+                continue;
+            }
+        }
+
         let (blocks, shape) = match value.get("content") {
             Some(Value::String(text)) => {
                 // OpenAI carries a tool result as a whole message with `role: "tool"`
@@ -328,6 +350,20 @@ fn read_conversation(
     }
 
     Some((Conversation::new(None, Vec::new(), messages), shapes))
+}
+
+/// The block kind for a Responses-API item, if it is one this code compresses.
+///
+/// Only output-carrying items qualify. A `function_call` (the *request* to run a tool)
+/// carries arguments the provider parses as JSON, and compressing those would produce
+/// a call the provider rejects rather than a shorter one.
+fn responses_item_kind(item: &Value) -> Option<BlockKind> {
+    match item.get("type").and_then(Value::as_str)? {
+        "function_call_output" => Some(BlockKind::FunctionCallOutput),
+        "local_shell_call_output" => Some(BlockKind::LocalShellCallOutput),
+        "apply_patch_call_output" => Some(BlockKind::ApplyPatchCallOutput),
+        _ => None,
+    }
 }
 
 /// Reads one content block.
@@ -363,6 +399,15 @@ fn rewrite_message(raw: &str, shape: ContentShape, edits: &[(usize, &str)]) -> O
     let mut value: Value = serde_json::from_str(raw).ok()?;
 
     match shape {
+        ContentShape::ResponsesOutput => {
+            // Written back to `output`, leaving `type` and `call_id` untouched — the
+            // provider matches the result to its call by `call_id`, so losing it turns
+            // a compressed tool result into an orphan the model cannot attribute.
+            let (_, replacement) = edits.iter().find(|(index, _)| *index == 0)?;
+            value
+                .as_object_mut()?
+                .insert("output".into(), Value::String((*replacement).to_owned()));
+        }
         ContentShape::Scalar => {
             // A scalar message has exactly one conceptual block.
             let (_, replacement) = edits.iter().find(|(index, _)| *index == 0)?;
