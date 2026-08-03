@@ -6,6 +6,28 @@ the crate starts publishing releases.
 
 ---
 
+## Proxy skeleton — config, /health, graceful shutdown
+**2026-08-03** · closes [#32](https://github.com/baileyrd/rusty_headroom/issues/32)
+
+- **Added:** `headroom-proxy` is now a real binary — axum server, `Config` from
+  `HEADROOM_*` environment variables, `/health`, graceful shutdown on SIGTERM/SIGINT.
+- **Design note:** the default bind is **loopback, not 0.0.0.0**. The proxy forwards
+  provider credentials, and a default binding every interface would make an open
+  credential relay the out-of-the-box behavior. Widening it is a deliberate act.
+- **Design note:** configuration is read from the environment on every access rather
+  than cached at startup, so an operator can turn compression off or repoint the
+  upstream without a restart — and without dropping in-flight streaming responses.
+- **Design note:** unparseable config values fall back to defaults rather than
+  failing. A malformed `HEADROOM_PORT` should not take down a running proxy on its
+  next config read.
+- **Design note:** graceful shutdown matters here specifically because the proxy sits
+  in the middle of streaming responses. Dropping one mid-flight truncates a model's
+  output mid-token, which reaches the user as a corrupt answer rather than a
+  retryable error.
+- **Known limitation:** no provider routes yet. `/health` is the only endpoint —
+  `/v1/messages` needs byte-faithful body handling to exist first, and standing it up
+  before that would mean writing the request path twice.
+
 ## SearchCompressor — grep result sets
 **2026-08-03** · closes [#29](https://github.com/baileyrd/rusty_headroom/issues/29)
 
