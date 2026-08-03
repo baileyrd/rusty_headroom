@@ -41,11 +41,13 @@
 #![warn(missing_docs)]
 
 pub mod block;
+pub mod ccr;
 pub mod detection;
 pub mod error;
 pub mod tokenizer;
 pub mod transform;
 
 pub use block::{Block, BlockKind};
+pub use ccr::{CcrStore, ContentHash};
 pub use error::{Declined, Error, Result};
 pub use transform::{LosslessTransform, LossyTransform, Transform};
