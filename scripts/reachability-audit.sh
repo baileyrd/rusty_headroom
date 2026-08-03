@@ -226,6 +226,39 @@ for c in $consts; do
   fi
 done
 
+echo "== 10. every dialect handler scans for cache-busting content"
+# `volatile::scan` reports content in the cached prefix that changes every request — a
+# timestamp in a system prompt means the provider's cache never matches and the customer
+# pays full price for the whole conversation every turn, while the savings metric looks
+# healthy throughout. It is the most expensive silent failure this proxy can have.
+#
+# It ran on `/v1/messages` only. Both OpenAI handlers compressed without it, and the
+# detector could not have found anything there anyway: it knew `system` and `tools`, both
+# Anthropic-shaped, and an OpenAI system prompt lives in `instructions` or in a
+# `role: "system"` message. Measured before the fix — 0 findings for both OpenAI shapes.
+#
+# So: a *handler* that compresses a dialect must also scan it. Counted outside test
+# modules, and only in files that define axum handlers — `State<AppState>` is what makes
+# a function a request entry point.
+#
+# That last restriction is not incidental. A first version checked every file calling
+# `compress_dialect` and flagged `compression.rs`, which calls it from `compress_request`
+# — a pure function, reached only through the handlers that do scan. An audit that cries
+# wolf is worse than no audit, because people learn to skip its output; this script has
+# recorded that lesson twice already and nearly earned a third.
+for f in $(grep -rl "compress_dialect(" --include=*.rs crates/headroom-proxy/src); do
+  grep -q "State<AppState>" "$f" || continue
+  body=$(awk '/^#\[cfg\(test\)\]/{exit} {print}' "$f")
+  calls=$(printf '%s\n' "$body" | grep "compress_dialect(" | grep -vc "fn compress_dialect")
+  scans=$(printf '%s\n' "$body" | grep -c "volatile::scan(")
+  [ "$calls" -eq 0 ] && continue
+  if [ "$calls" -eq "$scans" ]; then
+    note "✓ $(basename "$f") ($calls compressed, $scans scanned)"
+  else
+    fail "$(basename "$f") compresses $calls time(s) and scans $scans — a dialect is unguarded"
+  fi
+done
+
 echo
 [ "$status" -eq 0 ] && echo "clean" || echo "findings above — see the header for why this matters"
 exit "$status"

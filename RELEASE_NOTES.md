@@ -29,6 +29,39 @@ the crate starts publishing releases.
 
 ---
 
+## The cache-buster detector was blind to two of three surfaces
+**2026-08-03** · the most expensive silent failure, caught on one route out of three
+
+- `volatile::scan` reports content in the cached prefix that changes every request — a
+  timestamp in a system prompt means the provider's cache never matches and the customer
+  pays full price for the whole conversation, every turn, while the savings metric looks
+  healthy throughout.
+- **Two holes, both measured.** The OpenAI handlers never called it. And it could not have
+  found anything if they had: it knew `system` and `tools`, both Anthropic-shaped, while
+  an OpenAI system prompt lives in `instructions` or in a `role: "system"` message.
+
+  ```
+  anthropic system                 -> 1 finding(s)
+  openai chat system               -> 0 finding(s)
+  openai responses instructions    -> 0 finding(s)
+  ```
+
+- Worse on those two surfaces than on Anthropic's: both cache the prefix **automatically**,
+  so the customer never opted in and has even less reason to suspect it.
+- **Fixed:** `scan` now knows `instructions` and `system`/`developer` messages, and both
+  OpenAI handlers call it. All four shapes report.
+- **Deliberately not scanned:** a `user` message, even though it sits in the prefix. A
+  timestamp in what a person typed is ordinary, there is nothing for an operator to do
+  about it, and warning would train them to ignore the log line that matters.
+  `a_timestamp_in_a_user_message_is_not_reported` holds that.
+- **Added:** check 10 of the audit — a handler that compresses a dialect must also scan it.
+- **My first version of check 10 cried wolf.** It flagged `compression.rs`, which calls
+  `compress_dialect` from `compress_request` — a pure function reached only through
+  handlers that do scan. Scoped to files defining axum handlers. This script has recorded
+  that same lesson twice already and nearly earned a third.
+
+---
+
 ## The credential reaching the provider was never checked end to end
 **2026-08-03** · 871 tests pass with `x-api-key` stripped from every request
 
