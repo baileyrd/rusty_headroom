@@ -201,10 +201,10 @@ Every row is a gap: the target repo is empty, so all rows are new implementation
 | L7 | `headroom wrap` cline/continue/goose/openhands | fn | spec | all | REALIGNMENT Phase G | no | M | Depends on L5. Done. |
 | L8 | `headroom unwrap` | fn | spec | all | README CLI | no | S | Must fully restore pre-wrap config. Depends on L5. Done — byte-exact restore from a whole-file backup, verified SHA-256 identical through the binary. |
 | L9 | `headroom perf` | fn | spec | all | README CLI | no | S | Latency/throughput metrics. Done — measures the compressor, not the network; warm-up pass discarded. |
-| L10 | `headroom learn` | fn | spec | all | `docs/failure-learning.mdx` | no | L | Mines failed sessions; `--verbosity`. |
+| L10 | `headroom learn` | fn | spec | all | `docs/failure-learning.mdx` | no | L | Mines failed sessions; `--verbosity`. Done as a **corpus** miner rather than a session miner — no session-log format exists to read. Runs request bodies through the real pipeline and publishes recommendations. |
 | L11 | `headroom update` | fn | spec | all | README CLI | no | M | `--check`, `--pre`; in-place upgrade. `--check` done. In-place upgrade **deliberately not implemented** — a credential-holding binary is the wrong one to give a self-replacing updater. |
 | L12 | `headroom savings` / `output-savings` | fn | spec | all | `docs/savings.mdx` | no | M | Savings ledger reporting. Done — reads the proxy's `/metrics` exposition from stdin; no currency figure by design. |
-| L13 | `headroom init` / `inspect` / `tools` | fn | spec | all | `headroom/cli/` | no | M | Scaffolding + introspection helpers. |
+| L13 | `headroom init` / `inspect` / `tools` | fn | spec | all | `headroom/cli/` | no | M | Scaffolding + introspection helpers. Done — `init` refuses to overwrite, `tools` lists compressors/thresholds/MCP tools, `inspect` already existed. |
 
 ### Memory & shared context
 

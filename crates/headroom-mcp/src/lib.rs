@@ -12,4 +12,4 @@
 pub mod protocol;
 pub mod server;
 
-pub use server::McpServer;
+pub use server::{McpServer, TOOL_NAMES};

@@ -15,6 +15,13 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+/// Every tool this server registers, in the order it lists them.
+///
+/// Exported so a consumer — the CLI's `tools` command, a test — names them from one
+/// place. A second hand-maintained list is a list that drifts, and the failure is a
+/// command confidently reporting a tool that no longer exists.
+pub const TOOL_NAMES: [&str; 3] = ["headroom_compress", "headroom_retrieve", "headroom_stats"];
+
 use headroom_core::ccr::{handle_retrieve, CcrStore, Retrieval};
 use headroom_core::detection::{detect, ContentType};
 use headroom_core::tokenizer::{HeuristicEstimator, Tokenizer};
@@ -278,10 +285,7 @@ mod tests {
         let tools = response["result"]["tools"].as_array().unwrap();
 
         let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-        assert_eq!(
-            names,
-            vec!["headroom_compress", "headroom_retrieve", "headroom_stats"]
-        );
+        assert_eq!(names, TOOL_NAMES.to_vec());
     }
 
     #[test]
