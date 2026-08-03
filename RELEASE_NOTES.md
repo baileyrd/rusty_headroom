@@ -6,6 +6,31 @@ the crate starts publishing releases.
 
 ---
 
+## LogCompressor — template extraction and repeat collapsing
+**2026-08-03** · closes [#28](https://github.com/baileyrd/rusty_headroom/issues/28)
+
+- **Added:** `LogCompressor`, a `Transform` + `LossyTransform` that normalizes each
+  log line into a template, groups lines sharing a template, and reports each with a
+  count and an example.
+- **Added:** `templatize` and `has_severity` as public helpers.
+- **Measured:** estimated token reduction of **93% at 50 lines, 98% at 200**.
+- **The rule that matters:** error and warning lines are preserved verbatim, *in
+  addition to* the template summary rather than as a replacement. A summary that
+  reports `x1000 INFO ok` and drops the one `ERROR upstream timeout` is smaller,
+  cheaper, and actively harmful — the agent then believes nothing went wrong.
+- **Design note:** values are normalized, words are not. Over-eager normalization
+  would collapse `disk full` into `disk ok`, making the summary confidently wrong.
+  Timestamps, numbers-with-units, hex, UUIDs, and paths become placeholders; ordinary
+  words stay.
+- **Design note:** templates are reported in first-appearance order. Alphabetical
+  ordering would scramble the log's narrative.
+- **Known limitation:** output size is roughly constant regardless of input size, so
+  a 1000-line log and a 200-line log summarize to about the same thing. Safe, because
+  severity lines are always kept, but information density falls as logs grow.
+- **Known limitation:** template extraction is heuristic and unaware of log formats.
+  Structured JSON logs are routed to SmartCrusher instead, but an unusual text format
+  may over- or under-normalize.
+
 ## SmartCrusher formatter and transform — JSON actually compresses
 **2026-08-03** · closes [#25](https://github.com/baileyrd/rusty_headroom/issues/25)
 
