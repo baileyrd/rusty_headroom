@@ -6,6 +6,30 @@ the crate starts publishing releases.
 
 ---
 
+## Half the lossy compressors had no test that their marker redeems
+**2026-08-03** · no bug found — three of six were guarded, now all six
+
+- README.md sells compression as *"a bet that the detail will not be needed, and a bet that
+  can be unwound."* The bet is only unwindable if the `<<ccr:HASH>>` marker parses and the
+  store holds what it points at.
+- **SmartCrusher, the log compressor and the search compressor had a marker test. Code,
+  diffs and prose did not.** A compressor that formatted its marker differently, or stored
+  the wrong bytes, would lose content permanently while every other test passed — the
+  output would still be smaller, still valid, still look right.
+- **Checked, and all six are correct**: one parseable marker each, redeeming bytes equal to
+  what the compressor was given.
+- **Added:** `ccr_round_trip.rs`, one test walking whatever the orchestrator routes to
+  rather than six per-compressor tests — so a seventh compressor is covered the day it is
+  wired, and one with no sample fails the coverage assertion.
+- It asserts the redeemed bytes **equal the original**, not merely that something came
+  back, plus a companion test that an empty store answers anything but `Found` — otherwise
+  the whole thing could pass without the store doing its job.
+- Verified by two mutations: truncating what the code compressor stores gives
+  `code redeemed something other than what it was given`; shortening the marker hash gives
+  `json wrote an unparseable marker … expected 32 hex chars, got 30`.
+
+---
+
 ## The estimator's "never under-counts" claim was false
 **2026-08-03** · I5's safety rested on it, and nothing had ever measured it
 
