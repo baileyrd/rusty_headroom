@@ -6,6 +6,33 @@ the crate starts publishing releases.
 
 ---
 
+## Three property tests were passing without compressing anything
+**2026-08-03** · I4, I5 and I10, gated by a generator that never cleared a threshold
+
+- **The hole:** every compressor declines below its `AdaptiveSizer` threshold. The
+  determinism (I4) and I10 generators produced random printable ASCII up to 500 characters
+  — measured, **all 200 I4 cases detect as prose**, against a 5120-byte prose threshold.
+  Not one compressed. I4 asserted that two no-ops agree; I10 asserted that a policy which
+  forbids compression declines to compress the uncompressible.
+- I5's generator covered JSON and logs by accident and half its cases were sub-threshold
+  prose, so code, diffs and search output were never exercised.
+- This matters most for **I4**: determinism is the one invariant that genuinely differs
+  per compressor — a `HashMap` iterated in the wrong place is nondeterministic in one and
+  not the others — so a generator reaching none of them was the worst place to have it.
+- **Added:** `compressible_shape`, one of every content type that reaches a compressor,
+  each sized past its own threshold. Coverage now, per test: `I4` 200 cases across all six
+  types; `I5` and `I10` 400 each, likewise.
+- **Added:** a vacuity guard to each of the three — a property that never triggers the
+  behaviour it constrains passes forever and means nothing. I10's is the strongest form:
+  the same content must actually be compressed under pay-as-you-go, so "subscription left
+  it alone" is a statement about policy rather than about size.
+- Verified by restoring the old generator and watching all three fail on the guards.
+- Note the interaction with check 7, added an hour earlier: it confirms each invariant is
+  *cited* in the file the docs name. It cannot tell whether the test does anything. Both
+  checks were needed, and neither substitutes for reading.
+
+---
+
 ## `headroom doctor` was passing without checking two of six compressors
 **2026-08-03** · found by a guard written for something else
 
