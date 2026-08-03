@@ -6,6 +6,28 @@ the crate starts publishing releases.
 
 ---
 
+## `headroom savings` is pinned to the names the proxy actually emits
+**2026-08-03** · a copy across a process boundary, where no compiler was watching
+
+- **The hole:** `savings_report` matches four metric names as string literals — a second
+  copy of what `Metrics::render` writes, on the far side of a process boundary. Renaming
+  `headroom_tokens_saved_total` in `metrics.rs` was tried, and **the entire test suite
+  stayed green** while `headroom savings` would report `tokens saved 0` forever. `value`
+  returns `None` for an absent name and the caller defaults it to zero, so the failure is
+  a plausible number rather than an error.
+- **Added:** `savings_reads_the_names_the_proxy_actually_emits`, which renders a real
+  `Metrics` — including a labelled `headroom_routing_total` series from the same source
+  rather than a typed fixture — and feeds it to the parser. It is the only test that goes
+  red under the rename.
+- **Renamed:** `the_savings_report_reads_real_exposition_text` →
+  `..._parses_the_exposition_format`. Its `METRICS` is a fixture written by hand beside
+  the parser, so it agrees with the parser whatever the proxy does. The parsing it checks
+  is worth having; the name claimed more than that.
+- This is CONTRIBUTING.md's own lesson — *a self-consistency test is not coverage for
+  anything that crosses a process boundary* — found in the repository that wrote it down.
+
+---
+
 ## `headroom env` stops emitting a URL `headroom wrap` would not
 **2026-08-03** · the seventh copy, and this one was already wrong
 
