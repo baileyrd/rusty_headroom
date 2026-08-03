@@ -49,7 +49,8 @@ impl VolatileKind {
 /// One piece of volatile content found in the cache hot zone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
-    /// Which member it was found in — `system`, `tools`, or a frozen message index.
+    /// Which member it was found in — `system`, `tools`, `instructions`, or
+    /// `system message`.
     pub location: String,
     /// What kind of volatility it is.
     pub kind: VolatileKind,
@@ -64,12 +65,24 @@ pub struct Finding {
 /// How much of a match is reproduced in a finding.
 const SAMPLE_CHARS: usize = 24;
 
-/// Scans the cache hot zone of an Anthropic-shaped request body.
+/// Scans the cache hot zone of a request body, in any dialect this proxy relays.
 ///
-/// Only the hot zone — `system` and `tools` — is scanned. Volatile content in the
-/// *live* zone is expected and harmless: that content was never cached, so nothing is
-/// invalidated by it changing. Reporting it would bury the findings that matter under
-/// noise from every request carrying a fresh tool result.
+/// The system instruction lives somewhere different on each surface, and this used to
+/// know only Anthropic's:
+///
+/// | surface | where |
+/// | --- | --- |
+/// | Anthropic | `system` |
+/// | OpenAI Responses | `instructions` |
+/// | OpenAI chat completions | a `system` or `developer` message |
+/// | all three | `tools` |
+///
+/// Only the hot zone is scanned. Volatile content in the *live* zone is expected and
+/// harmless: that content was never cached, so nothing is invalidated by it changing.
+/// Reporting it would bury the findings that matter under noise from every request
+/// carrying a fresh tool result — which is also why a `user` message is skipped even
+/// though it sits in the prefix. It is not there by the operator's choice, and there is
+/// nothing for them to do about it.
 ///
 /// # Never returns modified content
 ///
@@ -97,11 +110,41 @@ pub fn scan(body: &[u8]) -> Vec<Finding> {
 
     let mut findings = Vec::new();
 
+    // Anthropic: a top-level `system` string or block array.
     if let Some(system) = parsed.get("system") {
         collect(system, "system", &mut findings);
     }
+    // Every surface puts tool definitions at the top level, and they sit in the cached
+    // prefix on all three.
     if let Some(tools) = parsed.get("tools") {
         collect(tools, "tools", &mut findings);
+    }
+    // OpenAI Responses: the system instruction is `instructions`.
+    if let Some(instructions) = parsed.get("instructions") {
+        collect(instructions, "instructions", &mut findings);
+    }
+    // OpenAI chat completions: the system instruction is a message with a `system` or
+    // `developer` role. Scanned rather than the whole array, deliberately — a timestamp
+    // in a *user* message is ordinary, and warning about it would train an operator to
+    // ignore this log line entirely.
+    //
+    // This is where the module was blind. It knew `system` and `tools`, both
+    // Anthropic-shaped, so an OpenAI system prompt carrying a timestamp reported nothing
+    // — on surfaces that cache the prefix automatically, where the customer never opted
+    // in and so has even less reason to suspect it.
+    if let Some(messages) = parsed.get("messages").and_then(Value::as_array) {
+        for message in messages {
+            let role = message
+                .get("role")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if role != "system" && role != "developer" {
+                continue;
+            }
+            if let Some(content) = message.get("content") {
+                collect(content, "system message", &mut findings);
+            }
+        }
     }
 
     // Sorted so the same body always reports the same findings in the same order.
@@ -461,5 +504,59 @@ mod tests {
     #[test]
     fn a_body_with_no_hot_zone_reports_nothing() {
         assert!(scan(br#"{"messages":[]}"#).is_empty());
+    }
+
+    #[test]
+    fn every_surfaces_system_instruction_is_scanned() {
+        // The module knew `system` and `tools`, both Anthropic-shaped. An OpenAI system
+        // prompt carrying a timestamp reported nothing — on the two surfaces that cache
+        // the prefix *automatically*, where the customer never opted in and so has even
+        // less reason to suspect it is costing them full price every turn.
+        //
+        // Measured before the fix: 0 findings for the two OpenAI shapes, 1 for Anthropic.
+        for (label, body) in [
+            (
+                "anthropic system",
+                r#"{"system":"Session started 2026-08-03T12:00:00Z","messages":[]}"#,
+            ),
+            (
+                "openai chat system message",
+                r#"{"messages":[{"role":"system","content":"Session started 2026-08-03T12:00:00Z"}]}"#,
+            ),
+            (
+                "openai chat developer message",
+                r#"{"messages":[{"role":"developer","content":"Session started 2026-08-03T12:00:00Z"}]}"#,
+            ),
+            (
+                "openai responses instructions",
+                r#"{"instructions":"Session started 2026-08-03T12:00:00Z","input":"hi"}"#,
+            ),
+            (
+                "tools, on every surface",
+                r#"{"tools":[{"description":"as of 2026-08-03T12:00:00Z"}],"messages":[]}"#,
+            ),
+        ] {
+            let found = scan(body.as_bytes());
+            assert_eq!(found.len(), 1, "{label} reported {found:?}");
+            assert_eq!(found[0].kind, VolatileKind::Timestamp, "{label}");
+        }
+    }
+
+    #[test]
+    fn a_timestamp_in_a_user_message_is_not_reported() {
+        // The other half, and the reason this scans by role rather than walking the whole
+        // array. A timestamp in what a person typed is ordinary — it is not in the cached
+        // prefix by their choice, and there is nothing for them to do about it. Warning
+        // would train an operator to ignore the log line that matters.
+        let body = r#"{"messages":[
+            {"role":"user","content":"what happened at 2026-08-03T12:00:00Z?"},
+            {"role":"assistant","content":"checked at 2026-08-03T12:00:01Z"}
+        ]}"#;
+
+        assert!(
+            scan(body.as_bytes()).is_empty(),
+            "{:?}",
+            scan(body.as_bytes())
+        );
     }
 }

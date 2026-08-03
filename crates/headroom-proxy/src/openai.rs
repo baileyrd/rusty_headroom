@@ -46,6 +46,16 @@ pub async fn chat_completions(
     let auth_mode = classify_auth_mode(&headers);
     let policy = CompressionPolicy::for_mode(auth_mode);
 
+    // Scanned before compression, on the bytes the client sent — the same check
+    // `/v1/messages` runs. Volatile content in the cached prefix means the provider's
+    // cache misses on every request, which no amount of live-zone compression
+    // compensates for, and the savings metric looks healthy throughout.
+    //
+    // This ran on the Anthropic route only. Both OpenAI surfaces cache the prefix
+    // *automatically*, so a customer here never opted in and has even less reason to
+    // suspect a timestamp in their system prompt is costing them full price every turn.
+    crate::volatile::warn_about(&crate::volatile::scan(&body));
+
     let compressed = compress_dialect(
         Dialect::OpenAi,
         &body,
@@ -186,6 +196,9 @@ pub async fn responses(
 ) -> Result<Response, RelayError> {
     let config = Config::from_env();
     let policy = CompressionPolicy::for_mode(classify_auth_mode(&headers));
+
+    // Same scan as the other two routes — see `chat_completions`.
+    crate::volatile::warn_about(&crate::volatile::scan(&body));
 
     let compressed = compress_dialect(
         Dialect::OpenAiResponses,
