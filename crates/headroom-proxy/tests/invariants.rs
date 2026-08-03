@@ -877,6 +877,56 @@ async fn headers_seen_by_provider(simulator: &Simulator, headers: &[(&str, &str)
 }
 
 #[tokio::test]
+async fn the_credential_reaches_the_provider_intact_in_every_auth_mode() {
+    // The highest-consequence failure this proxy has. A credential dropped or mangled by
+    // `sanitize` means every request 401s — a total outage, not a degradation — and the
+    // three auth modes take different paths through the header policy, so one can break
+    // while the others work.
+    //
+    // `headers_seen_by_provider` returns header *names*, so the existing header tests
+    // check what the proxy adds, not that what matters arrives unchanged. And the unit
+    // test in `headers.rs` covers `authorization` only, against the pure function: header
+    // rebuilding, hyper's framing and the relay all sit between it and the provider,
+    // which is the reason this file exists.
+    for (header, value) in [
+        ("x-api-key", "sk-ant-api03-secret-value"),
+        ("authorization", "Bearer sk-ant-oat01-secret-value"),
+        ("authorization", "Bearer sk-ant-sid01-secret-value"),
+    ] {
+        let simulator = Simulator::anthropic().await.unwrap();
+        let app = router_with(AppState::new(simulator.base_url()));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/messages")
+                    .header("content-type", "application/json")
+                    .header(header, value)
+                    .body(Body::from(r#"{"model":"claude-opus-4","messages":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let _ = axum::body::to_bytes(response.into_body(), 65536).await;
+
+        let received = simulator.recorder().last().expect("nothing arrived");
+        let forwarded = received
+            .headers
+            .get(header)
+            .unwrap_or_else(|| panic!("{header} did not reach the provider for {value}"));
+
+        // Byte-equal, not merely present. A truncated or re-cased credential is as
+        // useless as an absent one, and `redacted_authorization` exists nearby — a
+        // redaction leaking into the forwarded copy is a plausible way to get here.
+        assert_eq!(
+            forwarded.as_bytes(),
+            value.as_bytes(),
+            "{header} was altered on the way to the provider"
+        );
+    }
+}
+
+#[tokio::test]
 async fn the_proxy_adds_no_header_the_client_did_not_send() {
     // The subscription hazard, end to end. `headers::sanitize` is unit-tested, but it
     // governs only the headers *this code* forwards — the HTTP client underneath adds its
