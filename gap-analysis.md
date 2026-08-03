@@ -83,6 +83,13 @@ invalidated an earlier claim — S4 and S5 had been "closed" by wiring them into
 `TextSummarizer`, a compressor nothing reached, so they never ran on proxied traffic
 until prose routed.
 
+**The audit is now a script.** `scripts/reachability-audit.sh` runs in CI ahead of the
+build — it checks that every detected content type reaches a compressor, every proxy
+module is referenced, every CLI command is dispatched, and every declared environment
+variable is read. It was verified to reproduce the #82 defect: delete the code arm from
+the routing table and it fails. Knowledge that lives only in a conversation is knowledge
+that gets re-lost.
+
 The audit is now clean: every remaining public symbol is either reached from a request,
 dispatched from the CLI (all commands verified against `main.rs`), listed in the MCP tool
 table (all three), used internally by a compressor that is itself reached, or documented

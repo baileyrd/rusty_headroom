@@ -30,6 +30,12 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Reachability audit
+        # Cheap, no build required, and it runs first so a capability that reaches
+        # nothing is reported before a green test suite has a chance to imply otherwise.
+        # See the script header for the five gaps that motivated it.
+        run: scripts/reachability-audit.sh
+
       - name: Format
         run: cargo fmt --all -- --check
 
