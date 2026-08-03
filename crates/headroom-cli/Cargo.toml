@@ -19,3 +19,9 @@ tracing.workspace = true
 clap.workspace = true
 serde_json.workspace = true
 headroom-mcp = { path = "../headroom-mcp" }
+
+[dev-dependencies]
+# Test-only, so the config template can be checked against the proxy's real
+# `STARTUP_ONLY` list rather than a copy of it. A copy is how the template and the code
+# drift apart, which is the bug the test exists to prevent.
+headroom-proxy = { path = "../headroom-proxy" }

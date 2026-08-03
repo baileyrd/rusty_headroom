@@ -292,6 +292,55 @@ mod tests {
     }
 
     #[test]
+    fn the_generated_config_marks_every_startup_only_setting() {
+        // The template used to open with "Read live on every request, so changes take
+        // effect without a restart" and then list `HEADROOM_HOST` and `HEADROOM_PORT`,
+        // which are read once — the socket is bound at startup. A config file that
+        // misdescribes its own semantics is worse than one that says nothing, because it
+        // is the first thing a new operator reads and they have no reason to doubt it.
+        let scratch = std::env::temp_dir().join(format!("headroom-init-{}", std::process::id()));
+        let path = scratch.join("headroom.env");
+        std::fs::create_dir_all(&scratch).unwrap();
+
+        init(&path, true).expect("init failed");
+        let contents = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_dir_all(&scratch).ok();
+
+        // Every setting the proxy reads once must be marked where it appears. Checked
+        // against the proxy's own list rather than a copy, so adding a startup-only
+        // setting there fails here until the template is updated.
+        for name in headroom_proxy::config::STARTUP_ONLY {
+            let Some(at) = contents.find(name) else {
+                continue;
+            };
+            let preceding = &contents[..at];
+            assert!(
+                preceding
+                    .rsplit("\n\n")
+                    .next()
+                    .is_some_and(|block| block.contains("RESTART REQUIRED")),
+                "{name} appears in the template without a RESTART REQUIRED note"
+            );
+        }
+    }
+
+    #[test]
+    fn the_generated_config_does_not_claim_everything_is_live() {
+        let scratch = std::env::temp_dir().join(format!("headroom-live-{}", std::process::id()));
+        let path = scratch.join("headroom.env");
+        std::fs::create_dir_all(&scratch).unwrap();
+
+        init(&path, true).expect("init failed");
+        let contents = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_dir_all(&scratch).ok();
+
+        assert!(
+            contents.contains("The exceptions are marked"),
+            "the header claims everything is read live"
+        );
+    }
+
+    #[test]
     fn doctor_passes_on_a_working_build() {
         // The self-test must actually pass here, or it is reporting nothing.
         assert!(doctor().is_ok());
@@ -836,11 +885,14 @@ pub fn init(path: &std::path::Path, force: bool) -> anyhow::Result<()> {
     let contents = concat!(
         "# headroom configuration\n",
         "#\n",
-        "# Read live on every request, so changes take effect without a restart —\n",
-        "# which matters because a restart truncates in-flight streaming responses.\n",
+        "# Most of this is read live on every request, so a change takes effect without a\n",
+        "# restart — which matters because a restart truncates in-flight streaming\n",
+        "# responses. The exceptions are marked; they are read once at startup.\n",
         "\n",
         "# Where the proxy listens. Loopback by default: the proxy forwards provider\n",
         "# credentials, and binding every interface would expose an open relay.\n",
+        "#\n",
+        "# RESTART REQUIRED — the socket is bound once.\n",
         "HEADROOM_HOST=127.0.0.1\n",
         "HEADROOM_PORT=8787\n",
         "\n",
@@ -857,7 +909,34 @@ pub fn init(path: &std::path::Path, force: bool) -> anyhow::Result<()> {
         "\n",
         "# Log verbosity. Defaults to warn: the proxy logs a line per request at info,\n",
         "# and a default that fills a terminal is one people turn off entirely.\n",
+        "#\n",
+        "# RESTART REQUIRED — the subscriber is installed once.\n",
         "# HEADROOM_LOG=headroom_proxy=info\n",
+        "\n",
+        "# Where compressed originals are kept so `headroom_retrieve` can return them.\n",
+        "# Unset means memory only, and every marker becomes unredeemable on restart.\n",
+        "# A shared store is what makes retrieval work across more than one worker.\n",
+        "#\n",
+        "# RESTART REQUIRED — the store is opened once.\n",
+        "# HEADROOM_CCR_DIR=/var/lib/headroom/ccr\n",
+        "# HEADROOM_REDIS_URL=redis://127.0.0.1:6379\n",
+        "\n",
+        "# Shapes measured as not worth compressing, written by `headroom learn`.\n",
+        "#\n",
+        "# RESTART REQUIRED — read once, deliberately: a set that changed between\n",
+        "# requests would make the same request compress differently depending on when\n",
+        "# it arrived, which is what busts the provider cache.\n",
+        "# HEADROOM_RECOMMENDATIONS=/var/lib/headroom/recommendations.json\n",
+        "\n",
+        "# Facts to add to the newest message, as JSON lines. Tool output only.\n",
+        "#\n",
+        "# RESTART REQUIRED — read once, for the same reason as above.\n",
+        "# HEADROOM_MEMORY=/var/lib/headroom/memories.jsonl\n",
+        "\n",
+        "# Normalize tool definitions and place cache breakpoints. Off by default: both\n",
+        "# modify the cache hot zone, trading one miss now for hits later — worth it for\n",
+        "# some deployments and pure cost for a client that already serializes stably.\n",
+        "# HEADROOM_STABILIZE=0\n",
     );
 
     std::fs::write(path, contents).with_context(|| format!("writing {}", path.display()))?;

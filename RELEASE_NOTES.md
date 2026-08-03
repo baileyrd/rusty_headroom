@@ -6,6 +6,31 @@ the crate starts publishing releases.
 
 ---
 
+## `headroom init` generated a config that misdescribed itself
+**2026-08-03** · the same false claim, one layer further out
+
+- **Fixed:** the template opened with *"Read live on every request, so changes take effect
+  without a restart"* and then listed `HEADROOM_HOST` and `HEADROOM_PORT` — which are read
+  once, because the socket is bound at startup. The first file a new operator reads told
+  them something untrue about the thing they were reading it to learn.
+- **Added:** a `RESTART REQUIRED` note wherever it applies, and the five settings the
+  template never mentioned at all — `HEADROOM_CCR_DIR`, `HEADROOM_REDIS_URL`,
+  `HEADROOM_RECOMMENDATIONS`, `HEADROOM_MEMORY`, `HEADROOM_STABILIZE`. A store left unset
+  means every CCR marker becomes unredeemable on restart, which is worth knowing before
+  you find out.
+- **Checked against the proxy's real list, not a copy.** `headroom-proxy` is now a
+  dev-dependency of the CLI purely so the test can read `config::STARTUP_ONLY` directly. A
+  copied list is how the template and the code drift apart, which is the bug this test
+  exists to prevent.
+- **Verified to bite:** removing one `RESTART REQUIRED` marker fails the test.
+- **Verified through the release binary:** `headroom init` writes a file where every
+  startup-only setting carries the note.
+- **Third in a row of the same shape.** #101 was a guard that never ran, #102 an override
+  reported as applied that never applied, and this is documentation asserting semantics
+  the code does not have. All three were about a component describing itself.
+
+---
+
 ## `/admin/runtime-env` stops reporting success for settings it cannot change
 **2026-08-03** · the same endpoint, a second false report
 
