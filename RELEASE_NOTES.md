@@ -6,6 +6,36 @@ the crate starts publishing releases.
 
 ---
 
+## `passthrough` was documented as "forwarded unchanged" and is not
+**2026-08-03** · a metric describing a guarantee stronger than it can make
+
+- `shape_openai` runs after compression declines, adding `prompt_cache_key` and
+  `reasoning_effort`. So a request counted as passthrough still leaves larger than it
+  arrived, on two of the three surfaces:
+
+  | route | in | out | byte-identical |
+  | --- | --- | --- | --- |
+  | `/v1/messages` | 69 | 69 | yes |
+  | `/v1/chat/completions` | 62 | 88 | no |
+  | `/v1/responses` | 59 | 85 | no |
+
+- The help text sat two sections below invariant I1 — *"Byte-faithful passthrough —
+  unmutated bytes arrive SHA-256 identical"* — and read as the same guarantee. I1 still
+  holds; every byte the client sent survives. "Unchanged" was the overclaim.
+- Help text now reads **"Requests where no compression applied."**, with the README saying
+  what the OpenAI routes still add.
+- The enrichment itself was not changed — it is deliberate, and `reasoning_effort` is only
+  ever added, never adjusted over a customer's own value.
+- **Third claim in a row** that held for `/v1/messages` and failed for both OpenAI routes,
+  after the volatile scan and SSE cache accounting. The new test walks all three and pins
+  both outcomes, so enrichment leaking onto `/v1/messages` fails it too.
+- Verified by mutation three ways: disabling the enrichment, renaming its key, and leaking
+  it onto `/v1/messages`. The third needed a probe at the insertion point first — the
+  obvious version did not compile, and a non-compiling mutation reads exactly like a
+  passing one if only the test result is checked.
+
+---
+
 ## `signals/` claimed to be shared infrastructure and has one caller
 **2026-08-03** · a confident false claim, corrected rather than papered over
 

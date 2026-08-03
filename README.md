@@ -102,6 +102,13 @@ breakdown of *why* traffic was or was not compressed. `headroom_expanded_total` 
 requests this proxy made **larger**: memory injection adds content by design, so that is a
 real outcome and not an error, but it is not compression and is no longer counted as it.
 
+`headroom_passthrough_total` counts requests **no compression applied to** — not requests
+forwarded unchanged, which is what it used to say. On the two OpenAI routes a passthrough
+request still goes out enriched with `prompt_cache_key` and `reasoning_effort`; measured, a
+62-byte chat request leaves as 88. Everything the client sent survives byte-for-byte
+either way, which is what I1 promises — but "unchanged" was a stronger claim than the
+counter can support, and it sat two sections below I1 where it read as the same guarantee.
+
 `headroom_cache_read_tokens_total` and `headroom_cache_creation_tokens_total` are read off
 the response stream, in each provider's own vocabulary, for all three proxied surfaces.
 Two cases report a zero that means *the provider said nothing* rather than *the provider

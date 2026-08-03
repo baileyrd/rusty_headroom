@@ -924,3 +924,53 @@ three times.
 **Would change if:** a second line-dropping compressor appears. That is the moment the
 original claim becomes worth making true rather than worth correcting, and `breaks_markup`
 gets its caller.
+
+---
+
+## D32 — `passthrough` counts what was not compressed, not what was not touched
+
+**Decision:** correct `headroom_passthrough_total`'s help text from *"Requests forwarded
+unchanged"* to *"Requests where no compression applied"*, and pin the difference with a
+test over all three surfaces.
+
+It is not "forwarded unchanged" on two of them. `shape_openai` runs after compression
+declines and adds `prompt_cache_key` and `reasoning_effort` (gap row O2), so a request
+nothing compressed still leaves larger than it arrived. Measured, with the smallest input
+that reaches the route at all:
+
+| route | in | out | byte-identical |
+| --- | --- | --- | --- |
+| `/v1/messages` | 69 | 69 | yes |
+| `/v1/chat/completions` | 62 | 88 | no |
+| `/v1/responses` | 59 | 85 | no |
+
+**Why the wording mattered.** The counter is described two sections below invariant I1 —
+*"Byte-faithful passthrough — unmutated bytes arrive SHA-256 identical"* — and read as the
+same guarantee. I1 still holds: every byte the client sent survives, `insert_top_level_member`
+adds members without a `Value` round-trip precisely so it does. But "unchanged" is a
+stronger claim than the counter can support, and an operator reconciling proxy egress
+against client egress would have found it false.
+
+**The enrichment is not the bug and was not changed.** `prompt_cache_key` improves the
+metric this proxy exists to move, and `reasoning_effort` is only ever *added* — a
+customer-supplied value is a deliberate choice about answer quality and is left alone.
+`route_effort` returning `High` for a two-token opening turn looks wrong and is not: an
+opening turn is a new problem by definition, and the documented asymmetry is that routing
+too low costs the whole exchange twice over.
+
+**The third claim in a row that held for `/v1/messages` and failed for both OpenAI
+routes**, after the volatile scan (D-era #124) and SSE cache accounting (D30). The test
+walks all three surfaces rather than asserting the Anthropic case and generalizing, and it
+pins *both* outcomes — a version asserting only "chat is not identical" would pass if the
+proxy started rewriting `/v1/messages` too, which is the failure that would actually
+matter. It also names the key added, so a *different* mutation on those routes fails
+rather than passing as "not identical, as expected".
+
+Verified by mutation in three directions: disabling the enrichment, renaming its key, and
+leaking it onto `/v1/messages` each turn the test red. The third needed a probe at the
+insertion point first — the obvious version of it did not compile, and a non-compiling
+mutation reads exactly like a passing one if only the test result is checked.
+
+**Would change if:** the enrichment moves ahead of the compression decision, at which point
+an enriched request is no longer a passthrough in any sense and the counter needs splitting
+rather than relabelling.

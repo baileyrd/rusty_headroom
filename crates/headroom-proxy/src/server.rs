@@ -902,6 +902,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn passthrough_is_byte_identical_only_where_nothing_enriches() {
+        // `headroom_passthrough_total` was documented as "Requests forwarded unchanged".
+        // It is not that, on two of the three surfaces: `shape_openai` adds
+        // `prompt_cache_key` and `reasoning_effort` after compression declines, so a
+        // request nothing compressed still goes out larger than it came in.
+        //
+        // The third claim in a row that held for `/v1/messages` and failed for both
+        // OpenAI routes, after the volatile scan and the SSE cache accounting. So this
+        // walks all three rather than asserting the Anthropic case and generalizing.
+        //
+        // Both outcomes are pinned, not just the surprising one. A test that only
+        // asserted "chat is not identical" would pass if the proxy started rewriting
+        // `/v1/messages` too, which is the failure that would actually matter.
+        for (path, body, identical) in [
+            (
+                "/v1/messages",
+                r#"{"model":"claude-opus-4","messages":[{"role":"user","content":"hi"}]}"#,
+                true,
+            ),
+            (
+                "/v1/chat/completions",
+                r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#,
+                false,
+            ),
+            (
+                "/v1/responses",
+                r#"{"model":"gpt-4o","input":[{"role":"user","content":"hi"}]}"#,
+                false,
+            ),
+        ] {
+            let (base, captured) = fake_any_path().await;
+            let state = AppState::new(&base);
+
+            post_to(router_with(state.clone()), path, body.to_owned()).await;
+            let (_, sent) = captured.lock().unwrap().clone().expect("nothing forwarded");
+
+            // The vacuity guard. Without it a request that failed to route at all would
+            // satisfy the identity assertion for `/v1/messages` while proving nothing.
+            assert!(
+                state
+                    .metrics()
+                    .render()
+                    .contains("headroom_passthrough_total 1"),
+                "{path} was not counted as passthrough, so this proves nothing"
+            );
+
+            assert_eq!(
+                sent == body.as_bytes(),
+                identical,
+                "{path}: expected byte-identical={identical}, got {} bytes for {}\n{}",
+                sent.len(),
+                body.len(),
+                String::from_utf8_lossy(&sent)
+            );
+
+            // What the enrichment actually adds, named rather than merely permitted —
+            // so a *different* mutation on these routes fails here instead of passing
+            // as "not identical, as expected".
+            if !identical {
+                let parsed: serde_json::Value = serde_json::from_slice(&sent).unwrap();
+                let original: serde_json::Value = serde_json::from_str(body).unwrap();
+                let added: Vec<&String> = parsed
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .filter(|key| original.get(key.as_str()).is_none())
+                    .collect();
+                assert_eq!(
+                    added,
+                    ["reasoning_effort"],
+                    "{path} added something other than the documented enrichment"
+                );
+                // Everything the customer sent has to survive it untouched — I1 applies
+                // to the bytes this proxy did not set out to change.
+                for (key, value) in original.as_object().unwrap() {
+                    assert_eq!(parsed.get(key), Some(value), "{path} altered {key}");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn a_conversations_request_is_relayed_byte_identical() {
         // Declared non-compressible: the body describes conversation *state* rather
         // than carrying a prompt, so compressing it would corrupt the provider's own
