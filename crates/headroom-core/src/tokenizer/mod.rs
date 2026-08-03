@@ -11,6 +11,7 @@
 //! needs no model files, and is correct enough to make the I5 decision safely.
 
 mod estimator;
+pub mod registry;
 
 pub use estimator::HeuristicEstimator;
 

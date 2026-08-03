@@ -80,7 +80,7 @@ Every row is a gap: the target repo is empty, so all rows are new implementation
 | T1 | `Tokenizer` trait + `estimator` | trait/fn | spec | all | REALIGNMENT §2.3 `tokenizer/` | no | S | Heuristic byte→token estimator as the always-available fallback. |
 | T2 | tiktoken BPE impl | fn | spec | all | `tokenizer/tiktoken_impl.rs` | no | M | OpenAI model families. Needs a BPE implementation + encoding tables. |
 | T3 | HuggingFace tokenizer impl | fn | spec | all | `tokenizer/hf_impl.rs` | no | M | Via `tokenizers` crate. Anthropic/OSS models. |
-| T4 | tokenizer registry | fn | spec | all | `tokenizer/registry.rs` | no | S | model-id → tokenizer resolution with fallback to T1. |
+| T4 | tokenizer registry | fn | spec | all | `tokenizer/registry.rs` | no | S | model-id → tokenizer resolution with fallback to T1. Done as `tokenizer::registry::{Family, Registry}` — always resolves, never `None`; no exact tokenizer registered until T2/T3 land, and not yet consulted by the proxy. |
 
 ### Content detection
 
