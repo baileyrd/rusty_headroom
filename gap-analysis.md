@@ -130,10 +130,10 @@ Every row is a gap: the target repo is empty, so all rows are new implementation
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | P1 | `LosslessTransform` / `LossyTransform` | trait | spec | all | REALIGNMENT §2.3 `pipeline/traits.rs` | no | S | In-place `fn(&mut Block) -> Result<()>` per I6. |
 | P2 | `live_zone` block dispatcher | fn | spec | all | REALIGNMENT §2.2 I2/I3 | no | L | **Core of the whole design.** Walks messages from tail; identifies latest user msg, tool_result, function_call_output, local_shell_call_output, apply_patch_call_output. |
-| P3 | pipeline orchestrator | fn | spec | all | `pipeline/orchestrator.rs` | no | M | Live-zone-only; routes via D1 to C*. |
-| P4 | offloads (json/log/diff/search/prose) | fn | spec | all | `pipeline/offloads/` | no | M | Move bulky sub-values to CCR, leave markers. |
-| P5 | reformats (json minifier, log template) | fn | spec | all | `pipeline/reformats/` | no | S | Lossless byte reduction. |
-| P6 | `safety` checks | fn | spec | all | `transforms/safety.rs` | no | S | Guards against pathological/adversarial input. |
+| P3 | pipeline orchestrator | fn | spec | all | `pipeline/orchestrator.rs` | no | M | Live-zone-only; routes via D1 to C*. Done as `pipeline::Orchestrator`; `Routing` names the decline reason. Proxy not yet switched over to it. |
+| P4 | offloads (json/log/diff/search/prose) | fn | spec | all | `pipeline/offloads/` | no | M | Move bulky sub-values to CCR, leave markers. **Covered by the existing compressors** — SmartCrusher/Log/Search/Diff already offload to CCR and leave markers; a separate layer would be a second name for the same mechanism. |
+| P5 | reformats (json minifier, log template) | fn | spec | all | `pipeline/reformats/` | no | S | Lossless byte reduction. Done as `pipeline::reformats::{minify_json, tidy_lines}`. Not yet wired into a compressor chain. |
+| P6 | `safety` checks | fn | spec | all | `transforms/safety.rs` | no | S | Guards against pathological/adversarial input. Done as `pipeline::safety::check` — size, depth, line length, line count; declines to compress rather than rejecting the request. |
 | P7 | token validation + fallback | fn | spec | all | REALIGNMENT I5 | no | S | If `compressed.tokens >= original.tokens`, forward original. Depends on T1. |
 
 ### CCR (Compress-Cache-Retrieve)

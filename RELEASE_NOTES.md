@@ -6,6 +6,65 @@ the crate starts publishing releases.
 
 ---
 
+## The compression pipeline: orchestrator, safety, reformats
+**2026-08-03** · gap rows P3, P5, P6
+
+- **Added:** `headroom_core::pipeline` — `Orchestrator`/`Routing` (P3),
+  `reformats::{minify_json, tidy_lines}` (P5), and `safety::{check, Limits, Hazard}` (P6).
+- **Design note, P3:** the routing decision used to live in the proxy as a private
+  dispatcher beside the axum handler. That put a decision every consumer needs behind a
+  crate nothing but the proxy depends on — the CLI reimplemented it, and the two could
+  drift without anything failing. It lives in core now, so `headroom compress` and
+  `POST /v1/messages` route identically by construction.
+- **Design note:** `Routing` names *why* a block was declined. `transform_for` collapses
+  three genuinely different outcomes into `None`, and an operator reading telemetry needs
+  to tell "policy forbade it" from "nothing handles this type" from "the payload was
+  hazardous" — the fixes are entirely different.
+- **Design note:** policy is checked first, before detection or the safety scan. I10
+  forbids lossy work on restricted traffic outright, so a restricted request should not
+  pay for two analyses to reach a conclusion policy already determined. Tested by
+  routing a payload that would *also* fail the safety check and asserting it reports the
+  policy reason.
+- **Design note, P6:** the safety check answers "should this run", not "is this valid".
+  A payload that fails is forwarded **uncompressed** — the outcome the customer would
+  have had with no proxy. Rejecting the request instead would break traffic that works
+  fine today because this crate was cautious about it. That asymmetry is why the limits
+  are generous: being wrong costs a missed compression, being absent costs a stall on
+  the request path.
+- **Bug caught in development:** the depth guard was gated on `ContentType::Json`, and
+  500 nested brackets carrying no data **do not classify as JSON** — so the check was
+  skipped on exactly the payload it exists for. Now it also runs on anything
+  bracket-shaped that detection did not recognize, which is what an adversarial payload
+  looks like. Still skipped for a log file.
+- **Design note:** bracket depth is counted by *scanning*, not parsing — the payload
+  this catches is precisely the one a recursive parser would blow the stack on. Brackets
+  inside string literals are skipped, and the close-bracket count saturates rather than
+  underflowing, since a `usize` subtraction on `]]]]` would report a depth of eighteen
+  quintillion.
+- **Design note, P5:** these are the only transforms restricted traffic ever gets. They
+  remove *only* bytes carrying no information, so the decoded meaning is bit-identical
+  and they are safe on every auth mode. Whitespace **inside a string is content** —
+  collapsing it would be a lossy transform that had escaped its policy gate, so there
+  are tests for an escaped quote inside a string and for value-equality after
+  minification.
+- **Bug caught in development:** `tidy_lines` emitted the empty element `split('\n')`
+  leaves on a trailing newline, so it *added* a blank line to every input that ended
+  properly — a tidier that grew what it was asked to shrink.
+- **Design note:** blank runs collapse to one, not to none. A blank line is a paragraph
+  boundary; removing it reflows a log or document into a wall of text, losing structure
+  a reader and a model both use. Leading whitespace is never touched, since indentation
+  is structure in code, YAML and stack traces.
+- **Known limitation:** nothing calls the orchestrator yet. The proxy still uses its own
+  `Compressors::route`, so the duplication P3 exists to remove is still present until a
+  follow-up switches the call site over.
+- **Known limitation:** the reformats are not wired into any compressor chain. They are
+  the lossless half that restricted traffic should receive, and until they are wired,
+  subscription and OAuth traffic still gets no compression at all.
+- **Known limitation:** gap row P4 (offloads) is not filed as done. Moving bulky
+  sub-values to CCR and leaving markers is what `SmartCrusher`, `LogCompressor`,
+  `SearchCompressor` and `DiffCompressor` already do; a separate offload layer would be
+  a second name for the same mechanism.
+
 ## The OpenAI Responses API
 **2026-08-03** · gap rows X7, X12
 
