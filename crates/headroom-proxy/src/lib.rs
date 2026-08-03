@@ -21,5 +21,6 @@ pub mod frozen;
 pub mod headers;
 pub mod health;
 pub mod server;
+pub mod sse;
 
 pub use config::Config;
