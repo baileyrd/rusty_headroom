@@ -6,8 +6,8 @@ the crate starts publishing releases.
 
 ---
 
-## Bootstrap the repo with the standard governance file set
-**2026-08-03**
+## PR #1 — Bootstrap the repo with the standard governance file set
+**2026-08-03** · [#1](https://github.com/baileyrd/rusty_headroom/pull/1)
 
 - **Added:** the full standard governance set — four PR templates (feature,
   bug_fix, docs, chore), two issue templates plus `config.yml`, README,
