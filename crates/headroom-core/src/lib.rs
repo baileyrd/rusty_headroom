@@ -50,6 +50,7 @@ pub mod diff_compressor;
 pub mod error;
 pub mod live_zone;
 pub mod log_compressor;
+pub mod memory;
 pub mod output_shaping;
 pub mod search_compressor;
 pub mod signals;
