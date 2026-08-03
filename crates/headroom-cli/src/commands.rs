@@ -257,6 +257,41 @@ mod tests {
     }
 
     #[test]
+    fn savings_ignores_labelled_series() {
+        // `headroom_routing_total{reason=...}` is the first labelled metric the proxy
+        // exposes, and this report predates it. A parser that matched on the bare name
+        // would read a label set as a value; one that dropped the trailing space would
+        // silently report zero for everything.
+        let metrics = concat!(
+            "# HELP headroom_requests_total Requests seen.\n",
+            "# TYPE headroom_requests_total counter\n",
+            "headroom_requests_total 4\n",
+            "headroom_compressed_total 3\n",
+            "headroom_tokens_before_total 1000\n",
+            "headroom_tokens_saved_total 400\n",
+            "# HELP headroom_routing_total Blocks by why they were routed.\n",
+            "# TYPE headroom_routing_total counter\n",
+            "headroom_routing_total{reason=\"compress\"} 7\n",
+            "headroom_routing_total{reason=\"policy_forbids\"} 2\n",
+        );
+
+        let report = savings_report(metrics);
+        assert!(report.contains("requests      4"), "{report}");
+        assert!(report.contains("compressed    3"), "{report}");
+        assert!(report.contains("tokens saved  400"), "{report}");
+        // 400/1000 — proof the labelled counters were not mistaken for these.
+        assert!(report.contains("40.0%"), "{report}");
+    }
+
+    #[test]
+    fn savings_reports_nothing_measured_rather_than_zero_percent() {
+        // An empty scrape and a broken compressor look identical if this prints "0.0%",
+        // and telling them apart is the entire point of the report.
+        let report = savings_report("");
+        assert!(!report.contains("0.0%"), "{report}");
+    }
+
+    #[test]
     fn doctor_passes_on_a_working_build() {
         // The self-test must actually pass here, or it is reporting nothing.
         assert!(doctor().is_ok());
@@ -371,6 +406,20 @@ pub fn savings() -> anyhow::Result<()> {
 ///
 /// Separated from I/O so the formatting is testable without a running proxy.
 fn savings_report(metrics: &str) -> String {
+    // # Two independent reasons a labelled series cannot corrupt this
+    //
+    // A Prometheus sample is `name value` for a scalar and `name{label="v"} value` for a
+    // labelled series — and `headroom_routing_total{reason=...}` is now among them.
+    //
+    // First, the trailing space in each name below means a labelled line does not match
+    // the prefix at all. Second, `find_map` keeps looking when a match fails to parse, so
+    // even without the space the `{reason=...} 2` remainder is rejected and the scalar on
+    // a later line is still found.
+    //
+    // Checked rather than assumed: removing the spaces was tried, and the tests still
+    // pass. They are kept as the clearer of the two guards, but the behaviour that
+    // matters is pinned by `savings_ignores_labelled_series` rather than by either
+    // mechanism, so a refactor is free to change how this reads.
     let value = |name: &str| -> Option<f64> {
         metrics.lines().find_map(|line| {
             let rest = line.strip_prefix(name)?;

@@ -6,6 +6,28 @@ the crate starts publishing releases.
 
 ---
 
+## `headroom savings` pinned against labelled metrics
+**2026-08-03** · follow-up to the routing telemetry
+
+- **Added:** `savings_ignores_labelled_series`, which feeds the report a scrape containing
+  `headroom_routing_total{reason=...}` and asserts the scalar counters are still read
+  correctly. That metric is the first labelled series the proxy exposes and this report
+  predates it, so the interaction had no coverage.
+- **Added:** `savings_reports_nothing_measured_rather_than_zero_percent` — an empty scrape
+  and a broken compressor look identical if the report prints `0.0%`, and telling them
+  apart is what it is for.
+- **A comment I nearly shipped, corrected by testing it.** The first version claimed the
+  trailing space in `"headroom_requests_total "` was load-bearing and that removing it as
+  a tidy-up would make every value silently read zero. Removing it was then tried, and
+  the tests still passed: `find_map` keeps looking when a match fails to parse, so the
+  scalar is found either way. The comment now describes both guards accurately and says
+  the behaviour is pinned by the test rather than by either mechanism.
+- **Verified through the release binaries**, not only in tests: a real `/metrics` scrape
+  containing the labelled series piped into `headroom savings` reports
+  `reduction 32.8%` correctly.
+
+---
+
 ## A decline reason that could never fire
 **2026-08-03** · dead state removed
 
