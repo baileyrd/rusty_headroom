@@ -1082,3 +1082,42 @@ is the only evidence anything was set at all.
 
 **Would change if:** the endpoint grows an explicit way to express "replace everything", at
 which point `{}` could mean that again — deliberately, and with a test.
+
+---
+
+## D35 — the CCR round trip is verified across processes, and the two names that make it work are pinned
+
+**Decision:** add audit check 13, comparing `headroom-mcp`'s CCR environment-variable
+literals against `headroom-proxy`'s constants.
+
+CCR's promise, in README.md, is that compression is *"a bet that can be unwound"*. The
+write half runs in the proxy and the read half in the MCP server — a different process,
+often started separately, sometimes after the proxy has restarted. CONTRIBUTING's second
+lesson is precisely that a self-consistency test proves nothing across that boundary.
+
+**Verified the hard way, on release binaries.** The proxy, configured with a
+`HEADROOM_CCR_DIR`, compressed a 21-message request and emitted
+`<<ccr:3e6aa03878452e4b854f0feeb6a7c835>>`. The proxy was **stopped**. The MCP binary was
+then started against the same directory and asked for that hash over stdio; it returned the
+original tool result. The bet unwinds, across a process boundary and across a shutdown.
+
+**What is not guaranteed by construction.** `headroom-mcp` cannot depend on
+`headroom-proxy`, so it carries its own `"HEADROOM_CCR_DIR"` and `"HEADROOM_REDIS_URL"`
+literals. That is a second copy of a decision — check 6's subject, in a place check 6
+cannot see. The drift would be silent and total: rename the proxy's constant and the MCP
+binary reads a variable nobody sets, falls back to memory, and answers "not found" for
+every marker the proxy ever wrote, while both processes start cleanly and report nothing
+wrong. The model is simply told the content is gone.
+
+Check 13 keeps the two names together. Verified by mutation: renaming `CCR_DIR` to
+`HEADROOM_CCR_DIRECTORY` fails it with *"every marker would be unredeemable"*, exit 1.
+
+**Not turned into a cargo test.** A real two-binary test cannot use `CARGO_BIN_EXE_` across
+crates, and simulating it inside one process is the self-consistency trap the exercise
+exists to avoid. The property is instead held by three things that are each checkable:
+`ContentHash`'s format pinned to a literal in `ccr::hash`, the store layout living in
+`headroom-core` rather than being reimplemented per binary, and check 13 on the variable
+names.
+
+**Would change if:** a third binary grows a CCR store. It would need adding to check 13
+rather than being trusted to copy the strings correctly.
