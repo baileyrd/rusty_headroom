@@ -24,9 +24,6 @@ pub enum Declined {
     /// Compression ran but did not reduce the token count, so invariant I5
     /// requires forwarding the original.
     NotSmaller,
-    /// The block sits in the frozen prefix (index `< frozen_message_count`) and is
-    /// therefore untouchable under invariant I3.
-    OutsideLiveZone,
     /// The block carries a signature, encrypted content, or redacted thinking data,
     /// all of which are passthrough-only under invariant I8.
     Sacrosanct,
@@ -38,7 +35,6 @@ impl fmt::Display for Declined {
             Self::BelowThreshold => "content is below the compression size threshold",
             Self::WrongContentType => "content type is not handled by this transform",
             Self::NotSmaller => "compression did not reduce the token count",
-            Self::OutsideLiveZone => "block is in the frozen prefix and cannot be modified",
             Self::Sacrosanct => "block is signed, encrypted, or redacted and is passthrough-only",
         };
         f.write_str(reason)
@@ -155,7 +151,6 @@ mod tests {
             Declined::BelowThreshold,
             Declined::WrongContentType,
             Declined::NotSmaller,
-            Declined::OutsideLiveZone,
             Declined::Sacrosanct,
         ];
         let rendered: Vec<String> = all.iter().map(|d| d.to_string()).collect();
