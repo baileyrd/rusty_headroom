@@ -24,7 +24,7 @@ fn read_stdin() -> anyhow::Result<String> {
 }
 
 /// `headroom compress`.
-pub fn compress(dry_run: bool) -> anyhow::Result<()> {
+pub fn compress(dry_run: bool, kind: BlockKind) -> anyhow::Result<()> {
     let content = read_stdin()?;
 
     // Routed through the same `Orchestrator` the proxy uses. This command used to carry
@@ -43,8 +43,12 @@ pub fn compress(dry_run: bool) -> anyhow::Result<()> {
     let before = estimator.count(&content);
     let detection = detect(content.as_bytes());
 
-    let mut block = Block::new(BlockKind::Text, content.clone());
-    let compressed = match orchestrator.transform_for(&content, policy, model) {
+    let mut block = Block::new(kind, content.clone());
+    // `transform_for_block`, not `transform_for`. This command used to build a text block
+    // and then ask a question that ignores block kind, so it summarized prose that
+    // `headroom inspect` — in this same binary, a few lines down — correctly reports as
+    // declined. The store here dies with the process, so that summary was unrecoverable.
+    let compressed = match orchestrator.transform_for_block(&block, policy, model) {
         Some(transform) => validated_apply(transform, &mut block, &estimator)
             .map(|outcome| outcome.is_compressed())
             .unwrap_or(false),
@@ -512,6 +516,35 @@ mod tests {
     /// Not one long line, and not one line repeated: the summarizer works on a line
     /// budget and keeps what scores as notable, so uniform content gives it nothing to
     /// drop and would make a passing test prove the opposite of what it claims.
+    #[test]
+    fn compress_declines_typed_prose_and_inspect_agrees() {
+        // `headroom compress` used to build a text block and then route with a call that
+        // ignores block kind, so it summarized prose that `headroom inspect` — in this
+        // same binary — reports as declined. Two commands, one build, two answers about
+        // the same bytes. The store here dies with the process, so the summary was not
+        // recoverable either.
+        let prose = compressible_prose();
+        let orchestrator = orchestrator();
+
+        let as_tool_output = Block::new(BlockKind::ToolResult, prose.clone());
+        let as_text = Block::new(BlockKind::Text, prose.clone());
+
+        // The control: this content must reach a compressor as tool output, or declining
+        // it as text says nothing about the gate.
+        assert!(
+            orchestrator
+                .transform_for_block(&as_tool_output, payg(), "")
+                .is_some(),
+            "the sample does not compress at all, so this proves nothing"
+        );
+        assert!(
+            orchestrator
+                .transform_for_block(&as_text, payg(), "")
+                .is_none(),
+            "typed prose reached the summarizer"
+        );
+    }
+
     fn compressible_prose() -> String {
         (0..220)
             .map(|i| match i % 37 {

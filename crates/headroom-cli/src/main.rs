@@ -6,7 +6,7 @@
 mod commands;
 mod wrap;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 /// Context compression for AI agents.
 #[derive(Debug, Parser)]
@@ -14,6 +14,28 @@ use clap::{Parser, Subcommand};
 struct Cli {
     #[command(subcommand)]
     command: Command,
+}
+
+/// Where content handed to `headroom compress` came from.
+///
+/// Only the prose summarizer distinguishes them; every other content type compresses the
+/// same either way. See `Command::Compress`.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum Kind {
+    /// A command's output, a scraped page, a file dump. The default, because it is what
+    /// somebody piping into this command is nearly always holding.
+    ToolOutput,
+    /// Something a person wrote. The prose summarizer declines it.
+    Text,
+}
+
+impl From<Kind> for headroom_core::BlockKind {
+    fn from(kind: Kind) -> Self {
+        match kind {
+            Kind::ToolOutput => Self::ToolResult,
+            Kind::Text => Self::Text,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -25,6 +47,14 @@ enum Command {
         /// Report what would happen without emitting the compressed form.
         #[arg(long)]
         dry_run: bool,
+        /// Where the content came from.
+        ///
+        /// One compressor — the prose summarizer — runs only on tool output, because
+        /// `text` is what somebody typed and summarizing a person's own words is a
+        /// different act from summarizing a command's output. This store is discarded
+        /// when the process exits, so that summary would not be recoverable.
+        #[arg(long, value_enum, default_value_t = Kind::ToolOutput)]
+        kind: Kind,
     },
     /// Show what a piece of content is detected as, and why.
     Inspect,
@@ -109,7 +139,7 @@ fn main() -> std::process::ExitCode {
 
     let outcome = match cli.command {
         Command::Doctor => commands::doctor(),
-        Command::Compress { dry_run } => commands::compress(dry_run),
+        Command::Compress { dry_run, kind } => commands::compress(dry_run, kind.into()),
         Command::Inspect => commands::inspect(),
         Command::Env { proxy } => commands::env(&proxy),
         Command::Wrap {

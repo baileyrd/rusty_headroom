@@ -26,6 +26,7 @@ use headroom_core::auth_mode::{AuthMode, CompressionPolicy};
 use headroom_core::ccr::{handle_retrieve, CcrStore, Retrieval};
 use headroom_core::pipeline::Orchestrator;
 use headroom_core::tokenizer::{HeuristicEstimator, Tokenizer};
+use headroom_core::BlockKind;
 use serde_json::{json, Value};
 
 use crate::protocol::{failure, success, tool_result, ErrorCode, Request, PROTOCOL_VERSION};
@@ -93,7 +94,15 @@ impl McpServer {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "content": { "type": "string", "description": "The content to compress." }
+                        "content": { "type": "string", "description": "The content to compress." },
+                        "kind": {
+                            "type": "string",
+                            "enum": ["tool_output", "text"],
+                            "description": "Where the content came from. Defaults to \
+        tool_output. Pass text for something a person wrote: prose written by a person is \
+        summarized only on request, because summarizing somebody's own words back at them is a \
+        different act from condensing a command's output."
+                        }
                     },
                     "required": ["content"]
                 }
@@ -159,7 +168,21 @@ impl McpServer {
         // names, and it was the one nothing checked — see `tool_definitions`.
         match name {
             n if n == TOOL_NAMES[0] => match arguments.get("content").and_then(Value::as_str) {
-                Some(content) => success(id, self.compress(content)),
+                Some(content) => match arguments.get("kind").and_then(Value::as_str) {
+                    // Absent means tool output, which is what a model calling this is
+                    // nearly always holding. A value this build does not know is refused
+                    // rather than guessed: silently treating "Text" as tool output would
+                    // summarize the one thing the caller was asking to protect.
+                    None | Some("tool_output") => {
+                        success(id, self.compress(content, BlockKind::ToolResult))
+                    }
+                    Some("text") => success(id, self.compress(content, BlockKind::Text)),
+                    Some(other) => failure(
+                        id,
+                        ErrorCode::InvalidParams,
+                        &format!("unknown kind {other:?}; expected 'tool_output' or 'text'"),
+                    ),
+                },
                 None => failure(id, ErrorCode::InvalidParams, "missing 'content'"),
             },
             n if n == TOOL_NAMES[1] => match arguments.get("hash").and_then(Value::as_str) {
@@ -176,25 +199,26 @@ impl McpServer {
     }
 
     /// Compresses `content`, or explains why it was left alone.
-    fn compress(&self, content: &str) -> Value {
+    fn compress(&self, content: &str, kind: BlockKind) -> Value {
         // Pay-as-you-go: a tool call is the caller compressing their own content
         // deliberately, not a relayed request whose credential decides what is
         // permitted. The proxy applies the real policy to real traffic.
         let policy = CompressionPolicy::for_mode(AuthMode::PayAsYouGo);
-        let transform = self.orchestrator.transform_for(content, policy, "");
-
         let estimator = HeuristicEstimator::new();
         let before = estimator.count(content);
 
-        let Some(transform) = transform else {
+        // `transform_for_block`, not `transform_for`. This built a text block and then
+        // asked a question that ignores block kind, so it summarized prose the proxy
+        // declines — and the doc above says a model asking this tool "should get the
+        // number the proxy would".
+        let mut block = headroom_core::Block::new(kind, content.to_owned());
+        let Some(transform) = self.orchestrator.transform_for_block(&block, policy, "") else {
             // Returning the content unchanged rather than an error. The caller asked
             // for something smaller and gets something correct; a failure here would
             // make the tool look broken for the ordinary case of unremarkable input.
             return tool_result(content, false);
         };
 
-        let mut block =
-            headroom_core::Block::new(headroom_core::BlockKind::Text, content.to_owned());
         match headroom_core::validated_apply(transform, &mut block, &estimator) {
             Ok(outcome) if outcome.is_compressed() => {
                 let after = estimator.count(block.content());
@@ -495,5 +519,97 @@ mod tests {
             assert!(!line.contains('\n'), "framing broken for {}", req.method);
             serde_json::from_str::<Value>(&line).expect("parseable");
         }
+    }
+
+    #[test]
+    fn typed_text_is_not_summarized_but_tool_output_is() {
+        // This server used to build a text block and then route with a call that ignores
+        // block kind, so `headroom_compress` summarized prose the proxy declines — while
+        // its own doc says a model asking this tool "should get the number the proxy
+        // would". Three surfaces carried the same defect: this one, the CLI, and the
+        // Python binding.
+        let server = McpServer::new(Arc::new(InMemoryCcrStore::new()));
+        let prose: String = (0..300)
+            .map(|i| format!("The quick brown fox jumps over the lazy dog, sentence {i}.\n"))
+            .collect();
+
+        let compressed = |kind: Option<&str>| -> String {
+            let arguments = match kind {
+                Some(kind) => json!({ "content": prose, "kind": kind }),
+                None => json!({ "content": prose }),
+            };
+            let response = server
+                .handle(&call(TOOL_NAMES[0], arguments))
+                .expect("no response");
+            response["result"]["content"][0]["text"]
+                .as_str()
+                .expect("no text in the result")
+                .to_owned()
+        };
+
+        // The control. Without it a build that compresses nothing satisfies the rest.
+        let as_tool_output = compressed(Some("tool_output"));
+        assert!(
+            as_tool_output.len() < prose.len(),
+            "nothing compressed, so declining proves nothing"
+        );
+
+        assert_eq!(
+            compressed(Some("text")),
+            prose,
+            "typed text was summarized anyway"
+        );
+        assert_eq!(
+            compressed(None),
+            as_tool_output,
+            "an absent kind stopped meaning tool output"
+        );
+    }
+
+    #[test]
+    fn an_unknown_kind_is_refused_rather_than_guessed() {
+        // Treating an unrecognized spelling as tool output would summarize the one thing
+        // the caller was asking to protect.
+        let server = McpServer::new(Arc::new(InMemoryCcrStore::new()));
+        let response = server
+            .handle(&call(
+                TOOL_NAMES[0],
+                json!({ "content": "hello", "kind": "Text" }),
+            ))
+            .expect("no response");
+        assert!(response.get("error").is_some(), "a bad kind was accepted");
+    }
+
+    #[test]
+    fn the_advertised_schema_names_every_kind_the_handler_accepts() {
+        // A model can only pass what the schema offers. An enum that drifts from the
+        // match below is a capability nothing can reach — this repository's oldest
+        // failure, in the one place a model is actually reading.
+        let server = McpServer::new(Arc::new(InMemoryCcrStore::new()));
+        let tools = server
+            .handle(&request("tools/list", json!({})))
+            .expect("no response");
+
+        let schema = &tools["result"]["tools"][0]["inputSchema"]["properties"]["kind"]["enum"];
+        let advertised: Vec<&str> = schema
+            .as_array()
+            .expect("kind has no enum")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+
+        for kind in &advertised {
+            let response = server
+                .handle(&call(
+                    TOOL_NAMES[0],
+                    json!({ "content": "hello", "kind": kind }),
+                ))
+                .expect("no response");
+            assert!(
+                response.get("error").is_none(),
+                "the schema advertises {kind:?} and the handler refuses it"
+            );
+        }
+        assert_eq!(advertised, ["tool_output", "text"]);
     }
 }
