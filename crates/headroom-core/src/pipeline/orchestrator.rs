@@ -86,6 +86,31 @@ impl Routing {
         matches!(self, Self::Compress { .. })
     }
 
+    /// Every string [`Routing::as_str`] can return.
+    ///
+    /// # Exported so telemetry does not copy it down
+    ///
+    /// The proxy's `Metrics` held its own array of these, hand-copied, with a comment
+    /// saying they were the strings this function produces. Nothing checked that, and the
+    /// failure mode is quiet by construction: `record_routing` puts an unrecognized reason
+    /// in an `other` slot, so renaming one variant here — or adding a seventh — would
+    /// merge a whole category into `other` while every test stayed green and the
+    /// dashboard panel for it went permanently empty.
+    ///
+    /// That is the same shape as `Declined::OutsideLiveZone`, which described a check
+    /// nothing could perform and so was a panel that could never fill.
+    ///
+    /// Pinned against `as_str` by `every_reason_is_in_reasons`, which the compiler will
+    /// not let go stale.
+    pub const REASONS: [&'static str; 6] = [
+        "compress",
+        "lossless",
+        "policy_forbids",
+        "unsafe",
+        "no_compressor",
+        "measured_useless",
+    ];
+
     /// A stable identifier, for telemetry.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -374,6 +399,67 @@ mod tests {
     use super::*;
     use crate::auth_mode::AuthMode;
     use crate::block::BlockKind;
+
+    #[test]
+    fn every_reason_is_in_reasons() {
+        // Three halves, and each catches a different way this goes stale.
+        //
+        // The match is exhaustive, so adding a `Routing` variant stops this file
+        // compiling until somebody comes here — and what they find is this comment
+        // telling them to extend `REASONS` too.
+        //
+        // The `contains` catches a variant whose string was changed without `REASONS`
+        // being updated. The length check catches the reverse: a string left in `REASONS`
+        // that nothing produces, which as a metric is a label that is always zero and
+        // reads as "this never happens" rather than "this no longer exists".
+        let one_of_each = [
+            Routing::Compress {
+                content_type: ContentType::Json,
+            },
+            Routing::Lossless,
+            Routing::PolicyForbids,
+            Routing::Unsafe {
+                hazard: Hazard::TooLarge { bytes: 1 },
+            },
+            Routing::NoCompressor {
+                content_type: ContentType::Unknown,
+            },
+            Routing::MeasuredUseless {
+                content_type: ContentType::Json,
+            },
+        ];
+
+        let mut produced = Vec::new();
+        for routing in one_of_each {
+            match routing {
+                Routing::Compress { .. }
+                | Routing::Lossless
+                | Routing::PolicyForbids
+                | Routing::Unsafe { .. }
+                | Routing::NoCompressor { .. }
+                | Routing::MeasuredUseless { .. } => {}
+            }
+
+            assert!(
+                Routing::REASONS.contains(&routing.as_str()),
+                "`{}` is produced by as_str and missing from REASONS",
+                routing.as_str()
+            );
+            produced.push(routing.as_str());
+        }
+
+        produced.sort_unstable();
+        produced.dedup();
+        assert_eq!(
+            produced.len(),
+            Routing::REASONS.len(),
+            "REASONS carries a string nothing produces: {:?}",
+            Routing::REASONS
+                .iter()
+                .filter(|reason| !produced.contains(reason))
+                .collect::<Vec<_>>()
+        );
+    }
     use crate::ccr::InMemoryCcrStore;
 
     fn orchestrator() -> Orchestrator {

@@ -6,6 +6,29 @@ the crate starts publishing releases.
 
 ---
 
+## The routing-reason list stops being copied across the crate boundary
+**2026-08-03** · a telemetry panel that could have gone permanently empty
+
+- **The hole:** `Metrics` held its own array of the seven routing reasons, hand-copied,
+  with a comment saying they were what `Routing::as_str` produces. Nothing checked that.
+  The failure is quiet by construction — `record_routing` puts an unrecognized reason in
+  an `other` slot, so renaming a variant in `headroom-core`, or adding a seventh, would
+  merge a whole category into `other` while every test stayed green and the dashboard
+  panel for it went permanently empty.
+- Same shape as `Declined::OutsideLiveZone`, removed earlier for describing a check
+  nothing could perform: a panel that can never fill.
+- **Added:** `Routing::REASONS` in core. `ROUTING_REASONS` is now built from it in a const
+  block, with `other` appended in the proxy — `other` is not a routing outcome, it is this
+  counter's answer to a reason from a `headroom-core` that disagrees with it.
+- **Added:** `every_reason_is_in_reasons`, which catches all three ways this goes stale: an
+  exhaustive match the compiler will not let go stale on a new variant; a `contains` for a
+  renamed string; a length check for a string left in `REASONS` that nothing produces —
+  which as a metric is a label that is always zero and reads as "this never happens"
+  rather than "this no longer exists".
+- Verified by renaming a variant's string and watching the core test name it.
+
+---
+
 ## `headroom savings` is pinned to the names the proxy actually emits
 **2026-08-03** · a copy across a process boundary, where no compiler was watching
 
