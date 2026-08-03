@@ -896,6 +896,104 @@ mod tests {
         );
     }
 
+    /// Every path `router_with` registers, with the method it is registered under.
+    ///
+    /// Kept in step with the router by check 8 of `scripts/reachability-audit.sh`, which
+    /// reads the `.route(` calls out of this file and fails if one is missing here. A
+    /// hand-maintained copy of a list is exactly what this project keeps getting wrong,
+    /// and axum's `Router` cannot be enumerated, so the list is checked instead of shared.
+    const ROUTES: [(&str, &str); 10] = [
+        ("GET", "/health"),
+        ("GET", "/metrics"),
+        ("POST", "/v1/messages"),
+        ("POST", "/v1/chat/completions"),
+        ("POST", "/v1/responses"),
+        ("POST", "/v1/responses/compact"),
+        ("POST", "/v1/conversations"),
+        ("POST", "/admin/runtime-env"),
+        ("GET", "/v1/realtime"),
+        ("GET", "/ws"),
+    ];
+
+    /// A provider that answers 200 on *any* path.
+    ///
+    /// [`fake_provider`] registers `/v1/messages` only, so a relayed request to any other
+    /// path comes back 404 — from the provider, not from this proxy's router. The first
+    /// version of `every_declared_route_is_actually_reachable` used it and reported
+    /// `/v1/chat/completions` as unrouted, which was the fake upstream's 404 wearing the
+    /// proxy's clothes. A test that cannot tell those two apart is worse than no test,
+    /// because it accuses the wrong component.
+    async fn permissive_upstream() -> String {
+        let app = Router::new().fallback(|| async { (StatusCode::OK, "{}") });
+
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn every_declared_route_is_actually_reachable() {
+        // A route registered and never requested is a route a typo silently disables.
+        //
+        // `/v1/realtime` was in that state: the comment beside it says it exists because
+        // Codex speaks WebSocket and a proxy that only speaks HTTP breaks that client,
+        // and nothing in the suite ever asked the router for it. The `/ws` in
+        // `websocket.rs`'s tests is that test's own echo server, not this router's route
+        // — so both WebSocket paths were unverified while the handler underneath was
+        // well covered. A test proves a function works, not that anything routes to it.
+        //
+        // 404 and 405 are the failures worth catching. Everything else — 400 on a
+        // WebSocket path without upgrade headers, 502 with no upstream, 403 from the
+        // admin loopback guard — means the request reached a handler, which is the claim.
+        let base = permissive_upstream().await;
+
+        for (method, path) in ROUTES {
+            let response = router_with(AppState::new(&base))
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header("content-type", "application/json")
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert!(
+                response.status() != StatusCode::NOT_FOUND
+                    && response.status() != StatusCode::METHOD_NOT_ALLOWED,
+                "{method} {path} is registered and did not reach a handler: {}",
+                response.status()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unregistered_path_is_still_a_404() {
+        // Otherwise the test above passes because everything is reachable, including
+        // things that should not be.
+        let base = permissive_upstream().await;
+        let response = router_with(AppState::new(&base))
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/definitely-not-a-route")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
     // ---- operational guards ----
 
     #[tokio::test]
