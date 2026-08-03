@@ -6,6 +6,34 @@ the crate starts publishing releases.
 
 ---
 
+## SmartCrusher's outlier detection now has a test that spans the wiring
+**2026-08-03** · the detector had eighteen tests; nothing checked it was consulted
+
+- `outliers.rs` proves the detector works. Nothing proved it is reached on the path a
+  request actually takes — this repository's most-repeated failure, and detection is wired
+  to routing by a **threshold**, exactly the kind of thing that gets tuned without anyone
+  noticing that tuning it far enough turns a feature off.
+- Measured through the orchestrator, on 300 near-identical records with three planted
+  anomalies, one of each kind the detector distinguishes:
+
+  | planted | kind | survived |
+  | --- | --- | --- |
+  | `"quarantined": true` on record 42 | a field nothing else carries | yes |
+  | `"status":"error"` on record 137 | a rare enum value | yes |
+  | `"size":99999999` on record 201 | a numeric outlier | yes |
+
+  18991 bytes in, 523 out — 36× — with all three intact and the rest behind a CCR marker.
+- Both controls are in the test, because without them it would pass on a build that simply
+  kept everything: it asserts a uniform record *was* elided, and that the digest is at
+  least ten times smaller.
+- The second test checks the digest's arithmetic. `[300 records, 6 shown, 294 elided]` is a
+  claim made to a model that can no longer see the content, so it asserts the total, that
+  shown plus elided equals it, and that the stated number of records is actually printed.
+- Verified by mutation: blinding `rank_outliers` fails with *"the one record worth reading
+  is the one that went missing"*.
+
+---
+
 ## The CCR round trip, verified across processes; its two shared names now pinned
 **2026-08-03** · the headline promise checked the hard way, and the drift that would break it guarded
 
