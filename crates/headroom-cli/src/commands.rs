@@ -116,49 +116,133 @@ pub fn doctor() -> anyhow::Result<()> {
 
     // A self-test rather than a version dump. Reporting "installed correctly" without
     // exercising anything is how a broken install passes its own health check.
+    //
+    // # Routed through the orchestrator, not a compressor picked here
+    //
+    // This used to call `SmartCrusher` directly. That checks that *a* compressor works,
+    // which is not the question an operator is asking — they want to know whether the
+    // proxy will compress their traffic. The two came apart badly: the orchestrator had
+    // no arm for source code or prose for the whole life of the pipeline refactor, so the
+    // proxy forwarded both whole while this command reported "compression: ok".
+    //
+    // Going through `Orchestrator` means a routing gap shows up here, which is where
+    // somebody is looking when they suspect one.
     let store = Arc::new(InMemoryCcrStore::new());
-    let sample: String = format!(
-        "[{}]",
-        (0..80)
-            .map(|i| format!(r#"{{"id":{i},"kind":"file","ok":true}}"#))
-            .collect::<Vec<_>>()
-            .join(",")
-    );
-
+    let orchestrator = Orchestrator::new(store.clone());
+    let policy = CompressionPolicy::for_mode(AuthMode::PayAsYouGo);
     let estimator = HeuristicEstimator::new();
-    let mut block = Block::new(BlockKind::Text, sample.clone());
-    let crusher = SmartCrusher::new(store.clone());
 
-    match validated_apply(&crusher, &mut block, &estimator) {
-        Ok(outcome) if outcome.is_compressed() => {
-            println!("compression: ok ({} tokens saved)", outcome.tokens_saved());
-        }
-        Ok(_) => {
-            println!("compression: FAILED (sample did not compress)");
+    // One sample per content type the router can produce, so a type that reaches no
+    // compressor is named rather than averaged away by the ones that work.
+    let samples: Vec<(&str, String)> = vec![
+        (
+            "json",
+            format!(
+                "[{}]",
+                (0..80)
+                    .map(|i| format!(r#"{{"id":{i},"kind":"file","ok":true}}"#))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        ),
+        (
+            "log",
+            (0..200)
+                .map(|i| format!("2026-08-03T12:00:00Z INFO worker {i} handled a request"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        (
+            // Distinct functions rather than one repeated. A skeletonizer given the same
+            // body eighty times has nothing to remove that is not already redundant, so
+            // the sample would fail for a reason that says nothing about the install.
+            "code",
+            (0..60)
+                .map(|i| {
+                    format!(
+                        "/// Handles request number {i}.\n\
+                         pub fn handle_{i}(input: &str) -> Result<String, Error> {{\n\
+                         \x20   let parsed = parse_{i}(input)?;\n\
+                         \x20   let checked = validate(&parsed)?;\n\
+                         \x20   Ok(render(&checked))\n\
+                         }}\n"
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        (
+            // Lines, not one long string. The summarizer works on a line budget, so a
+            // single 24 KB line is one line and is left alone — which would read as a
+            // broken install rather than as a badly chosen sample.
+            "prose",
+            (0..300)
+                .map(|i| format!("The quick brown fox jumps over the lazy dog, sentence {i}."))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+    ];
+
+    // Kept for the retrieval check below: whichever sample compressed first, and what it
+    // originally said.
+    let mut retrievable: Option<(String, String)> = None;
+
+    for (label, sample) in &samples {
+        let detected = detect(sample.as_bytes()).content_type;
+
+        let Some(transform) = orchestrator.transform_for(sample, policy, "") else {
+            println!("compression ({label}): FAILED (detected {detected}, reached no compressor)");
             problems += 1;
-        }
-        Err(err) => {
-            println!("compression: FAILED ({err})");
-            problems += 1;
+            continue;
+        };
+
+        let mut block = Block::new(BlockKind::Text, sample.clone());
+        match validated_apply(transform, &mut block, &estimator) {
+            Ok(outcome) if outcome.is_compressed() => {
+                println!(
+                    "compression ({label}): ok ({} tokens saved via {})",
+                    outcome.tokens_saved(),
+                    transform.name()
+                );
+                if retrievable.is_none() {
+                    retrievable = Some((block.content().to_owned(), sample.clone()));
+                }
+            }
+            Ok(_) => {
+                println!("compression ({label}): FAILED (sample did not compress)");
+                problems += 1;
+            }
+            Err(err) => {
+                println!("compression ({label}): FAILED ({err})");
+                problems += 1;
+            }
         }
     }
 
     // Retrieval is the half that makes lossy compression safe, so a doctor that only
     // checked compression would pass on an install where nothing is recoverable.
-    match headroom_core::ccr::find_markers(block.content()).first() {
-        Some(hash) => match store.get(*hash) {
-            Ok(Some(bytes)) if bytes == sample.as_bytes() => println!("retrieval: ok"),
-            Ok(Some(_)) => {
-                println!("retrieval: FAILED (content did not round-trip)");
-                problems += 1;
+    match retrievable {
+        Some((compressed, original)) => {
+            match headroom_core::ccr::find_markers(&compressed).first() {
+                Some(hash) => match store.get(*hash) {
+                    Ok(Some(bytes)) if bytes == original.as_bytes() => println!("retrieval: ok"),
+                    Ok(Some(_)) => {
+                        println!("retrieval: FAILED (content did not round-trip)");
+                        problems += 1;
+                    }
+                    _ => {
+                        println!("retrieval: FAILED (marker resolved to nothing)");
+                        problems += 1;
+                    }
+                },
+                None => {
+                    println!("retrieval: FAILED (no marker emitted)");
+                    problems += 1;
+                }
             }
-            _ => {
-                println!("retrieval: FAILED (marker resolved to nothing)");
-                problems += 1;
-            }
-        },
+        }
         None => {
-            println!("retrieval: FAILED (no marker emitted)");
+            println!("retrieval: FAILED (nothing compressed, so retrieval was untested)");
             problems += 1;
         }
     }

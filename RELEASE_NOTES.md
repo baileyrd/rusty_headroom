@@ -6,6 +6,29 @@ the crate starts publishing releases.
 
 ---
 
+## `headroom doctor` checks the router, not a compressor it picked
+**2026-08-03** · the self-test was the fourth routing table
+
+- **Fixed:** `doctor` called `SmartCrusher` directly. That checks *a* compressor works,
+  which is not the question an operator is asking — they want to know whether the proxy
+  will compress their traffic. It reported **"compression: ok" for the entire period the
+  proxy compressed neither code nor prose** (#82, #84).
+- **Changed:** routed through `Orchestrator`, with one sample per content type the router
+  can produce, so a type that reaches no compressor is named rather than averaged away by
+  the ones that work.
+- **Verified to catch the real defect:** deleting the `ContentType::Code` arm gives
+  `compression (code): FAILED (detected code, reached no compressor)` and a non-zero exit.
+- **Two bad samples of mine, caught by the tool itself:** the first prose sample was one
+  24 KB line — the summarizer works on a line budget, so one line is left alone — and the
+  first code sample repeated a single function, which a skeletonizer cannot usefully
+  shrink. Both would have read as a broken install rather than a badly chosen sample. The
+  new ones are varied and multi-line, with the reasoning in a comment beside each.
+- **This was the fourth copy of "which compressor to use."** #82 collapsed three; the
+  health check had a fourth, and it was the one an operator consults when they suspect the
+  first three.
+
+---
+
 ## `headroom init` generated a config that misdescribed itself
 **2026-08-03** · the same false claim, one layer further out
 
