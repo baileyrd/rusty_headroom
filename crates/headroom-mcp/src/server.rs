@@ -69,10 +69,24 @@ impl McpServer {
     }
 
     /// The tool definitions advertised to the client.
+    ///
+    /// # Names come from [`TOOL_NAMES`], not from literals here
+    ///
+    /// There were three lists of these names: this one, `TOOL_NAMES`, and `call_tool`'s
+    /// match arms. One test tied the first two together and nothing tied the third, so
+    /// renaming a tool in the advertised set left the dispatcher answering `unknown tool`
+    /// for a tool `tools/list` had just offered — with the whole workspace suite green,
+    /// because every test called the tools by their old literal names and the dispatcher
+    /// still knew those.
+    ///
+    /// Checked: renaming `headroom_compress` here and in `TOOL_NAMES` produced a server
+    /// that advertised `headroom_squash` and answered
+    /// `{"code":-32602,"message":"unknown tool: headroom_squash"}` when asked for it.
+    /// `every_advertised_tool_can_actually_be_called` is what closes the dispatch half.
     pub fn tool_definitions(&self) -> Value {
         json!([
             {
-                "name": "headroom_compress",
+                "name": TOOL_NAMES[0],
                 "description": "Compress bulky content — JSON, logs, search results, diffs, or \
         source code — into a much smaller form that preserves what matters. The original is \
         retained and can be recovered with headroom_retrieve.",
@@ -85,7 +99,7 @@ impl McpServer {
                 }
             },
             {
-                "name": "headroom_retrieve",
+                "name": TOOL_NAMES[1],
                 "description": "Retrieve the full original content behind a <<ccr:HASH>> marker.",
                 "inputSchema": {
                     "type": "object",
@@ -96,7 +110,7 @@ impl McpServer {
                 }
             },
             {
-                "name": "headroom_stats",
+                "name": TOOL_NAMES[2],
                 "description": "Report how much this session has compressed.",
                 "inputSchema": { "type": "object", "properties": {} }
             }
@@ -140,16 +154,19 @@ impl McpServer {
 
         self.stats.calls.fetch_add(1, Ordering::Relaxed);
 
+        // Match guards rather than string literals, so the dispatcher and the advertised
+        // set cannot name different tools. A literal here was the third copy of these
+        // names, and it was the one nothing checked — see `tool_definitions`.
         match name {
-            "headroom_compress" => match arguments.get("content").and_then(Value::as_str) {
+            n if n == TOOL_NAMES[0] => match arguments.get("content").and_then(Value::as_str) {
                 Some(content) => success(id, self.compress(content)),
                 None => failure(id, ErrorCode::InvalidParams, "missing 'content'"),
             },
-            "headroom_retrieve" => match arguments.get("hash").and_then(Value::as_str) {
+            n if n == TOOL_NAMES[1] => match arguments.get("hash").and_then(Value::as_str) {
                 Some(hash) => success(id, self.retrieve(hash)),
                 None => failure(id, ErrorCode::InvalidParams, "missing 'hash'"),
             },
-            "headroom_stats" => success(id, tool_result(self.stats_report(), false)),
+            n if n == TOOL_NAMES[2] => success(id, tool_result(self.stats_report(), false)),
             other => failure(
                 id,
                 ErrorCode::InvalidParams,
@@ -280,6 +297,46 @@ mod tests {
 
         let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
         assert_eq!(names, TOOL_NAMES.to_vec());
+    }
+
+    #[test]
+    fn every_advertised_tool_can_actually_be_called() {
+        // The gap this closes. `tools/list` and the dispatcher held separate copies of
+        // these names, and only the advertised half was checked — so renaming a tool left
+        // the server offering something it then rejected as unknown, with the entire
+        // workspace suite green. Every test called the tools by their old literal names,
+        // and the dispatcher still knew those.
+        //
+        // Reproduced before fixing: the server advertised `headroom_squash` and answered
+        // `{"code":-32602,"message":"unknown tool: headroom_squash"}` when asked for it.
+        //
+        // Driven from `tools/list`'s own output rather than from `TOOL_NAMES`, because
+        // what a client can call is what the client was told about.
+        let server = server();
+        let listed = server.handle(&request("tools/list", json!({}))).unwrap();
+        let advertised: Vec<String> = listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_owned())
+            .collect();
+
+        assert!(!advertised.is_empty(), "nothing was advertised");
+
+        for name in advertised {
+            // No arguments: a tool that needs some answers "missing 'content'", which is
+            // a dispatched tool declining. What must not come back is "unknown tool",
+            // which is the dispatcher having never heard of something it just offered.
+            let response = server
+                .handle(&call(&name, json!({})))
+                .expect("tools/call returned no response");
+            let message = response["error"]["message"].as_str().unwrap_or_default();
+
+            assert!(
+                !message.starts_with("unknown tool"),
+                "`{name}` is advertised by tools/list and rejected by tools/call: {message}"
+            );
+        }
     }
 
     #[test]
