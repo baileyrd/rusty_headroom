@@ -19,6 +19,10 @@
 //! which is worse than not running at all — a lossy transform that has escaped its
 //! policy gate.
 
+use crate::block::Block;
+use crate::error::{Declined, Error, Result};
+use crate::transform::{LosslessTransform, Transform};
+
 /// Removes insignificant whitespace from JSON.
 ///
 /// Returns `None` when the input is not JSON this function is confident about, rather
@@ -271,3 +275,54 @@ mod tests {
         assert_eq!(tidy_lines(input).unwrap(), "日本語\n😀\ncafé");
     }
 }
+
+/// The lossless reformatter, as a [`Transform`].
+///
+/// # Why this is the transform restricted traffic gets
+///
+/// Every other compressor in this crate is lossy and gated behind
+/// [`CompressionPolicy::lossy_transforms`], so subscription and OAuth traffic received
+/// no compression at all. This one removes only bytes that carry no information, which
+/// makes it safe on every auth mode — and it is the difference between "restricted
+/// means less compression" and "restricted means none".
+///
+/// # It is still bounded by invariant I5
+///
+/// The reduction is small: minification saves the whitespace a pretty-printer added,
+/// which on already-minified content is nothing. The transform declines rather than
+/// returning an unchanged block, so `validated_apply` never rebuilds a body for a
+/// zero-byte saving — which under invariant I1 would cost a cache miss to gain nothing.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Reformatter;
+
+impl Reformatter {
+    /// Creates the reformatter.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Transform for Reformatter {
+    fn name(&self) -> &'static str {
+        "reformatter"
+    }
+
+    fn apply(&self, block: &mut Block) -> Result<()> {
+        // Sacrosanct content is excluded here as well as by the live-zone dispatcher.
+        // Whitespace in a signed thinking block is covered by the signature — removing
+        // it produces content the provider rejects as tampered-with, which is invariant
+        // I8 and is not made safe by the change being lossless.
+        if block.kind().is_sacrosanct() {
+            return Err(Error::Declined(Declined::Sacrosanct));
+        }
+
+        let reformatted = minify_json(block.content())
+            .or_else(|| tidy_lines(block.content()))
+            .ok_or(Error::Declined(Declined::NotSmaller))?;
+
+        *block.content_mut() = reformatted;
+        Ok(())
+    }
+}
+
+impl LosslessTransform for Reformatter {}

@@ -202,3 +202,28 @@ Taken: inject `reasoning_effort` on the OpenAI route only. Adjusting an existing
 
 **Would change if:** the budget adjustment is implemented for requests that already
 enable thinking, which is a strictly additive follow-up.
+
+## D14 — Lossless reformatting is permitted on OAuth but not on subscription
+**2026-08-03**
+
+Wiring the lossless reformatter, I first routed it for *all* restricted traffic on the
+reasoning that a meaning-preserving transform cannot violate I10. A property test —
+`a_restricted_policy_never_modifies_generated_input` — failed, and it was right to.
+
+Reflowing a request's whitespace preserves its decoded meaning and still changes the
+bytes a provider sees. That is exactly the fingerprint-class disclosure
+`may_strip_accept_encoding` is off for: a subscription CLI serializes its JSON a
+particular way, and traffic that has been reflowed is distinguishable from the same
+client running unproxied.
+
+Taken: `CompressionPolicy` gains an explicit `lossless_transforms` field.
+
+- **PayAsYouGo** — true. Nothing to protect.
+- **OAuth** — true. The hazard there is a modification exceeding the granted scope, and
+  a meaning-preserving change cannot exceed a scope.
+- **Subscription** — false. `compression_permitted()` now returns `false` for this mode,
+  which is the honest answer rather than a disappointing one: every transform this crate
+  has either rewrites content or reflows its bytes.
+
+**Would change if:** a transform appears that reduces tokens without altering a single
+byte of what the client sent, which is a contradiction in terms — so, in practice, not.

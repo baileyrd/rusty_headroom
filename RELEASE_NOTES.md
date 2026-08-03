@@ -6,6 +6,43 @@ the crate starts publishing releases.
 
 ---
 
+## OAuth traffic gets lossless compression; the proxy uses the orchestrator
+**2026-08-03** · clears two limitations from the pipeline change
+
+- **Added:** `Reformatter`, a `LosslessTransform`, routed by the orchestrator.
+- **Changed:** the proxy's `Compressors` is now a thin wrapper over
+  `pipeline::Orchestrator`, so the duplicated routing decision is gone.
+- **Added:** `CompressionPolicy::lossless_transforms`, and `compression_permitted()` now
+  returns `false` for subscription mode.
+- **Caught by a property test, and it was right:** the first version routed the
+  reformatter for *all* restricted traffic, on the reasoning that a meaning-preserving
+  transform cannot violate I10. `a_restricted_policy_never_modifies_generated_input`
+  failed. Reflowing whitespace preserves the decoded meaning and **still changes the
+  bytes a provider sees** — exactly the fingerprint-class disclosure
+  `may_strip_accept_encoding` is off for. A subscription CLI serializes its JSON a
+  particular way, and reflowed traffic is distinguishable from the same client running
+  unproxied.
+- **Design note:** the permission is now explicit per mode rather than inferred.
+  PayAsYouGo and **OAuth** permit lossless work — the OAuth hazard is a modification
+  exceeding the granted scope, and a meaning-preserving change cannot exceed a scope.
+  **Subscription permits neither**, and `compression_permitted()` says so.
+- **Design note:** that is the honest answer rather than a disappointing one. Every
+  transform this crate has either rewrites content or reflows its bytes, and both are
+  visible to a provider comparing proxied traffic against unproxied. Subscription mode
+  buys safety by giving up compression. See `DECISIONS.md` D14.
+- **Design note:** `Reformatter` declines rather than returning an unchanged block, so
+  `validated_apply` never rebuilds a body for a zero-byte saving — which under invariant
+  I1 would cost a cache miss to gain nothing.
+- **Design note:** `Reformatter` refuses sacrosanct blocks. Whitespace in a signed
+  thinking block is covered by the signature; removing it produces content the provider
+  rejects as tampered-with, and that is not made safe by the change being lossless.
+- **Design note:** the safety check now runs *before* the policy branch. Both branches
+  lead to a transform that walks the content, so a restricted request is not exempt from
+  being handed a pathological payload.
+- **Known limitation:** the reformatter runs only on live-zone blocks the compressors
+  would also have seen. A pretty-printed *frozen* message stays as it is, correctly —
+  rewriting it would invalidate the cached prefix, which is the whole point.
+
 ## The compression pipeline: orchestrator, safety, reformats
 **2026-08-03** · gap rows P3, P5, P6
 

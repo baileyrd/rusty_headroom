@@ -19,6 +19,7 @@ use crate::auth_mode::CompressionPolicy;
 use crate::block::Block;
 use crate::ccr::CcrStore;
 use crate::detection::{detect, ContentType};
+use crate::pipeline::reformats::Reformatter;
 use crate::pipeline::safety::{check, Hazard, Limits};
 use crate::transform::Transform;
 use crate::{DiffCompressor, LogCompressor, SearchCompressor, SmartCrusher};
@@ -31,12 +32,17 @@ pub enum Routing {
         /// What the content was detected as.
         content_type: ContentType,
     },
-    /// Forward unchanged: policy forbids lossy work.
+    /// Run the lossless reformatter only.
     ///
-    /// Distinguished from the other declines because it is not a property of the
-    /// content. The same block on pay-as-you-go traffic would compress, and an operator
-    /// reading telemetry needs to know the difference between "we could not" and "we
-    /// were not allowed to".
+    /// What OAuth traffic gets. Policy forbids lossy work, but reformatting preserves
+    /// the decoded meaning exactly, and the OAuth hazard is a modification exceeding
+    /// the granted scope — which a meaning-preserving change cannot do.
+    Lossless,
+    /// Forward unchanged: policy permits no transform at all.
+    ///
+    /// Subscription mode. Not a limitation of this crate — reflowing bytes is visible
+    /// to a provider comparing proxied traffic against unproxied, so subscription buys
+    /// safety by giving up compression.
     PolicyForbids,
     /// Forward unchanged: the payload would be unsafe or pointless to analyze.
     Unsafe {
@@ -51,8 +57,17 @@ pub enum Routing {
 }
 
 impl Routing {
-    /// Whether a compressor should run.
+    /// Whether any compressor should run.
     pub fn will_compress(self) -> bool {
+        matches!(self, Self::Compress { .. } | Self::Lossless)
+    }
+
+    /// Whether the transform that will run is lossy.
+    ///
+    /// Separate from [`Routing::will_compress`] because a caller enforcing I10 needs to
+    /// know *which* kind ran, and a single boolean would make "compressed" mean two
+    /// different things.
+    pub fn is_lossy(self) -> bool {
         matches!(self, Self::Compress { .. })
     }
 
@@ -60,6 +75,7 @@ impl Routing {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Compress { .. } => "compress",
+            Self::Lossless => "lossless",
             Self::PolicyForbids => "policy_forbids",
             Self::Unsafe { .. } => "unsafe",
             Self::NoCompressor { .. } => "no_compressor",
@@ -73,6 +89,7 @@ pub struct Orchestrator {
     log: LogCompressor,
     search: SearchCompressor,
     diff: DiffCompressor,
+    reformatter: Reformatter,
     limits: Limits,
 }
 
@@ -89,6 +106,7 @@ impl Orchestrator {
             log: LogCompressor::new(store.clone()),
             search: SearchCompressor::new(store.clone()),
             diff: DiffCompressor::new(store),
+            reformatter: Reformatter::new(),
             limits: Limits::default(),
         }
     }
@@ -122,17 +140,28 @@ impl Orchestrator {
     /// assert!(!orchestrator.route(&json, restricted).will_compress());
     /// ```
     pub fn route(&self, content: &str, policy: CompressionPolicy) -> Routing {
-        // First, and deliberately. Invariant I10 forbids lossy work on restricted
-        // traffic outright, so a restricted request should not pay for a safety scan
-        // and a content sniff to reach a conclusion policy already determined.
-        if !policy.lossy_transforms {
-            return Routing::PolicyForbids;
-        }
-
         let content_type = detect(content.as_bytes()).content_type;
 
+        // The safety check runs before the policy branch, because both branches lead to
+        // a transform that walks the content. A restricted request is not exempt from
+        // being handed a pathological payload.
         if let Some(hazard) = check(content, content_type, self.limits) {
             return Routing::Unsafe { hazard };
+        }
+
+        // OAuth traffic gets the lossless reformatter rather than nothing: the hazard
+        // there is a modification falling outside the granted scope, and a
+        // meaning-preserving reformat cannot exceed a scope.
+        //
+        // Subscription traffic gets neither, and that is deliberate. Reflowing the
+        // bytes of a request preserves its meaning but changes how the client *looks* —
+        // the same fingerprint-class disclosure that keeps `accept-encoding` untouched.
+        if !policy.lossy_transforms {
+            return if policy.lossless_transforms {
+                Routing::Lossless
+            } else {
+                Routing::PolicyForbids
+            };
         }
 
         match content_type {
@@ -158,6 +187,7 @@ impl Orchestrator {
     ) -> Option<&dyn Transform> {
         match self.route(content, policy) {
             Routing::Compress { content_type } => self.for_type(content_type),
+            Routing::Lossless => Some(&self.reformatter),
             _ => None,
         }
     }
@@ -228,30 +258,62 @@ mod tests {
     }
 
     #[test]
-    fn policy_is_checked_before_anything_else() {
-        // Invariant I10, and the cheapest possible answer. A restricted request should
-        // not pay for a safety scan and a content sniff to reach a conclusion policy
-        // already determined.
+    fn oauth_traffic_gets_the_lossless_reformatter_rather_than_nothing() {
+        // The OAuth hazard is a modification exceeding the granted scope, and a
+        // meaning-preserving reformat cannot exceed a scope.
         let orchestrator = orchestrator();
-        let restricted = CompressionPolicy::for_mode(AuthMode::Subscription);
+        let policy = CompressionPolicy::for_mode(AuthMode::OAuth);
+        let routing = orchestrator.route(&bulky_json(), policy);
 
-        // Even a payload that would fail the safety check reports the policy reason,
-        // which is what proves the ordering rather than merely suggesting it.
-        let deep = format!("{}1{}", "[".repeat(500), "]".repeat(500));
-        assert_eq!(
-            orchestrator.route(&deep, restricted),
-            Routing::PolicyForbids
-        );
+        assert_eq!(routing, Routing::Lossless);
+        assert!(routing.will_compress());
+        assert!(!routing.is_lossy(), "OAuth was routed lossy work");
     }
 
     #[test]
-    fn oauth_traffic_is_also_forbidden_lossy_work() {
+    fn subscription_traffic_gets_no_transform_at_all() {
+        // The tempting mistake this guards: "lossless preserves meaning, so it must be
+        // safe everywhere". Reflowing bytes is visible to a provider comparing proxied
+        // traffic against unproxied — the same fingerprint-class disclosure that keeps
+        // `accept-encoding` untouched on this mode.
         let orchestrator = orchestrator();
-        let oauth = CompressionPolicy::for_mode(AuthMode::OAuth);
+        let policy = CompressionPolicy::for_mode(AuthMode::Subscription);
+
         assert_eq!(
-            orchestrator.route(&bulky_json(), oauth),
+            orchestrator.route(&bulky_json(), policy),
             Routing::PolicyForbids
         );
+        assert!(orchestrator.transform_for(&bulky_json(), policy).is_none());
+    }
+
+    #[test]
+    fn a_restricted_request_is_still_protected_by_the_safety_check() {
+        // Both branches lead to a transform that walks the content, so a restricted
+        // request is not exempt from being handed a pathological payload.
+        let orchestrator = orchestrator();
+        let restricted = CompressionPolicy::for_mode(AuthMode::Subscription);
+        let deep = format!("{}1{}", "[".repeat(500), "]".repeat(500));
+
+        assert!(matches!(
+            orchestrator.route(&deep, restricted),
+            Routing::Unsafe { .. }
+        ));
+    }
+
+    #[test]
+    fn only_pay_as_you_go_is_routed_lossy_work() {
+        // Invariant I10, stated as the property rather than as three separate cases.
+        let orchestrator = orchestrator();
+
+        for mode in [AuthMode::Subscription, AuthMode::OAuth] {
+            assert!(
+                !orchestrator
+                    .route(&bulky_json(), CompressionPolicy::for_mode(mode))
+                    .is_lossy(),
+                "{mode:?}"
+            );
+        }
+        assert!(orchestrator.route(&bulky_json(), payg()).is_lossy());
     }
 
     #[test]

@@ -37,58 +37,46 @@ use headroom_core::auth_mode::CompressionPolicy;
 use headroom_core::block::{Block, BlockKind};
 use headroom_core::ccr::CcrStore;
 use headroom_core::conversation::{Conversation, Message, Role};
-use headroom_core::detection::{detect, ContentType};
 use headroom_core::live_zone::live_zone;
 use headroom_core::output_shaping::{self, Verbosity};
+use headroom_core::pipeline::{Orchestrator, Routing};
 use headroom_core::tokenizer::HeuristicEstimator;
 use headroom_core::validate::validated_apply;
-use headroom_core::{DiffCompressor, LogCompressor, SearchCompressor, SmartCrusher, Transform};
+use headroom_core::Transform;
 use serde_json::Value;
 
 use crate::body::FaithfulBody;
 use crate::frozen::frozen_message_count;
 
-/// The type-aware compressors, dispatched by content detection.
+/// The compressor set the proxy dispatches through.
 ///
-/// A local dispatcher rather than the general pipeline orchestrator, which is its own
-/// unimplemented gap row. When that lands this moves to `headroom-core` and the proxy
-/// calls it instead.
+/// A thin wrapper over [`Orchestrator`], which owns the routing decision. It used to be
+/// a private dispatcher here — meaning the CLI carried its own copy and the two could
+/// drift without anything failing. The decision now lives in `headroom-core`, so
+/// `headroom compress` and `POST /v1/messages` route identically by construction.
 pub struct Compressors {
-    smart_crusher: SmartCrusher,
-    log: LogCompressor,
-    search: SearchCompressor,
-    diff: DiffCompressor,
+    orchestrator: Orchestrator,
 }
 
 impl Compressors {
-    /// Builds the set, sharing one CCR store between them.
+    /// Builds the set, sharing one CCR store between every compressor.
     pub fn new(store: Arc<dyn CcrStore>) -> Self {
         Self {
-            smart_crusher: SmartCrusher::new(store.clone()),
-            log: LogCompressor::new(store.clone()),
-            search: SearchCompressor::new(store.clone()),
-            diff: DiffCompressor::new(store),
+            orchestrator: Orchestrator::new(store),
         }
     }
 
-    /// The compressor for `content` under `policy`, if any applies.
+    /// The transform for `content` under `policy`, if any applies.
     ///
-    /// Every compressor wired here is lossy, so a policy that forbids lossy transforms
-    /// routes nothing at all. That is invariant I10 enforced at the dispatch point
-    /// rather than trusted to each compressor.
+    /// Invariant I10 is enforced inside the orchestrator: restricted traffic is routed
+    /// the lossless reformatter, never a lossy compressor.
     fn route(&self, content: &str, policy: CompressionPolicy) -> Option<&dyn Transform> {
-        if !policy.lossy_transforms {
-            return None;
-        }
-        match detect(content.as_bytes()).content_type {
-            ContentType::Json => Some(&self.smart_crusher),
-            ContentType::Log => Some(&self.log),
-            ContentType::SearchResults => Some(&self.search),
-            ContentType::Diff => Some(&self.diff),
-            // Code and prose have no compressor wired here, and `Unknown` never gets
-            // one. Returning `None` forwards the block unchanged.
-            _ => None,
-        }
+        self.orchestrator.transform_for(content, policy)
+    }
+
+    /// Why `content` was routed as it was, for telemetry.
+    pub fn routing(&self, content: &str, policy: CompressionPolicy) -> Routing {
+        self.orchestrator.route(content, policy)
     }
 }
 
@@ -821,7 +809,75 @@ mod tests {
     }
 
     #[test]
-    fn an_oauth_policy_also_forbids_the_lossy_compressors() {
+    fn oauth_traffic_now_gets_lossless_compression() {
+        // Before this, OAuth traffic received *no* compression at all: every wired
+        // compressor was lossy, so the policy routed nothing. A meaning-preserving
+        // reformat cannot exceed the granted scope, which is the OAuth hazard — so
+        // OAuth now means less compression rather than none.
+        let records: Vec<String> = (0..120)
+            .map(|i| format!(r#"{{ \"path\" : \"src/m_{i}.rs\" , \"size\" : {i} }}"#))
+            .collect();
+        let source = format!(
+            r#"{{"model":"claude-opus-4","messages":[{{"role":"user","content":"q"}},{{"role":"assistant","content":"a"}},{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"t","content":"[ {} ]"}}]}}]}}"#,
+            records.join(" , ")
+        );
+
+        let oauth = CompressionPolicy::for_mode(headroom_core::AuthMode::OAuth);
+        let out = compress_request(source.as_bytes(), &compressors(), true, oauth);
+
+        assert!(
+            out.len() < source.len(),
+            "OAuth traffic got nothing: {} -> {}",
+            source.len(),
+            out.len()
+        );
+
+        // And subscription still gets nothing, deliberately — reflowing bytes is a
+        // fingerprint change, whatever it does to the meaning.
+        let subscription = CompressionPolicy::for_mode(headroom_core::AuthMode::Subscription);
+        let out = compress_request(source.as_bytes(), &compressors(), true, subscription);
+        assert_eq!(out.as_ref(), source.as_bytes());
+    }
+
+    #[test]
+    fn lossless_compression_does_not_change_what_the_model_reads() {
+        // The property that makes it safe on restricted traffic at all. Checked by
+        // comparing the *decoded* tool result, not the bytes — the bytes are supposed
+        // to differ.
+        let records: Vec<String> = (0..120)
+            .map(|i| format!(r#"{{ \"path\" : \"src/m_{i}.rs\" , \"size\" : {i} }}"#))
+            .collect();
+        let source = format!(
+            r#"{{"model":"claude-opus-4","messages":[{{"role":"user","content":"q"}},{{"role":"assistant","content":"a"}},{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"t","content":"[ {} ]"}}]}}]}}"#,
+            records.join(" , ")
+        );
+
+        let oauth = CompressionPolicy::for_mode(headroom_core::AuthMode::OAuth);
+        let out = compress_request(source.as_bytes(), &compressors(), true, oauth);
+
+        let before: Value = serde_json::from_str(&source).unwrap();
+        let after: Value = serde_json::from_slice(&out).unwrap();
+
+        let decode = |v: &Value| -> Value {
+            serde_json::from_str(v["messages"][2]["content"][0]["content"].as_str().unwrap())
+                .unwrap()
+        };
+        assert_eq!(
+            decode(&before),
+            decode(&after),
+            "the reformatter changed the decoded content"
+        );
+
+        // And the frozen prefix is still untouched, lossless or not.
+        assert_eq!(before["messages"][0], after["messages"][0]);
+        assert_eq!(before["system"], after["system"]);
+    }
+
+    #[test]
+    fn an_oauth_policy_still_forbids_the_lossy_compressors() {
+        // Lossless reformatting is permitted on OAuth; lossy compression is not. This
+        // fixture is already minified, so the reformatter declines and the body comes
+        // back byte-identical — which is what proves no *lossy* compressor ran.
         let source = request();
         let oauth = CompressionPolicy::for_mode(headroom_core::AuthMode::OAuth);
         let out = compress_request(source.as_bytes(), &compressors(), true, oauth);
