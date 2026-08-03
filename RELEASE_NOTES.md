@@ -6,6 +6,34 @@ the crate starts publishing releases.
 
 ---
 
+## SearchCompressor — grep result sets
+**2026-08-03** · closes [#29](https://github.com/baileyrd/rusty_headroom/issues/29)
+
+- **Added:** `SearchCompressor`, a `Transform` + `LossyTransform` that groups matches
+  under their file so each path is stated once instead of on every matching line.
+- **Added:** `parse_match` and the `Match` type as public helpers.
+- **Measured:** estimated token reduction of **66% on 100 matches across 20 files,
+  71% on 100 across 10 files, 84% on 336 matches**.
+- **Honest gap:** the reference reports **92%** on its 100-result code-search
+  benchmark. This lands at 66-71% on comparable input. The difference is deliberate
+  rather than a defect — the caps here keep 40 matches where the reference apparently
+  keeps far fewer, trading ratio for fidelity. `SearchConfig::max_total_matches` makes
+  it tunable, but the shipped default does not reach the reference's number.
+- **Design note:** line numbers are preserved for every shown match. They are how the
+  agent's next action gets targeted; losing them forces a re-search that costs more
+  than was saved.
+- **Design note:** match text is never truncated. Whole files are elided past a cap
+  instead, because the matched line is the thing being searched for and the path
+  repetition is the waste.
+- **Design note:** file order follows the search output rather than being sorted, so
+  whatever relevance ordering the tool applied survives.
+- **Known limitation:** grouping reorders. An interleaved original ordering is lost —
+  acceptable for search output, since ripgrep groups by file itself, but it is genuine
+  information loss.
+- **Known limitation:** file grouping is a linear scan per match, so cost is quadratic
+  in the number of distinct files. Fine at tool-output scale, wrong for very wide
+  result sets.
+
 ## LogCompressor — template extraction and repeat collapsing
 **2026-08-03** · closes [#28](https://github.com/baileyrd/rusty_headroom/issues/28)
 
