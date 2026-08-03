@@ -273,6 +273,7 @@ dependencies = [
 name = "headroom-mcp"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "headroom-core",
  "serde",
  "serde_json",
