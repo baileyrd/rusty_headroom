@@ -55,6 +55,27 @@ enum Command {
     },
     /// Summarize what the proxy has saved, reading its `/metrics` from stdin.
     Savings,
+    /// Measure compression throughput on this machine.
+    Perf {
+        /// How many compressions to time.
+        #[arg(long, default_value_t = 200)]
+        iterations: usize,
+    },
+    /// Print a ready-to-run local deployment.
+    Deploy {
+        /// Port the proxy should listen on.
+        #[arg(long, default_value_t = 8787)]
+        port: u16,
+        /// Provider to forward to.
+        #[arg(long, default_value = "https://api.anthropic.com")]
+        upstream: String,
+    },
+    /// Report the installed version and where to get a newer one.
+    Update {
+        /// Only report the version; do not explain the upgrade path.
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 fn main() -> std::process::ExitCode {
@@ -72,6 +93,9 @@ fn main() -> std::process::ExitCode {
         } => commands::wrap(&agent, &proxy, settings.as_deref()),
         Command::Unwrap { agent, settings } => commands::unwrap(&agent, settings.as_deref()),
         Command::Savings => commands::savings(),
+        Command::Perf { iterations } => commands::perf(iterations),
+        Command::Deploy { port, upstream } => commands::deploy(port, &upstream),
+        Command::Update { check } => commands::update(check),
     };
 
     match outcome {

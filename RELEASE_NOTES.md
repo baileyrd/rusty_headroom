@@ -6,6 +6,46 @@ the crate starts publishing releases.
 
 ---
 
+## CLI: perf, deploy, update
+**2026-08-03** · gap rows L4, L9, L11
+
+- **Added:** `headroom perf`, `headroom deploy`, `headroom update`.
+- **Measured on this machine:** 200-record payload, 13,691 bytes, **477 µs per call**
+  and 28.7 MB/s. Against a provider round trip of hundreds of milliseconds that is
+  invisible, which is the question `perf` exists to answer.
+- **Design note:** `perf` measures the *compressor*, not the proxy. A round trip to a
+  provider is hundreds of milliseconds and compression is microseconds, so an
+  end-to-end latency number would report the network and bury the only figure this
+  program controls.
+- **Design note:** `perf` discards a warm-up pass. The first iteration pays for
+  allocator growth and branch prediction that later ones do not, so including it reports
+  a throughput the machine never actually sustains.
+- **Design note:** `deploy` **prints** manifests rather than starting anything. A deploy
+  that daemonizes a process owns stopping it, restarting it on boot and rotating its
+  logs — and does all three worse than the service manager already on the machine.
+  Printing works the same on a host with no root.
+- **Design note, and the one with a test:** the compose service publishes on
+  `127.0.0.1:PORT:PORT`, never a bare `PORT:PORT`. The proxy forwards provider
+  credentials, so a template that binds every interface reintroduces exactly the
+  open-relay mistake `Config::default` exists to avoid — in a file people copy without
+  reading. Three tests cover it, plus one asserting no credential-shaped string appears
+  in any manifest, since deployment templates get pasted into shared docs.
+- **Design note:** `deploy` falls back to the bare binary name rather than guessing an
+  install prefix. A wrong absolute path in a unit file fails at boot, hours after anyone
+  was watching.
+- **Design note:** `update` reports the version and where to get a newer one; there is
+  **no self-replacing upgrade**. Doing it safely needs signature verification against a
+  key this program would have to ship and rotate; doing it unsafely turns any compromise
+  of the release host into arbitrary code execution on every install. A binary that
+  already holds provider credentials is the wrong one to give that capability.
+- **Known limitation:** `headroom learn` (L10) is not implemented. It mines *failed
+  sessions*, and there is no session-log format for it to read — inventing one to have
+  something to mine would be building the easy half of a feature.
+- **Known limitation:** `headroom init` (part of L13) is not implemented; `inspect` and
+  the introspection half already exist.
+- **Known limitation:** `perf` measures one payload shape. A machine that is fast on
+  record arrays and slow on prose would not show the difference here.
+
 ## Test infrastructure: simulators, invariant gates, fixtures, property tests
 **2026-08-03** · gap rows E1, E2, E3, E4
 

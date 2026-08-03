@@ -195,14 +195,14 @@ Every row is a gap: the target repo is empty, so all rows are new implementation
 | L1 | clap CLI skeleton + `--version` | fn | spec | all | `wiki/cli.md` | no | S | Subcommand tree. |
 | L2 | `headroom proxy` | fn | spec | all | README CLI | no | S | `--port`. Depends on X1, L1. |
 | L3 | `headroom doctor` | fn | spec | all | README CLI | no | M | Health/config/connectivity checks. |
-| L4 | `headroom deploy` | fn | spec | all | README CLI | no | M | Turnkey local deployment. |
+| L4 | `headroom deploy` | fn | spec | all | README CLI | no | M | Turnkey local deployment. Done — prints systemd/compose/direct manifests rather than daemonizing; compose publishes on loopback only, with a test. |
 | L5 | `headroom wrap` core + `claude` | fn | spec | all | README "Supported Agents" | no | L | Env-var injection + config rewrite. **Split** — framework + first agent. Done as `wrap::{Agent, wrap_settings_file}`. |
 | L6 | `headroom wrap` codex/cursor/aider | fn | spec | all | README | no | M | Depends on L5. Done; cursor reports as env-unsupported rather than printing no-op exports. |
 | L7 | `headroom wrap` cline/continue/goose/openhands | fn | spec | all | REALIGNMENT Phase G | no | M | Depends on L5. Done. |
 | L8 | `headroom unwrap` | fn | spec | all | README CLI | no | S | Must fully restore pre-wrap config. Depends on L5. Done — byte-exact restore from a whole-file backup, verified SHA-256 identical through the binary. |
-| L9 | `headroom perf` | fn | spec | all | README CLI | no | S | Latency/throughput metrics. |
+| L9 | `headroom perf` | fn | spec | all | README CLI | no | S | Latency/throughput metrics. Done — measures the compressor, not the network; warm-up pass discarded. |
 | L10 | `headroom learn` | fn | spec | all | `docs/failure-learning.mdx` | no | L | Mines failed sessions; `--verbosity`. |
-| L11 | `headroom update` | fn | spec | all | README CLI | no | M | `--check`, `--pre`; in-place upgrade. |
+| L11 | `headroom update` | fn | spec | all | README CLI | no | M | `--check`, `--pre`; in-place upgrade. `--check` done. In-place upgrade **deliberately not implemented** — a credential-holding binary is the wrong one to give a self-replacing updater. |
 | L12 | `headroom savings` / `output-savings` | fn | spec | all | `docs/savings.mdx` | no | M | Savings ledger reporting. Done — reads the proxy's `/metrics` exposition from stdin; no currency figure by design. |
 | L13 | `headroom init` / `inspect` / `tools` | fn | spec | all | `headroom/cli/` | no | M | Scaffolding + introspection helpers. |
 
