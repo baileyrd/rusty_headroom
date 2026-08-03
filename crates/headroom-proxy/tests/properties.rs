@@ -201,6 +201,107 @@ fn payg() -> CompressionPolicy {
     CompressionPolicy::for_mode(AuthMode::PayAsYouGo)
 }
 
+/// Generated content of one content type, large enough that a compressor will act on it.
+///
+/// # Why the sizes are deliberate
+///
+/// Every compressor holds an `AdaptiveSizer` and declines below its threshold — 1 KB for
+/// JSON, 2 KB for code, 5 KB for prose, 500 bytes for the rest. Generated content that
+/// does not clear the bar reaches a compressor and is handed straight back, so a property
+/// asserted over it is a property of *doing nothing*.
+///
+/// That is what these tests were. The I4 determinism generator produced random printable
+/// ASCII up to 500 characters: measured, all 200 cases detected as prose, and the prose
+/// threshold is 5120 bytes, so not one of them compressed. The property asserted that two
+/// no-ops agree. I10's generator had the same shape, and I5's covered JSON and logs by
+/// accident — half its cases were sub-threshold prose.
+///
+/// So each arm here is sized past its own threshold, and every test using it asserts that
+/// a real share of cases actually changed. A property that never triggers the behaviour
+/// it constrains passes forever and means nothing.
+fn compressible_shape(rng: &mut Rng) -> String {
+    match rng.below(6) {
+        0 => {
+            let records: Vec<String> = (0..40 + rng.below(200))
+                .map(|i| {
+                    format!(
+                        r#"{{"path":"src/f{i}.rs","size":{},"kind":"file","ok":true}}"#,
+                        rng.below(9999)
+                    )
+                })
+                .collect();
+            format!("[{}]", records.join(","))
+        }
+        1 => (0..30 + rng.below(200))
+            .map(|i| {
+                format!(
+                    "2026-01-01T00:00:{:02}Z INFO worker {} handled request {i} in {}ms",
+                    i % 60,
+                    i % 8,
+                    rng.below(500)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        2 => (0..40 + rng.below(120))
+            .map(|i| {
+                format!(
+                    "src/module_{}.rs:{}:    let parsed = parse(input)?;",
+                    i % 12,
+                    i + 1
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        3 => (0..20 + rng.below(60))
+            .map(|i| {
+                format!(
+                    "/// Handles request {i}.\n\
+                     pub fn handle_{i}(input: &str) -> Result<String, Error> {{\n\
+                     \x20   let parsed = parse_{i}(input)?;\n\
+                     \x20   let checked = validate(&parsed)?;\n\
+                     \x20   Ok(render(&checked))\n\
+                     }}\n"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        4 => {
+            // Long context runs either side of the change: eliding context beyond two
+            // lines is the whole transform, so tight hunks compress to nothing.
+            let context: String = (0..14)
+                .map(|line| format!(" \x20   let step_{line} = stage_{line}(&state);\n"))
+                .collect();
+            (0..6 + rng.below(12))
+                .map(|i| {
+                    format!(
+                        "diff --git a/src/m{i}.rs b/src/m{i}.rs\n\
+                         --- a/src/m{i}.rs\n\
+                         +++ b/src/m{i}.rs\n\
+                         @@ -1,32 +1,32 @@\n\
+                         {context}\
+                         -    let parsed = parse_old(input)?;\n\
+                         +    let parsed = parse_new(input)?;\n\
+                         {context}"
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("")
+        }
+        _ => (0..120 + rng.below(300))
+            .map(|i| {
+                if i % 29 == 0 {
+                    format!("ERROR: batch {i} failed validation: checksum mismatch.")
+                } else {
+                    "The worker acknowledged the message and kept polling without incident."
+                        .to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
 /// Builds a request whose newest message carries `content`.
 fn request_with(content: &str) -> String {
     let escaped = serde_json::to_string(content).unwrap();
@@ -218,24 +319,12 @@ fn compression_never_increases_the_token_count() {
     let compressors = compressors();
     let mut rng = Rng::new(0x5eed_0003);
 
+    let mut actually_compressed = 0usize;
     for _ in 0..400 {
-        // A mix of shapes: record arrays, log lines, prose, and noise.
-        let content = match rng.below(4) {
-            0 => {
-                let records: Vec<String> = (0..rng.below(200))
-                    .map(|i| format!(r#"{{"path":"f{i}.rs","size":{}}}"#, rng.below(9999)))
-                    .collect();
-                format!("[{}]", records.join(","))
-            }
-            1 => (0..rng.below(200))
-                .map(|i| format!("2026-01-01T00:00:{:02}Z INFO worker {i} ok", i % 60))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            2 => "lorem ipsum dolor sit amet ".repeat(rng.below(300)),
-            _ => (0..rng.below(400))
-                .map(|_| char::from(0x20 + rng.byte() % 0x5f))
-                .collect(),
-        };
+        // One of every content type that reaches a compressor, each past its own size
+        // threshold. This used to be four shapes of which half were sub-threshold prose,
+        // so code, diffs and search output were never covered at all.
+        let content = compressible_shape(&mut rng);
 
         let source = request_with(&content);
         let out = compress_request(source.as_bytes(), &compressors, true, payg());
@@ -248,7 +337,17 @@ fn compression_never_increases_the_token_count() {
             "compression inflated a payload: {before} -> {after} for {} bytes of shape",
             content.len()
         );
+        if out.as_ref() != source.as_bytes() {
+            actually_compressed += 1;
+        }
     }
+
+    // "Never increases" is satisfied by never changing anything, so the count is what
+    // makes the assertion above mean something.
+    assert!(
+        actually_compressed > 300,
+        "only {actually_compressed}/400 cases compressed, so I5 was barely tested"
+    );
 }
 
 #[test]
@@ -257,17 +356,32 @@ fn compression_is_deterministic_over_generated_input() {
     let compressors = compressors();
     let mut rng = Rng::new(0x5eed_0004);
 
+    let mut actually_compressed = 0usize;
     for _ in 0..200 {
-        let content: String = (0..rng.below(500))
-            .map(|_| char::from(0x20 + rng.byte() % 0x5f))
-            .collect();
-        let source = request_with(&content);
+        let source = request_with(&compressible_shape(&mut rng));
 
         let first = compress_request(source.as_bytes(), &compressors, true, payg()).into_owned();
         let again = compress_request(source.as_bytes(), &compressors, true, payg()).into_owned();
 
         assert_eq!(first, again, "compression was not deterministic");
+        if first != source.as_bytes() {
+            actually_compressed += 1;
+        }
     }
+
+    // The assertion above is trivially true when nothing compresses, and that is exactly
+    // what this test used to be: random printable ASCII up to 500 characters, all of it
+    // detected as prose, against a 5120-byte prose threshold. Not one case compressed, so
+    // for as long as it existed it compared two no-ops and passed.
+    //
+    // Determinism is the one invariant that genuinely differs per compressor — a
+    // `HashMap` iterated in the wrong place is nondeterministic in one compressor and not
+    // the others — so a generator that reaches none of them is the worst place to have
+    // this gap.
+    assert!(
+        actually_compressed > 150,
+        "only {actually_compressed}/200 cases compressed, so determinism was barely tested"
+    );
 }
 
 #[test]
@@ -300,11 +414,9 @@ fn a_restricted_policy_never_modifies_generated_input() {
     let restricted = CompressionPolicy::for_mode(AuthMode::Subscription);
     let mut rng = Rng::new(0x5eed_0006);
 
+    let mut would_have_compressed = 0usize;
     for _ in 0..400 {
-        let content: String = (0..rng.below(400))
-            .map(|_| char::from(0x20 + rng.byte() % 0x5f))
-            .collect();
-        let source = request_with(&content);
+        let source = request_with(&compressible_shape(&mut rng));
 
         let out = compress_request(source.as_bytes(), &compressors, true, restricted);
         assert_eq!(
@@ -312,5 +424,22 @@ fn a_restricted_policy_never_modifies_generated_input() {
             source.as_bytes(),
             "subscription traffic was modified"
         );
+
+        // The load-bearing half. "Subscription left this alone" says nothing unless
+        // something *would* have touched it — and this test used to generate random
+        // printable ASCII too short to clear any threshold, so pay-as-you-go would have
+        // left it alone as well. It asserted that a policy which forbids compression
+        // declines to compress the uncompressible.
+        if compress_request(source.as_bytes(), &compressors, true, payg()).as_ref()
+            != source.as_bytes()
+        {
+            would_have_compressed += 1;
+        }
     }
+
+    assert!(
+        would_have_compressed > 300,
+        "only {would_have_compressed}/400 cases were compressible at all, so I10 was \
+         barely tested"
+    );
 }
