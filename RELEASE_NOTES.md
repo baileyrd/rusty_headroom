@@ -6,6 +6,32 @@ the crate starts publishing releases.
 
 ---
 
+## The reachability audit becomes a script in CI
+**2026-08-03** · tooling
+
+- **Added:** `scripts/reachability-audit.sh`, run in CI ahead of the build. Four checks:
+  every detected content type reaches a compressor, every proxy module is referenced
+  from outside itself, every CLI command is dispatched, every declared environment
+  variable is read.
+- **Why:** five capabilities were shipped, tested, documented as done, and never called —
+  the SSE observers, the memory module, cache stabilization, the code compressor and the
+  prose compressors. Every one had passing tests. **A test proves a function works, not
+  that anything calls it.**
+- **Verified to bite:** deleting the `ContentType::Code` arm from the routing table
+  reproduces the #82 defect and the script fails. A check nobody has seen fail is not a
+  check.
+- **A false-positive bug, caught before it shipped.** The first version of check 4
+  searched for the variable's *string value* and reported all eleven as unread. An audit
+  that cries wolf is worse than no audit, because people learn to skip its output. It now
+  matches on the Rust constant name.
+- **Design note:** the script's header records *which* gaps motivated each check,
+  including why check 1 is phrased as it is — the first audit asked "is this referenced
+  outside its own file", which the code and prose compressors both passed, because the
+  CLI and MCP server referenced them. Reachable from somewhere is not reachable from the
+  request path.
+
+---
+
 ## The invariant gate covers I6 through I9
 **2026-08-03** · gap row E2, extended
 
