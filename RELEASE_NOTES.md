@@ -6,6 +6,29 @@ the crate starts publishing releases.
 
 ---
 
+## I1 now gates whitespace, which nothing did
+**2026-08-03** · mutation-testing the headline invariant
+
+- **Added:** `i1_insignificant_whitespace_survives_untouched`, and a hand-written
+  pretty-printed fixture carrying spacing no serializer in this build would choose.
+- **The gap:** `hostile_request` is fully compact, and every other fixture is built by
+  `serde_json`, which also emits compact JSON. So the entire suite could not distinguish
+  *forwarded the original bytes* from *re-serialized them and happened to match*. I1 is
+  the project's headline guarantee and its gate was blind to the one thing a `Value`
+  round-trip actually destroys.
+- **Why it matters in practice:** a client that pretty-prints its request bodies would
+  have missed the provider's cache on **every single request**, and this suite would have
+  stayed green through all of it.
+- **Demonstrated rather than asserted.** Forcing `compress_dialect` to rebuild a body it
+  had no edits for — semantically invisible, byte-visible — fails the new test and
+  **passes every other I1 test in the file**. That is the gap stated exactly.
+- **Three layered early returns** make that mutation hard to reach at all:
+  `edits.is_empty()`, `replacements.is_empty()`, and `rebuild`'s own. Removing any one
+  alone leaves the suite green, so the new test gates the outcome rather than any single
+  guard — and the doc comment says so instead of claiming more.
+
+---
+
 ## An I2 gate with a frozen prefix that is actually frozen
 **2026-08-03** · mutation-testing the existing suite
 

@@ -78,6 +78,65 @@ fn hostile_request() -> String {
     .to_owned()
 }
 
+/// A pretty-printed request with nothing worth compressing.
+///
+/// # The gap this closes
+///
+/// [`hostile_request`] is fully compact, and every other fixture here is built by
+/// `serde_json`, which also emits compact JSON. So the whole suite could not distinguish
+/// "forwarded the original bytes" from "re-serialized them and happened to match" —
+/// removing `rebuild`'s empty-replacements early return left every I1 test green.
+///
+/// Insignificant whitespace is exactly what a `Value` round-trip destroys, and a client
+/// that pretty-prints its request bodies would then miss the provider's cache on every
+/// single request while this suite stayed green.
+///
+/// # Demonstrated, not assumed
+///
+/// Forcing `compress_dialect` to rebuild a body it had no edits for — a change that is
+/// semantically invisible and byte-visible — fails this test and **passes every other I1
+/// test in the file**. That is the gap stated precisely: the compact fixtures cannot
+/// distinguish a rebuild from a passthrough, and this one can.
+///
+/// Three layered early returns make that mutation hard to reach in the first place —
+/// `edits.is_empty()`, `replacements.is_empty()`, and `rebuild`'s own. Removing any one
+/// of them alone leaves the suite green, so this test gates the *outcome* rather than any
+/// single guard.
+fn pretty_printed_request() -> String {
+    // Written by hand rather than through `serde_json::to_string_pretty`, because that
+    // would produce whatever *this* build's serializer emits — and the point is to carry
+    // spacing no serializer here would choose.
+    concat!(
+        "{\n",
+        "    \"model\" : \"claude-opus-4\",\n",
+        "    \"max_tokens\": 4096,\n",
+        "    \"system\":   \"You are a careful assistant.\",\n",
+        "    \"messages\": [\n",
+        "        { \"role\": \"user\",  \"content\": \"a short question\" }\n",
+        "    ]\n",
+        "}"
+    )
+    .to_owned()
+}
+
+#[tokio::test]
+async fn i1_insignificant_whitespace_survives_untouched() {
+    // The strongest statement of I1: not "parses the same" but "is the same bytes".
+    // A proxy that rebuilt this body would produce equal JSON and a different cache key.
+    let simulator = Simulator::anthropic().await.unwrap();
+    let source = pretty_printed_request();
+
+    through_proxy(&simulator, &source, "sk-ant-api03-x").await;
+    let received = simulator.recorder().last().expect("nothing arrived");
+
+    assert_eq!(
+        sha(&received.body),
+        sha(source.as_bytes()),
+        "the body was re-serialized:\n  sent: {source}\n  got:  {}",
+        received.text()
+    );
+}
+
 /// A request with a bulky live tool result and five frozen turns.
 fn compressible_request() -> String {
     let records: Vec<String> = (0..120)
