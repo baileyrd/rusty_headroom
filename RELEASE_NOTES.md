@@ -6,6 +6,49 @@ the crate starts publishing releases.
 
 ---
 
+## Cross-agent memory and shared context
+**2026-08-03** · gap rows Y1, Y2, Y3
+
+- **Added:** `headroom_core::memory` — `MemoryStore`, `Memory`, `Provenance`,
+  `inject_block`, and `SharedContext`.
+- **Design note, and the constraint the module is built around:** memory never goes in
+  the system prompt. The system prompt heads the cached prefix, and a memory store is
+  *designed* to change — so an agent that learns one fact per turn would invalidate the
+  cache every turn, paying full price for the entire conversation each time in exchange
+  for a sentence. Memory goes in the live-zone tail (invariant I2), where it costs a few
+  tokens on a message that was never cached and invalidates nothing.
+- **Design note:** `inject_block` renders context, not instructions. Phrasing memory as
+  a directive would invite a caller to put it where directives go — the system prompt —
+  which is the one place it must not be. A test asserts the block contains no "you
+  are"/"you must" phrasing.
+- **Design note:** dedup is content-addressed and exact. Content is whitespace-normalized
+  before hashing, so two agents writing the same sentence with different trailing
+  whitespace produce one entry — a content-addressed store that misses exact duplicates
+  has failed at its only distinctive job. The *stored* text is the original; normalization
+  computes a key, it does not edit what the agent said. A balancing test asserts
+  genuinely different facts stay apart.
+- **Design note:** provenance is a list, not a single value. When two agents
+  independently record the same fact, that agreement is the most useful signal the store
+  has — and one agent repeating itself five times is one observation seen five times,
+  not five observations. `corroborated()` distinguishes them, and recall ranks on it.
+- **Design note:** the store is a `BTreeMap` keyed on the content hash, and recall
+  tie-breaks on that key rather than relying on sort stability. Recall must be
+  deterministic (I4); a non-deterministic injection order would bust the very cache this
+  module is careful about.
+- **Design note:** `SharedContext` keys are namespaced with a unit separator rather than
+  `:` or `/`, both of which appear in real keys. Without it, `put("a", "b/c")` and
+  `put("a/b", "c")` collide — and a silent overwrite between two agents is far harder to
+  diagnose than a missing key. There is a test for the collision and one for a namespace
+  that is a prefix of another.
+- **Known limitation:** nothing in the proxy populates or injects from a `MemoryStore`.
+  The injection block is built to append to the live-zone tail exactly as the verbosity
+  note does, so the wiring is a small follow-up, but it is not done.
+- **Known limitation:** the store is in-memory only. Nothing persists across a restart,
+  which for a *cross-agent* memory store is a real gap rather than a detail — it works
+  within a process, not between runs.
+- **Known limitation:** no eviction. A long-lived process accumulates facts without
+  bound; `recall(limit)` bounds what is *injected*, not what is stored.
+
 ## Byte-faithful member insertion — cache key and effort now reach the provider
 **2026-08-03** · closes gap row X16, completes O2
 
