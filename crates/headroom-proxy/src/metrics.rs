@@ -14,6 +14,8 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use headroom_core::pipeline::Routing;
+
 /// Counters for one process.
 ///
 /// Atomics rather than a lock: these are written on every request and read rarely, and
@@ -32,27 +34,39 @@ pub struct Metrics {
     ///
     /// # Why a fixed array rather than a map
     ///
-    /// The reasons are a closed set — `Routing` has six variants and gaining a seventh
-    /// is a deliberate change to `headroom-core`. A map would add a lock or an atomic
-    /// hash on a path that runs per block, to model a dimension that cannot grow at
-    /// runtime.
+    /// The reasons are a closed set — gaining one is a deliberate change to
+    /// `headroom-core`, and the array is sized from `Routing::REASONS` so that change
+    /// carries here on its own. A map would add a lock or an atomic hash on a path that
+    /// runs per block, to model a dimension that cannot grow at runtime.
     routing: [AtomicU64; ROUTING_REASONS.len()],
 }
 
 /// Every reason a block can be routed, in the order the counters are stored.
 ///
-/// These are the strings `Routing::as_str` produces. A reason missing from this list is
-/// counted as `other`, which is visible in the output rather than silently dropped —
-/// telemetry that quietly loses a category is how a whole content type goes unnoticed.
-const ROUTING_REASONS: [&str; 7] = [
-    "compress",
-    "lossless",
-    "policy_forbids",
-    "unsafe",
-    "no_compressor",
-    "measured_useless",
-    "other",
-];
+/// # Built from `Routing::REASONS`, not copied from it
+///
+/// This was a hand-written array of seven strings with a comment saying they were what
+/// `Routing::as_str` produces. Nothing checked that, across a crate boundary, and the
+/// failure is quiet by construction: [`Metrics::record_routing`] puts an unrecognized
+/// reason in the `other` slot, so renaming a variant in `headroom-core` — or adding a
+/// seventh — would merge a whole category into `other` while every test stayed green and
+/// the dashboard panel for it went permanently empty.
+///
+/// `other` is appended here rather than living in core, because it is not a routing
+/// outcome. It is this counter's answer to a reason from a build of `headroom-core` that
+/// disagrees with this one — visible as a number rather than silently dropped.
+const ROUTING_REASONS: [&str; Routing::REASONS.len() + 1] = {
+    let mut reasons = [""; Routing::REASONS.len() + 1];
+    let mut index = 0;
+    // A `while` rather than an iterator: this runs in a const context, where `for` and
+    // `copy_from_slice` are not available.
+    while index < Routing::REASONS.len() {
+        reasons[index] = Routing::REASONS[index];
+        index += 1;
+    }
+    reasons[Routing::REASONS.len()] = "other";
+    reasons
+};
 
 impl Metrics {
     /// Creates zeroed counters.
