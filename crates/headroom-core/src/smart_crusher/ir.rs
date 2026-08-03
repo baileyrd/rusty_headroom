@@ -75,6 +75,38 @@ impl Shape {
         matches!(self, Self::Array { len, element } if *len >= 2 && element.is_some())
     }
 
+    /// How deeply this shape nests. A scalar is depth 1.
+    pub fn depth(&self) -> usize {
+        match self {
+            Self::Null | Self::Bool | Self::Number | Self::Str { .. } | Self::TooDeep => 1,
+            Self::Array { element, .. } => 1 + element.as_ref().map_or(0, |shape| shape.depth()),
+            Self::Object { fields } => {
+                1 + fields
+                    .iter()
+                    .map(|(_, shape)| shape.depth())
+                    .max()
+                    .unwrap_or(0)
+            }
+        }
+    }
+
+    /// Total bytes held in strings beneath this shape.
+    ///
+    /// Used to spot documents whose weight is prose rather than structure. Those have
+    /// nothing for a structural compressor to exploit and belong to CCR offload
+    /// instead.
+    pub fn string_bytes(&self) -> usize {
+        match self {
+            Self::Str { len } => *len,
+            Self::Null | Self::Bool | Self::Number | Self::TooDeep => 0,
+            Self::Array { len, element } => match element {
+                Some(shape) => len * shape.string_bytes(),
+                None => 0,
+            },
+            Self::Object { fields } => fields.iter().map(|(_, s)| s.string_bytes()).sum(),
+        }
+    }
+
     /// Number of leaf scalars beneath this shape.
     ///
     /// A rough proxy for how much a subtree costs in tokens, used to decide which
