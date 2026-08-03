@@ -206,6 +206,24 @@ which is equally readable either way.
 **Would change if:** the file becomes something an operator hand-edits regularly, where
 TOML's comment support and friendlier syntax would start to earn the dependency.
 
+> **Demonstrated end to end on 2026-08-03.** The reasoning above was argued from the data
+> flow, not observed, so it was tested with the release binaries across two real processes.
+>
+> `headroom learn` was run over a 14-request corpus of high-entropy content that
+> compresses to nothing, producing one entry with `worth_compressing: false`. A separate
+> `headroom-proxy` process was then started with `HEADROOM_RECOMMENDATIONS` pointing at
+> that file and sent one request of the same shape:
+>
+> | build | key `learn` wrote | proxy's routing verdict |
+> | --- | --- | --- |
+> | FNV-1a, as shipped | `payg\|claude-opus\|f9439d246d8721bc` | `measured_useless 1` |
+> | FNV-1a swapped for a per-process seed | `payg\|claude-opus\|e11f96ea63309f44` | `compress 1`, `measured_useless 0` |
+>
+> The second row is the failure this decision prevents, and it is silent: no error, no
+> warning, just a proxy re-compressing a shape it had already measured as useless while
+> every counter looks healthy. `the_fingerprint_is_pinned_to_a_literal` is what turns that
+> into a build failure.
+
 ## D13 — Effort routing does not enable Anthropic extended thinking
 **2026-08-03**
 

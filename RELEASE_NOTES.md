@@ -6,6 +6,24 @@ the crate starts publishing releases.
 
 ---
 
+## The cross-process claim, actually measured
+**2026-08-03** · evidence for D12
+
+- I flagged the `StructureHash` finding as **reasoned from the data flow, not observed**.
+  This closes that: the `learn` → proxy loop was run end to end with the release binaries
+  across two real processes.
+- **As shipped:** `headroom learn` wrote `payg|claude-opus|f9439d246d8721bc`; a separate
+  proxy process loaded the file and routed the same shape as `measured_useless`. The loop
+  closes across a process boundary, which nothing had ever demonstrated.
+- **With FNV-1a swapped for a per-process seed:** `learn` wrote
+  `payg|claude-opus|e11f96ea63309f44`, the proxy computed a different key, the lookup
+  missed, and it routed `compress` instead — **silently**. No error, no warning, a healthy
+  set of counters, and the measure-then-skip loop simply not working.
+- **D12 now carries the measurement** rather than the argument. The pin added in #94 is
+  what makes that a build failure instead of a production one.
+
+---
+
 ## Both lessons written into CONTRIBUTING
 **2026-08-03** · documentation
 
