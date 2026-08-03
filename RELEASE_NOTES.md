@@ -6,6 +6,25 @@ the crate starts publishing releases.
 
 ---
 
+## The reachability audit, recorded
+**2026-08-03** · documentation only
+
+- **Added:** a "Reachability audit" section to `gap-analysis.md`, naming the three
+  clusters that were marked done while nothing called them (S4/S5/X12, the `memory`
+  module, the `stabilization` module) and the PRs that closed each.
+- **Changed:** Y2 is now marked **library surface only**. `SharedContext` has no request
+  path and exposing it would mean a fourth MCP tool the reference does not have — the
+  same reasoning as D19, stated rather than left as an unexplained silence.
+- **Design note:** the audit is the deliverable, not just its findings. It checked every
+  public symbol in `headroom-core` and every module in `headroom-proxy` for references
+  *outside the defining file*, then verified the CLI's commands against `main.rs` and the
+  MCP tools against the tool table. It now comes back clean.
+- **Why this is written down:** the sweep that declared "97/97, none outstanding" was
+  measuring the wrong thing. A test proves a function works, not that anything calls it —
+  and three separate subsystems were shipped, tested, documented as done, and unreachable.
+
+---
+
 ## Cache stabilization reaches the request path, behind an opt-in
 **2026-08-03** · gap row X15 and invariant I7's normalization half
 

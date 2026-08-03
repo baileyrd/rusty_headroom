@@ -57,6 +57,28 @@ crates/
 
 ---
 
+## Reachability audit
+
+**2026-08-03.** Three rows in this table were marked done on the strength of "the module
+exists and is tested", when nothing on the request path called them. An audit over every
+public symbol in `headroom-core` and every module in `headroom-proxy` — checking for
+references *outside the defining file* — found them, and they are now wired:
+
+| Found unreachable | Closed by |
+| --- | --- |
+| S4, S5, X12 | #71 |
+| Y1–Y3 (`memory`) | #73 |
+| X15, I7 normalization (`stabilization`) | #75 |
+
+The audit is now clean: every remaining public symbol is either reached from a request,
+dispatched from the CLI (all commands verified against `main.rs`), listed in the MCP tool
+table (all three), used internally by a compressor that is itself reached, or documented
+here as deliberately library-only.
+
+The lesson is recorded rather than just the fix: *a test proves a function works, not that
+anything calls it.* This document now says what reaches each row, not merely that it was
+built.
+
 ## Gap table
 
 Every row is a gap: the target repo is empty, so all rows are new implementation.
@@ -211,7 +233,7 @@ Every row is a gap: the target repo is empty, so all rows are new implementation
 | ID | Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Y1 | cross-agent memory store | type | spec | all | `docs/memory.mdx` | no | L | Auto-dedup + provenance tracking. **Split candidate.** Done as `memory::MemoryStore` — content-addressed dedup, provenance list, corroboration. In-memory only; no persistence or eviction. |
-| Y2 | `SharedContext` put/get | fn | spec | all | `docs/shared-context.mdx` | no | M | Multi-agent shared context. Depends on Y1. Done as `memory::SharedContext`, namespaced with a unit separator so path-shaped keys cannot collide. |
+| Y2 | `SharedContext` put/get | fn | spec | all | `docs/shared-context.mdx` | no | M | Multi-agent shared context. Depends on Y1. Done as `memory::SharedContext`, namespaced with a unit separator so path-shaped keys cannot collide. **Library surface only** — no request path reaches it, and exposing it would mean a fourth MCP tool the reference does not have (same reasoning as D19). |
 | Y3 | live-zone-tail memory injection | fn | spec | all | REALIGNMENT §2.6 | no | M | Memory goes in the live-zone tail — never the system prompt (I2). Done as `memory::inject_block`, reached from the proxy via `memory::inject_append` in `compress_dialect` — appended to the newest user message's last text block, gated on the lossy permission (D19), fed by `HEADROOM_MEMORY` read once at startup. |
 
 ### Telemetry (TOIN)
