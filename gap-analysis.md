@@ -67,17 +67,17 @@ Every row is a gap: the target repo is empty, so all rows are new implementation
 
 | ID | Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| F1 | workspace scaffold | infra | spec | all | `Cargo.toml` workspace, `rust-toolchain.toml` | no | S | 6 crates, edition 2021, MSRV 1.80. Apache-2.0 + `NOTICE` crediting the reference project. |
-| F2 | CI pipeline | infra | spec | all | `.github/workflows` | no | S | build + test + clippy `-D warnings` + fmt check. Must be a required status check. |
-| F3 | `Error` / `Result` | type | spec | all | REALIGNMENT §2.3 | no | S | `thiserror`-based, one error enum per crate, no `unwrap`/`expect` outside tests. |
-| F4 | `Config` + env loading | type | spec | all | `docs/configuration.mdx` | no | M | `HEADROOM_*` env vars, read live per request. |
+| F1 | workspace scaffold | infra | spec | all | `Cargo.toml` workspace, `rust-toolchain.toml` | no | S | 6 crates, edition 2021, MSRV 1.80. Apache-2.0 + `NOTICE` crediting the reference project. Done. |
+| F2 | CI pipeline | infra | spec | all | `.github/workflows` | no | S | build + test + clippy `-D warnings` + fmt check. Must be a required status check. Done. |
+| F3 | `Error` / `Result` | type | spec | all | REALIGNMENT §2.3 | no | S | `thiserror`-based, one error enum per crate, no `unwrap`/`expect` outside tests. Done. |
+| F4 | `Config` + env loading | type | spec | all | `docs/configuration.mdx` | no | M | `HEADROOM_*` env vars, read live per request. Done. |
 | F5 | `POST /admin/runtime-env` | fn | spec | all | README "hot-sync" | no | S | Runtime config hot-reload without restart. Depends on F4, X1. Done via `admin::runtime_env` + `config` override map (DECISIONS D10); gated on a loopback peer address. |
 
 ### Tokenization
 
 | ID | Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| T1 | `Tokenizer` trait + `estimator` | trait/fn | spec | all | REALIGNMENT §2.3 `tokenizer/` | no | S | Heuristic byte→token estimator as the always-available fallback. |
+| T1 | `Tokenizer` trait + `estimator` | trait/fn | spec | all | REALIGNMENT §2.3 `tokenizer/` | no | S | Heuristic byte→token estimator as the always-available fallback. Done — `HeuristicEstimator`, documented never to under-count. |
 | T2 | tiktoken BPE impl | fn | spec | all | `tokenizer/tiktoken_impl.rs` | no | M | OpenAI model families. Done as `tokenizer::TiktokenCounter` (o200k_base, cl100k_base) via `tiktoken-rs` 0.11 — embedded tables, exact offline, registered by default and selected from the request's `model`. |
 | T3 | HuggingFace tokenizer impl | fn | spec | all | `tokenizer/hf_impl.rs` | no | M | Via `tokenizers` crate. **Deliberately deferred** — needs a per-model `tokenizer.json` fetched at runtime, making the tokenizer a network dependency of the request path, and Anthropic publishes no tokenizer to be exact against. See DECISIONS D16. |
 | T4 | tokenizer registry | fn | spec | all | `tokenizer/registry.rs` | no | S | model-id → tokenizer resolution with fallback to T1. Done as `tokenizer::registry::{Family, Registry}` — always resolves, never `None`; `with_defaults()` registers the tiktoken counters and the proxy selects through it. |
@@ -86,115 +86,115 @@ Every row is a gap: the target repo is empty, so all rows are new implementation
 
 | ID | Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| D1 | `ContentRouter` / `detect_content_type` | fn | spec | all | README "ContentRouter"; `docs/how-compression-works.mdx` | no | M | JSON / code / log / diff / search-results / prose. The routing brain — keep it a pure function. |
-| D2 | unified-diff detector | fn | spec | all | `transforms/unidiff_detector.rs` | no | S | Recognize `---/+++/@@` hunks. |
-| D3 | code-language detector | fn | spec | all | `transforms/magika_detector.rs` | no | M | Heuristic/extension + content sniffing. No ML model (out of scope). |
-| D4 | `AdaptiveSizer` thresholds | fn | spec | all | REALIGNMENT I5 | no | S | code>2KB, JSON>1KB, logs>500B, text>5KB — below threshold, do not compress. |
+| D1 | `ContentRouter` / `detect_content_type` | fn | spec | all | README "ContentRouter"; `docs/how-compression-works.mdx` | no | M | JSON / code / log / diff / search-results / prose. The routing brain — keep it a pure function. Done — `detection::detect`, a pure function returning a type and a confidence. |
+| D2 | unified-diff detector | fn | spec | all | `transforms/unidiff_detector.rs` | no | S | Recognize `---/+++/@@` hunks. Done. |
+| D3 | code-language detector | fn | spec | all | `transforms/magika_detector.rs` | no | M | Heuristic/extension + content sniffing. No ML model (out of scope). Done — heuristic, no ML model (out of scope). |
+| D4 | `AdaptiveSizer` thresholds | fn | spec | all | REALIGNMENT I5 | no | S | code>2KB, JSON>1KB, logs>500B, text>5KB — below threshold, do not compress. Done — `AdaptiveSizer`. |
 
 ### Signals
 
 | ID | Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| S1 | line importance scoring | fn | spec | all | `signals/line_importance.rs` | no | M | Drives which lines survive lossy passes. |
-| S2 | keyword / error detector | fn | spec | all | `signals/keyword_detector.rs` | no | S | Error/warning keyword sets; never drop error lines. |
-| S3 | tiered signal aggregation | fn | spec | all | `signals/tiered.rs` | no | S | Combines S1+S2 into keep/drop tiers. |
-| S4 | `AnchorSelector` | fn | spec | all | `transforms/anchor_selector.rs` | no | M | Picks stable anchor points so output stays position-preserving (I6). Done as `signals::anchors::select_anchors` — hunk headers, headings, fences, stack frames, structure opens, boundaries. Not yet consulted by a compressor. |
-| S5 | `TagProtector` | fn | spec | all | `transforms/tag_protector.rs` | no | S | Never break XML/markup tags mid-compression. Done as `signals::tags::{protected_lines, breaks_markup}`; balance check over tag-shaped tokens, not an XML parser. Not yet consulted by a compressor. |
+| S1 | line importance scoring | fn | spec | all | `signals/line_importance.rs` | no | M | Drives which lines survive lossy passes. Done. |
+| S2 | keyword / error detector | fn | spec | all | `signals/keyword_detector.rs` | no | S | Error/warning keyword sets; never drop error lines. Done. |
+| S3 | tiered signal aggregation | fn | spec | all | `signals/tiered.rs` | no | S | Combines S1+S2 into keep/drop tiers. Done. |
+| S4 | `AnchorSelector` | fn | spec | all | `transforms/anchor_selector.rs` | no | M | Picks stable anchor points so output stays position-preserving (I6). Done as `signals::anchors::select_anchors` — hunk headers, headings, fences, stack frames, structure opens, boundaries. **Open:** no compressor consults it yet, so I6 rests on each compressor's own position handling. |
+| S5 | `TagProtector` | fn | spec | all | `transforms/tag_protector.rs` | no | S | Never break XML/markup tags mid-compression. Done as `signals::tags::{protected_lines, breaks_markup}`; balance check over tag-shaped tokens, not an XML parser. **Open:** no compressor consults it yet. |
 
 ### SmartCrusher (JSON) — split into 6 issues to keep them small
 
 | ID | Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| C1 | SmartCrusher types + config | type | spec | all | `docs/smart-crusher.mdx` | no | S | Shared IR/config; the base other C rows build on. |
-| C2 | structural analyzer + classifier | fn | spec | all | `docs/smart-crusher.mdx` | no | M | Detect record arrays, homogeneous objects, key cardinality. |
-| C3 | statistics + outlier detection | fn | spec | all | `docs/smart-crusher.mdx` | no | M | Summarize repetitive records; keep statistical outliers verbatim. |
-| C4 | anchors + planning | fn | spec | all | `docs/smart-crusher.mdx` | no | M | Decide what to keep/elide before mutating anything. |
-| C5 | compaction IR + walker + formatter | fn | spec | all | `docs/smart-crusher.mdx` | no | L | **Split candidate** — walker and formatter may become separate issues if C5 runs long. |
-| C6 | crusher orchestration | fn | spec | all | `docs/smart-crusher.mdx` | no | M | Wires C1–C5 behind one entry point; enforces I4 determinism. |
+| C1 | SmartCrusher types + config | type | spec | all | `docs/smart-crusher.mdx` | no | S | Shared IR/config; the base other C rows build on. Done. |
+| C2 | structural analyzer + classifier | fn | spec | all | `docs/smart-crusher.mdx` | no | M | Detect record arrays, homogeneous objects, key cardinality. Done. |
+| C3 | statistics + outlier detection | fn | spec | all | `docs/smart-crusher.mdx` | no | M | Summarize repetitive records; keep statistical outliers verbatim. Done — outlier rarity rule fixed in development; see RELEASE_NOTES. |
+| C4 | anchors + planning | fn | spec | all | `docs/smart-crusher.mdx` | no | M | Decide what to keep/elide before mutating anything. Done. |
+| C5 | compaction IR + walker + formatter | fn | spec | all | `docs/smart-crusher.mdx` | no | L | **Split candidate** — walker and formatter may become separate issues if C5 runs long. Done. |
+| C6 | crusher orchestration | fn | spec | all | `docs/smart-crusher.mdx` | no | M | Wires C1–C5 behind one entry point; enforces I4 determinism. Done. |
 
 ### Other compressors
 
 | ID | Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| C7 | `LogCompressor` | fn | spec | all | `docs/text-and-logs.mdx` | no | M | Template extraction + repeat collapsing. |
-| C8 | `DiffCompressor` | fn | spec | all | `transforms/diff_compressor.rs` | no | M | Elide unchanged context, keep hunk headers. Depends on D2. |
-| C9 | `SearchCompressor` | fn | spec | all | README "Code search 92%" | no | M | Grep/ripgrep-style result sets — the headline benchmark case. |
-| C10 | `TextCrusher` | fn | spec | all | `docs/text-and-logs.mdx` | no | M | Lossless plain-text pass (whitespace, repetition). |
-| C11 | `CodeCompressor` core + Rust/Python | fn | spec | all | `docs/code-compression.mdx` | no | L | AST-aware skeletonization. **Split** — core trait + 2 languages. |
-| C12 | `CodeCompressor` JS/TS + Go | fn | spec | all | `docs/code-compression.mdx` | no | M | Depends on C11. |
-| C13 | `CodeCompressor` Java + C/C++ + Perl | fn | spec | all | `docs/code-compression.mdx` | no | M | Depends on C11. Perl has no tree-sitter-grade grammar — may degrade to heuristic. |
+| C7 | `LogCompressor` | fn | spec | all | `docs/text-and-logs.mdx` | no | M | Template extraction + repeat collapsing. Done. |
+| C8 | `DiffCompressor` | fn | spec | all | `transforms/diff_compressor.rs` | no | M | Elide unchanged context, keep hunk headers. Depends on D2. Done. |
+| C9 | `SearchCompressor` | fn | spec | all | README "Code search 92%" | no | M | Grep/ripgrep-style result sets — the headline benchmark case. Done. |
+| C10 | `TextCrusher` | fn | spec | all | `docs/text-and-logs.mdx` | no | M | Lossless plain-text pass (whitespace, repetition). Done — `TextCrusher` (lossless) and `TextSummarizer` (lossy), split per I10. |
+| C11 | `CodeCompressor` core + Rust/Python | fn | spec | all | `docs/code-compression.mdx` | no | L | AST-aware skeletonization. **Split** — core trait + 2 languages. Done — heuristic skeletonizer, not tree-sitter; see DECISIONS D3. |
+| C12 | `CodeCompressor` JS/TS + Go | fn | spec | all | `docs/code-compression.mdx` | no | M | Depends on C11. Done — heuristic; see DECISIONS D3. |
+| C13 | `CodeCompressor` Java + C/C++ + Perl | fn | spec | all | `docs/code-compression.mdx` | no | M | Depends on C11. Perl has no tree-sitter-grade grammar — may degrade to heuristic. Done — heuristic; see DECISIONS D3. |
 
 ### Pipeline
 
 | ID | Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| P1 | `LosslessTransform` / `LossyTransform` | trait | spec | all | REALIGNMENT §2.3 `pipeline/traits.rs` | no | S | In-place `fn(&mut Block) -> Result<()>` per I6. |
-| P2 | `live_zone` block dispatcher | fn | spec | all | REALIGNMENT §2.2 I2/I3 | no | L | **Core of the whole design.** Walks messages from tail; identifies latest user msg, tool_result, function_call_output, local_shell_call_output, apply_patch_call_output. |
-| P3 | pipeline orchestrator | fn | spec | all | `pipeline/orchestrator.rs` | no | M | Live-zone-only; routes via D1 to C*. Done as `pipeline::Orchestrator`; `Routing` names the decline reason. Proxy not yet switched over to it. |
+| P1 | `LosslessTransform` / `LossyTransform` | trait | spec | all | REALIGNMENT §2.3 `pipeline/traits.rs` | no | S | In-place `fn(&mut Block) -> Result<()>` per I6. Done. |
+| P2 | `live_zone` block dispatcher | fn | spec | all | REALIGNMENT §2.2 I2/I3 | no | L | **Core of the whole design.** Walks messages from tail; identifies latest user msg, tool_result, function_call_output, local_shell_call_output, apply_patch_call_output. Done. |
+| P3 | pipeline orchestrator | fn | spec | all | `pipeline/orchestrator.rs` | no | M | Live-zone-only; routes via D1 to C*. Done as `pipeline::Orchestrator`; `Routing` names the decline reason. The proxy's `Compressors` is a thin wrapper over it. |
 | P4 | offloads (json/log/diff/search/prose) | fn | spec | all | `pipeline/offloads/` | no | M | Move bulky sub-values to CCR, leave markers. **Covered by the existing compressors** — SmartCrusher/Log/Search/Diff already offload to CCR and leave markers; a separate layer would be a second name for the same mechanism. |
-| P5 | reformats (json minifier, log template) | fn | spec | all | `pipeline/reformats/` | no | S | Lossless byte reduction. Done as `pipeline::reformats::{minify_json, tidy_lines}`. Not yet wired into a compressor chain. |
+| P5 | reformats (json minifier, log template) | fn | spec | all | `pipeline/reformats/` | no | S | Lossless byte reduction. Done as `pipeline::reformats::{minify_json, tidy_lines}`, exposed as `Reformatter` and routed by the orchestrator for policies permitting lossless transforms (D14). |
 | P6 | `safety` checks | fn | spec | all | `transforms/safety.rs` | no | S | Guards against pathological/adversarial input. Done as `pipeline::safety::check` — size, depth, line length, line count; declines to compress rather than rejecting the request. |
-| P7 | token validation + fallback | fn | spec | all | REALIGNMENT I5 | no | S | If `compressed.tokens >= original.tokens`, forward original. Depends on T1. |
+| P7 | token validation + fallback | fn | spec | all | REALIGNMENT I5 | no | S | If `compressed.tokens >= original.tokens`, forward original. Depends on T1. Done — `validated_apply`. |
 
 ### CCR (Compress-Cache-Retrieve)
 
 | ID | Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| R1 | `CcrStore` trait + in-memory backend | trait | spec | all | REALIGNMENT §2.5 | no | S | `put/get/purge_expired` with TTL. |
-| R2 | content hashing + `<<ccr:HASH>>` marker | fn | spec | all | REALIGNMENT §2.5 | no | S | BLAKE3, content-addressed ⇒ replay-safe and deterministic (I4). |
-| R3 | SQLite backend | fn | spec | all | REALIGNMENT §2.5 | no | M | Primary persistent backend. |
-| R4 | Redis backend | fn | spec | all | REALIGNMENT §2.5 | no | M | Optional, multi-worker deployments. |
-| R5 | always-on `ccr_retrieve` tool registration | fn | spec | all | REALIGNMENT §2.6 | no | M | Must never toggle between requests — toggling busts the tools array. |
+| R1 | `CcrStore` trait + in-memory backend | trait | spec | all | REALIGNMENT §2.5 | no | S | `put/get/purge_expired` with TTL. Done. |
+| R2 | content hashing + `<<ccr:HASH>>` marker | fn | spec | all | REALIGNMENT §2.5 | no | S | BLAKE3, content-addressed ⇒ replay-safe and deterministic (I4). Done. |
+| R3 | SQLite backend | fn | spec | all | REALIGNMENT §2.5 | no | M | Primary persistent backend. Done as `FileCcrStore` — one file per hash with an expiry sidecar and an atomic rename, a deliberate substitution rather than SQLite; see DECISIONS D6. |
+| R4 | Redis backend | fn | spec | all | REALIGNMENT §2.5 | no | M | Optional, multi-worker deployments. **Deliberately deferred** — needs a running Redis to test against; see DECISIONS D2. |
+| R5 | always-on `ccr_retrieve` tool registration | fn | spec | all | REALIGNMENT §2.6 | no | M | Must never toggle between requests — toggling busts the tools array. Done — registered unconditionally. |
 
 ### Auth mode
 
 | ID | Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| A1 | `classify_auth_mode(headers)` | fn | spec | all | REALIGNMENT §2.4 | no | S | → `payg` \| `oauth` \| `subscription`. |
-| A2 | policy matrix | type | spec | all | REALIGNMENT §2.4 table | no | M | Gates compression aggressiveness, header handling, auto-cache-control. Implements I10. |
+| A1 | `classify_auth_mode(headers)` | fn | spec | all | REALIGNMENT §2.4 | no | S | → `payg` \| `oauth` \| `subscription`. Done — OAuth prefix ordering bug fixed in development. |
+| A2 | policy matrix | type | spec | all | REALIGNMENT §2.4 table | no | M | Gates compression aggressiveness, header handling, auto-cache-control. Implements I10. Done — includes `lossless_transforms`; see DECISIONS D14. |
 
 ### Proxy
 
 | ID | Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| X1 | axum skeleton + `/health` | fn | spec | all | `docs/proxy.mdx` | no | S | Listen addr/port config, graceful shutdown. |
-| X2 | byte-faithful body buffering | fn | spec | all | REALIGNMENT I1 | no | M | `serde_json` `raw_value` + `arbitrary_precision` + `preserve_order`. **Gate:** SHA-256 round-trip test. |
-| X3 | header hygiene | fn | spec | all | REALIGNMENT §2.4 | no | S | Strip `x-headroom-*` upstream-bound; conditional `X-Forwarded-*`; never touch `User-Agent`. |
-| X4 | `cache_control` → `frozen_message_count` | fn | spec | all | REALIGNMENT §2.1 step 4 | no | M | Honor customer-set markers. Depends on X2. |
-| X5 | `/v1/messages` (Anthropic) handler | fn | spec | all | `docs/proxy.mdx` | no | L | Passthrough first, then live-zone compression. Depends on P2, X2, X4. Includes upstream relay (`upstream::Upstream`) — streamed response body, per-hop header rebuild, provider-shaped 502 on failure. |
-| X6 | `/v1/chat/completions` (OpenAI) handler | fn | spec | all | `docs/openai-sdk.mdx` | no | L | Depends on P2, X2. |
+| X1 | axum skeleton + `/health` | fn | spec | all | `docs/proxy.mdx` | no | S | Listen addr/port config, graceful shutdown. Done. |
+| X2 | byte-faithful body buffering | fn | spec | all | REALIGNMENT I1 | no | M | `serde_json` `raw_value` + `arbitrary_precision` + `preserve_order`. **Gate:** SHA-256 round-trip test. Done — `FaithfulBody`, SHA-256 round-trip gated in `tests/invariants.rs`. |
+| X3 | header hygiene | fn | spec | all | REALIGNMENT §2.4 | no | S | Strip `x-headroom-*` upstream-bound; conditional `X-Forwarded-*`; never touch `User-Agent`. Done. |
+| X4 | `cache_control` → `frozen_message_count` | fn | spec | all | REALIGNMENT §2.1 step 4 | no | M | Honor customer-set markers. Depends on X2. Done. |
+| X5 | `/v1/messages` (Anthropic) handler | fn | spec | all | `docs/proxy.mdx` | no | L | Done. Passthrough first, then live-zone compression. Depends on P2, X2, X4. Includes upstream relay (`upstream::Upstream`) — streamed response body, per-hop header rebuild, provider-shaped 502 on failure. |
+| X6 | `/v1/chat/completions` (OpenAI) handler | fn | spec | all | `docs/openai-sdk.mdx` | no | L | Depends on P2, X2. Done. |
 | X7 | `/v1/responses` handler | fn | spec | all | `docs/openai-sdk.mdx` | no | L | Output items, reasoning summary; per-item-type passthrough preservation. Done — `Dialect::OpenAiResponses`; `function_call_output` compressed, `function_call` never. |
-| X8 | `/v1/conversations` + `/v1/responses/compact` passthrough | fn | spec | all | REALIGNMENT §2.6 | no | S | Explicitly never compressed. |
-| X9 | SSE framing + byte-level state machine | fn | spec | all | REALIGNMENT §2.1 step 10 | no | L | **High risk.** Must survive UTF-8 splits mid-codepoint and single-`\n` splits. |
-| X10 | SSE Anthropic events | fn | spec | all | REALIGNMENT Phase C | no | M | All delta types incl. `thinking_delta`, `signature_delta`, `citations_delta`. Depends on X9. |
-| X11 | SSE OpenAI chat events | fn | spec | all | REALIGNMENT Phase C | no | M | `tool_call` accumulation across chunks. Depends on X9. |
-| X12 | SSE OpenAI responses events | fn | spec | all | REALIGNMENT Phase C | no | M | Output items + reasoning summary. Depends on X9. Done as `sse::responses`; stem/suffix split so future event types stay classifiable. Not yet attached to the relayed stream. |
+| X8 | `/v1/conversations` + `/v1/responses/compact` passthrough | fn | spec | all | REALIGNMENT §2.6 | no | S | Explicitly never compressed. Done. |
+| X9 | SSE framing + byte-level state machine | fn | spec | all | REALIGNMENT §2.1 step 10 | no | L | **High risk.** Must survive UTF-8 splits mid-codepoint and single-`\n` splits. Done. |
+| X10 | SSE Anthropic events | fn | spec | all | REALIGNMENT Phase C | no | M | All delta types incl. `thinking_delta`, `signature_delta`, `citations_delta`. Depends on X9. Done. |
+| X11 | SSE OpenAI chat events | fn | spec | all | REALIGNMENT Phase C | no | M | `tool_call` accumulation across chunks. Depends on X9. Done. |
+| X12 | SSE OpenAI responses events | fn | spec | all | REALIGNMENT Phase C | no | M | Output items + reasoning summary. Depends on X9. Done as `sse::responses`; stem/suffix split so future event types stay classifiable. **Open:** `ObservingStream` still attaches only the Anthropic `StreamObserver`, so a Responses stream is relayed unobserved. |
 | X13 | WebSocket flow | fn | spec | all | `crates/headroom-proxy/src/websocket.rs` (name only) | no | M | Codex WS transport. Done as `websocket::relay_socket` — bidirectional faithful relay, frame kinds preserved. **Deliberately does not compress**; see DECISIONS D15. |
-| X14 | tool array sort + JSON Schema key sort | fn | spec | all | REALIGNMENT I7 | no | M | Deterministic recursive sort. Normalize, never compress. |
-| X15 | `cache_control` auto-placement | fn | spec | all | REALIGNMENT Phase E | no | M | Anthropic, ≤4 ephemeral breakpoints. PAYG only per I10. |
+| X14 | tool array sort + JSON Schema key sort | fn | spec | all | REALIGNMENT I7 | no | M | Deterministic recursive sort. Normalize, never compress. Done. |
+| X15 | `cache_control` auto-placement | fn | spec | all | REALIGNMENT Phase E | no | M | Anthropic, ≤4 ephemeral breakpoints. PAYG only per I10. Done. |
 | X16 | `prompt_cache_key` injection | fn | spec | all | REALIGNMENT Phase E | no | S | OpenAI, only when not customer-set. PAYG only. Done via `body::insert_top_level_member` — byte-faithful, key derived from every message but the newest. |
 | X17 | volatile-content detector | fn | spec | all | REALIGNMENT Phase E | no | M | Warn only — never rewrite (that was the original bug). Done as `volatile::scan`, wired into `/v1/messages`; no function returns modified content. Anthropic route only. |
 | X18 | cache-drift telemetry | fn | spec | all | REALIGNMENT Phase E | no | S | Detect and report prefix busts. Done via `observe::ObservingStream` — cache read/creation tokens read from the `message_start` usage block feed `headroom_cache_hit_rate`. |
-| X19 | Prometheus metrics + observability | fn | spec | all | `docs/metrics.mdx` | no | M | cache hit rate, compression ratio, token savings. |
+| X19 | Prometheus metrics + observability | fn | spec | all | `docs/metrics.mdx` | no | M | cache hit rate, compression ratio, token savings. Done — Prometheus text exposition at `GET /metrics`, fed by the request path and the stream observer. |
 | X20 | loopback guard + rate limit + request log | fn | spec | all | REALIGNMENT Phase H file list | no | M | Prevent proxy-to-self loops; redact `Authorization` to first 12 chars. Done via `guard::{is_self_referential, RateLimiter}` — startup loop check (see DECISIONS D11), 600 req/min backstop answering 429. |
 
 ### MCP server
 
 | ID | Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| M1 | MCP server skeleton (stdio JSON-RPC) | fn | spec | all | `docs/mcp.mdx` | no | M | Protocol handshake, tool listing. |
-| M2 | `headroom_compress` tool | fn | spec | all | README "MCP Tools" | no | S | Depends on M1, P3. |
-| M3 | `headroom_retrieve` tool | fn | spec | all | README "MCP Tools" | no | S | Depends on M1, R1. |
-| M4 | `headroom_stats` tool | fn | spec | all | README "MCP Tools" | no | S | Depends on M1, X19. |
-| M5 | `headroom mcp install` registry writers | fn | spec | all | `mcp_registry/` (claude, codex, grok, opencode) | no | M | Writes MCP server entries into each agent's config file. |
+| M1 | MCP server skeleton (stdio JSON-RPC) | fn | spec | all | `docs/mcp.mdx` | no | M | Protocol handshake, tool listing. Done. |
+| M2 | `headroom_compress` tool | fn | spec | all | README "MCP Tools" | no | S | Depends on M1, P3. Done. |
+| M3 | `headroom_retrieve` tool | fn | spec | all | README "MCP Tools" | no | S | Depends on M1, R1. Done. |
+| M4 | `headroom_stats` tool | fn | spec | all | README "MCP Tools" | no | S | Depends on M1, X19. Done. |
+| M5 | `headroom mcp install` registry writers | fn | spec | all | `mcp_registry/` (claude, codex, grok, opencode) | no | M | Writes MCP server entries into each agent's config file. Done — `headroom mcp --config`; writes an absolute binary path, preserves other servers, idempotent. |
 
 ### CLI
 
 | ID | Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| L1 | clap CLI skeleton + `--version` | fn | spec | all | `wiki/cli.md` | no | S | Subcommand tree. |
-| L2 | `headroom proxy` | fn | spec | all | README CLI | no | S | `--port`. Depends on X1, L1. |
-| L3 | `headroom doctor` | fn | spec | all | README CLI | no | M | Health/config/connectivity checks. |
+| L1 | clap CLI skeleton + `--version` | fn | spec | all | `wiki/cli.md` | no | S | Subcommand tree. Done. |
+| L2 | `headroom proxy` | fn | spec | all | README CLI | no | S | `--port`. Depends on X1, L1. Done. |
+| L3 | `headroom doctor` | fn | spec | all | README CLI | no | M | Health/config/connectivity checks. Done — real compression round-trip, not a version dump. |
 | L4 | `headroom deploy` | fn | spec | all | README CLI | no | M | Turnkey local deployment. Done — prints systemd/compose/direct manifests rather than daemonizing; compose publishes on loopback only, with a test. |
 | L5 | `headroom wrap` core + `claude` | fn | spec | all | README "Supported Agents" | no | L | Env-var injection + config rewrite. **Split** — framework + first agent. Done as `wrap::{Agent, wrap_settings_file}`. |
 | L6 | `headroom wrap` codex/cursor/aider | fn | spec | all | README | no | M | Depends on L5. Done; cursor reports as env-unsupported rather than printing no-op exports. |
@@ -202,7 +202,7 @@ Every row is a gap: the target repo is empty, so all rows are new implementation
 | L8 | `headroom unwrap` | fn | spec | all | README CLI | no | S | Must fully restore pre-wrap config. Depends on L5. Done — byte-exact restore from a whole-file backup, verified SHA-256 identical through the binary. |
 | L9 | `headroom perf` | fn | spec | all | README CLI | no | S | Latency/throughput metrics. Done — measures the compressor, not the network; warm-up pass discarded. |
 | L10 | `headroom learn` | fn | spec | all | `docs/failure-learning.mdx` | no | L | Mines failed sessions; `--verbosity`. Done as a **corpus** miner rather than a session miner — no session-log format exists to read. Runs request bodies through the real pipeline and publishes recommendations. |
-| L11 | `headroom update` | fn | spec | all | README CLI | no | M | `--check`, `--pre`; in-place upgrade. `--check` done. In-place upgrade **deliberately not implemented** — a credential-holding binary is the wrong one to give a self-replacing updater. |
+| L11 | `headroom update` | fn | spec | all | README CLI | no | M | `--check`, `--pre`; in-place upgrade. Done for `--check`. In-place upgrade **deliberately not implemented** — a credential-holding binary is the wrong one to give a self-replacing updater. |
 | L12 | `headroom savings` / `output-savings` | fn | spec | all | `docs/savings.mdx` | no | M | Savings ledger reporting. Done — reads the proxy's `/metrics` exposition from stdin; no currency figure by design. |
 | L13 | `headroom init` / `inspect` / `tools` | fn | spec | all | `headroom/cli/` | no | M | Scaffolding + introspection helpers. Done — `init` refuses to overwrite, `tools` lists compressors/thresholds/MCP tools, `inspect` already existed. |
 
@@ -227,14 +227,14 @@ Every row is a gap: the target repo is empty, so all rows are new implementation
 | ID | Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | O1 | verbosity steering | fn | spec | all | README "Output Token Reduction" | no | M | `HEADROOM_OUTPUT_SHAPER=1`. Appends terseness note **without** busting the prompt cache. Done: `output_shaping::verbosity_append`, note lands in the live-zone tail, wired into `compress_dialect`. |
-| O2 | effort routing | fn | spec | all | README | no | M | `reasoning_effort` (OpenAI) / `thinking.budget_tokens` (Anthropic); full effort on new questions and errors. Done as `output_shaping::route_effort`; not yet written into outgoing requests. |
+| O2 | effort routing | fn | spec | all | README | no | M | `reasoning_effort` (OpenAI) / `thinking.budget_tokens` (Anthropic); full effort on new questions and errors. Done as `output_shaping::route_effort`, applied to outgoing OpenAI requests in `proxy::openai`. |
 
 ### Python bindings
 
 | ID | Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| B1 | pyo3 module + `compress()` | fn | spec | all | README Python API | no | M | abi3-py310, built via maturin. Mirrors `await compress(messages, model=...)`. |
-| B2 | `pyo3-log` bridging | fn | spec | all | reference workspace deps | no | S | Rust `tracing`/`log` → Python `logging`. Depends on B1. |
+| B1 | pyo3 module + `compress()` | fn | spec | all | README Python API | no | M | abi3-py310, built via maturin. Mirrors `await compress(messages, model=...)`. **Deliberately deferred** — needs maturin and a Python toolchain; see DECISIONS D4. |
+| B2 | `pyo3-log` bridging | fn | spec | all | reference workspace deps | no | S | Rust `tracing`/`log` → Python `logging`. Depends on B1. **Deliberately deferred** — depends on B1; see DECISIONS D4. |
 
 ### Test infrastructure
 

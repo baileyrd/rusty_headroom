@@ -897,3 +897,54 @@ fn compressible_content(body: &serde_json::Value) -> Vec<String> {
 
     found
 }
+
+/// `headroom mcp install` / `headroom mcp uninstall`.
+///
+/// # Why the binary path is resolved rather than assumed
+///
+/// An MCP host launches the server as a subprocess. A bare `headroom-mcp` works only if
+/// the host's `PATH` includes wherever this was installed — and a GUI application's
+/// `PATH` is frequently not the shell's. Writing the absolute path of the binary sitting
+/// beside this one is what makes the entry work when the host is not launched from a
+/// terminal.
+///
+/// # Errors
+///
+/// Returns an error if the config cannot be read or written.
+pub fn mcp_install(path: &std::path::Path, uninstall: bool) -> anyhow::Result<()> {
+    if uninstall {
+        if crate::wrap::uninstall_mcp_server(path)? {
+            eprintln!("removed the headroom server from {}", path.display());
+        } else {
+            eprintln!(
+                "no headroom server in {}; nothing to remove",
+                path.display()
+            );
+        }
+        return Ok(());
+    }
+
+    let command = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("headroom-mcp")))
+        .filter(|candidate| candidate.exists())
+        .map(|candidate| candidate.display().to_string())
+        // Falls back to the bare name rather than writing a path that does not exist.
+        // A host reporting "command not found" is clearer than one reporting a failure
+        // to execute a file this command invented.
+        .unwrap_or_else(|| "headroom-mcp".to_owned());
+
+    if crate::wrap::install_mcp_server(path, &command)? {
+        eprintln!("registered headroom in {}", path.display());
+        eprintln!("  command: {command}");
+        eprintln!("Restart the host for it to pick up the new server.");
+    } else {
+        // Not an error. A tuned entry is one somebody wrote deliberately.
+        eprintln!(
+            "{} already has a headroom server; leaving it as it is",
+            path.display()
+        );
+    }
+
+    Ok(())
+}

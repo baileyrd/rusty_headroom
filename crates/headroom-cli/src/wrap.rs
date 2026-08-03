@@ -406,3 +406,281 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "[1,2,3]");
     }
 }
+
+/// The key an MCP host uses for its server map.
+///
+/// Every host this supports uses `mcpServers`. Named rather than inlined so the one
+/// place to change it is obvious when a host picks something else.
+const MCP_SERVERS_KEY: &str = "mcpServers";
+
+/// Registers the headroom MCP server in `path`, backing the file up first.
+///
+/// Returns `false` when an entry named `headroom` was already there — installing twice
+/// is a no-op that says so, not an error and not a silent overwrite. A customer may have
+/// tuned the command or the arguments, and replacing that is not this command's call.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read, is not a JSON object, or cannot be
+/// written. A file that does not exist yet is **created**, since an MCP host with no
+/// config is the normal starting state rather than a problem — unlike a *settings* file,
+/// which the agent owns and this program should not invent.
+pub fn install_mcp_server(path: &Path, command: &str) -> Result<bool> {
+    let original = if path.exists() {
+        std::fs::read(path).with_context(|| format!("reading {}", path.display()))?
+    } else {
+        b"{}".to_vec()
+    };
+
+    let mut config: serde_json::Value = serde_json::from_slice(&original)
+        .with_context(|| format!("{} is not valid JSON", path.display()))?;
+    let Some(object) = config.as_object_mut() else {
+        bail!("{} is not a JSON object", path.display());
+    };
+
+    let servers = object
+        .entry(MCP_SERVERS_KEY)
+        .or_insert_with(|| serde_json::Value::Object(Default::default()));
+    let Some(servers) = servers.as_object_mut() else {
+        bail!("{MCP_SERVERS_KEY} in {} is not an object", path.display());
+    };
+
+    if servers.contains_key("headroom") {
+        return Ok(false);
+    }
+
+    // The backup is written before the original is touched, and only when there was an
+    // original — a file this command created has nothing to restore to, and leaving a
+    // `{}` backup would make `uninstall` recreate an empty config the user never had.
+    if path.exists() {
+        let backup = backup_path(path);
+        if !backup.exists() {
+            std::fs::write(&backup, &original)
+                .with_context(|| format!("writing backup {}", backup.display()))?;
+        }
+    }
+
+    servers.insert(
+        "headroom".into(),
+        serde_json::json!({ "command": command, "args": [] }),
+    );
+
+    std::fs::write(path, serde_json::to_string_pretty(&config)?)
+        .with_context(|| format!("writing {}", path.display()))?;
+
+    Ok(true)
+}
+
+/// Removes the headroom entry from `path`.
+///
+/// Returns `false` when there was nothing to remove.
+///
+/// # Why this edits rather than restoring the backup
+///
+/// [`unwrap_settings_file`] restores bytes verbatim, which is right for a file this
+/// program *rewrote*. An MCP config is different: the user may have added other servers
+/// since installing, and restoring the backup would delete them. So this removes one
+/// key and leaves everything else — accepting a reformat of the file in exchange for
+/// not destroying work.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read, is not JSON, or cannot be written.
+pub fn uninstall_mcp_server(path: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let original = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut config: serde_json::Value = serde_json::from_slice(&original)
+        .with_context(|| format!("{} is not valid JSON", path.display()))?;
+
+    let removed = config
+        .as_object_mut()
+        .and_then(|object| object.get_mut(MCP_SERVERS_KEY))
+        .and_then(serde_json::Value::as_object_mut)
+        .map(|servers| servers.remove("headroom").is_some())
+        .unwrap_or(false);
+
+    if !removed {
+        return Ok(false);
+    }
+
+    std::fs::write(path, serde_json::to_string_pretty(&config)?)
+        .with_context(|| format!("writing {}", path.display()))?;
+
+    // The backup is left in place. It is the only record of what the file looked like
+    // before this program touched it, and the user may still want it.
+    Ok(true)
+}
+
+#[cfg(test)]
+mod mcp_tests {
+    use super::*;
+
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("headroom-mcp-{name}"));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn path(&self, name: &str) -> PathBuf {
+            self.0.join(name)
+        }
+
+        fn file(&self, name: &str, contents: &str) -> PathBuf {
+            let path = self.path(name);
+            std::fs::write(&path, contents).unwrap();
+            path
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn read(path: &Path) -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn installing_adds_the_server_entry() {
+        let scratch = Scratch::new("add");
+        let path = scratch.file("mcp.json", r#"{"mcpServers":{}}"#);
+
+        assert!(install_mcp_server(&path, "headroom-mcp").unwrap());
+        assert_eq!(
+            read(&path)["mcpServers"]["headroom"]["command"],
+            "headroom-mcp"
+        );
+    }
+
+    #[test]
+    fn a_missing_config_is_created() {
+        // An MCP host with no config is the normal starting state, unlike an agent's
+        // settings file — which the agent owns and this program should not invent.
+        let scratch = Scratch::new("create");
+        let path = scratch.path("mcp.json");
+
+        assert!(install_mcp_server(&path, "headroom-mcp").unwrap());
+        assert!(path.exists());
+        assert_eq!(
+            read(&path)["mcpServers"]["headroom"]["command"],
+            "headroom-mcp"
+        );
+    }
+
+    #[test]
+    fn other_servers_are_preserved() {
+        // The failure this guards: a customer with three MCP servers configured loses
+        // two of them to a command that was meant to add one.
+        let scratch = Scratch::new("preserve");
+        let path = scratch.file(
+            "mcp.json",
+            r#"{"mcpServers":{"other":{"command":"other-mcp"}},"theme":"dark"}"#,
+        );
+
+        install_mcp_server(&path, "headroom-mcp").unwrap();
+        let config = read(&path);
+
+        assert_eq!(config["mcpServers"]["other"]["command"], "other-mcp");
+        assert_eq!(config["theme"], "dark", "an unrelated setting was lost");
+    }
+
+    #[test]
+    fn installing_twice_does_not_overwrite_a_tuned_entry() {
+        // A customer may have edited the command or the arguments. Replacing that is not
+        // this command's call, and doing it silently is worse than reporting a no-op.
+        let scratch = Scratch::new("twice");
+        let path = scratch.file(
+            "mcp.json",
+            r#"{"mcpServers":{"headroom":{"command":"/custom/path","args":["--flag"]}}}"#,
+        );
+
+        assert!(!install_mcp_server(&path, "headroom-mcp").unwrap());
+        assert_eq!(
+            read(&path)["mcpServers"]["headroom"]["command"],
+            "/custom/path"
+        );
+    }
+
+    #[test]
+    fn uninstalling_removes_only_the_headroom_entry() {
+        // Restoring the backup would delete servers the user added *after* installing.
+        let scratch = Scratch::new("remove");
+        let path = scratch.file("mcp.json", r#"{"mcpServers":{}}"#);
+
+        install_mcp_server(&path, "headroom-mcp").unwrap();
+
+        // The user adds another server afterwards.
+        let mut config = read(&path);
+        config["mcpServers"]["added-later"] = serde_json::json!({ "command": "x" });
+        std::fs::write(&path, serde_json::to_string(&config).unwrap()).unwrap();
+
+        assert!(uninstall_mcp_server(&path).unwrap());
+        let config = read(&path);
+
+        assert!(config["mcpServers"].get("headroom").is_none());
+        assert_eq!(
+            config["mcpServers"]["added-later"]["command"], "x",
+            "a server added after installing was deleted"
+        );
+    }
+
+    #[test]
+    fn uninstalling_something_never_installed_is_a_no_op() {
+        let scratch = Scratch::new("noop");
+        let path = scratch.file("mcp.json", r#"{"mcpServers":{"other":{}}}"#);
+
+        assert!(!uninstall_mcp_server(&path).unwrap());
+        assert!(read(&path)["mcpServers"]["other"].is_object());
+    }
+
+    #[test]
+    fn uninstalling_a_missing_file_is_a_no_op_not_an_error() {
+        let scratch = Scratch::new("absent");
+        assert!(!uninstall_mcp_server(&scratch.path("nope.json")).unwrap());
+    }
+
+    #[test]
+    fn a_config_this_command_created_gets_no_backup() {
+        // A `{}` backup would make a restore recreate an empty config the user never had.
+        let scratch = Scratch::new("nobackup");
+        let path = scratch.path("mcp.json");
+
+        install_mcp_server(&path, "headroom-mcp").unwrap();
+        assert!(!is_wrapped(&path));
+    }
+
+    #[test]
+    fn an_existing_config_is_backed_up_before_being_touched() {
+        let scratch = Scratch::new("backup");
+        let path = scratch.file("mcp.json", r#"{"mcpServers":{},"theme":"dark"}"#);
+
+        install_mcp_server(&path, "headroom-mcp").unwrap();
+        assert!(is_wrapped(&path));
+    }
+
+    #[test]
+    fn a_non_object_config_is_refused_before_anything_is_touched() {
+        let scratch = Scratch::new("array");
+        let path = scratch.file("mcp.json", "[1,2,3]");
+
+        assert!(install_mcp_server(&path, "headroom-mcp").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[1,2,3]");
+    }
+
+    #[test]
+    fn a_non_object_server_map_is_refused() {
+        let scratch = Scratch::new("badmap");
+        let path = scratch.file("mcp.json", r#"{"mcpServers":"not an object"}"#);
+
+        assert!(install_mcp_server(&path, "headroom-mcp").is_err());
+    }
+}

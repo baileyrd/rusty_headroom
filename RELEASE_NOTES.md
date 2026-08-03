@@ -6,6 +6,34 @@ the crate starts publishing releases.
 
 ---
 
+## `headroom mcp` registers the MCP server; the gap analysis is swept to closure
+**2026-08-03** · gap row M5, plus a documentation pass over every row
+
+- **Added:** `headroom mcp --config <path>` writes a `headroom` entry into a host's
+  `mcpServers` map, and `--uninstall` removes it.
+- **Added:** `wrap::install_mcp_server` / `wrap::uninstall_mcp_server`.
+- **Changed:** `gap-analysis.md` now carries a status note on every row. The sweep
+  reports **97 rows, 97 accounted for, none outstanding** — implemented, substituted, or
+  deliberately deferred with a decision reference.
+- **Design note:** the entry records the *absolute* path of the `headroom-mcp` binary
+  sitting beside the CLI. An MCP host launches the server as a subprocess, and a GUI
+  application's `PATH` is frequently not the shell's — a bare `headroom-mcp` works from a
+  terminal-launched host and fails silently from a dock-launched one. If that binary is
+  not found, the bare name is written rather than an invented path: a host reporting
+  "command not found" is clearer than one failing to execute a file that never existed.
+- **Design note:** installing twice is a no-op that says so rather than overwriting. An
+  entry already present is one somebody wrote, possibly with arguments or environment
+  this command knows nothing about.
+- **Design note:** a config file this command *created* gets no backup. A `{}` backup
+  would let a later restore recreate an empty config the user never had.
+- **Design note:** uninstall *edits* the config rather than restoring the backup, because
+  the user may have added other servers since the install.
+- **Known limitation:** the config path is explicit rather than discovered. Host config
+  locations differ per host and per platform, and guessing wrong means writing a config
+  file nothing reads while reporting success.
+
+---
+
 ## OAuth traffic gets lossless compression; the proxy uses the orchestrator
 **2026-08-03** · clears two limitations from the pipeline change
 
