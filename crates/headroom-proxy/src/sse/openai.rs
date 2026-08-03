@@ -15,6 +15,13 @@
 //! the first carries the name and an `id`, later ones carry slices of the argument JSON
 //! and nothing else. Counting `tool_calls` entries per chunk would count one call many
 //! times over, so calls are tracked by index and the count is of distinct indices.
+//!
+//! # Cache accounting rides in a chunk with no choices
+//!
+//! Anthropic puts cache usage in the *first* frame. OpenAI puts it in an extra final
+//! chunk whose `choices` array is empty, so a reader that requires `choices[0]` — as
+//! this one did — classifies the one frame carrying the proxy's headline metric as
+//! unrecognized and reports every OpenAI conversation as having no cache data at all.
 
 use serde_json::Value;
 
@@ -34,6 +41,13 @@ pub enum OpenAiEvent {
         tool_call_indices: Vec<usize>,
         /// Why generation stopped, on the final chunk.
         finish_reason: Option<String>,
+    },
+    /// The final chunk carrying totals for the whole request.
+    Usage {
+        /// Prompt tokens the provider served from its cache.
+        cache_read_tokens: Option<u64>,
+        /// Prompt tokens the provider wrote to its cache.
+        cache_creation_tokens: Option<u64>,
     },
     /// The terminating `data: [DONE]` sentinel.
     Done,
@@ -67,6 +81,30 @@ pub fn classify(event: &Event) -> OpenAiEvent {
                 .and_then(Value::as_str)
                 .unwrap_or("unspecified")
                 .to_owned(),
+        };
+    }
+
+    // Checked before `choices`, because the usage chunk carries `"choices": []` and a
+    // choice-first reader never reaches it. Ordered this way rather than the reverse
+    // because losing one content chunk to a provider that someday sends both would cost
+    // one tick of `content_chunks`, while losing this frame costs every cache number
+    // for the request.
+    //
+    // The filter is load-bearing: once the client sets `stream_options.include_usage`,
+    // every *other* chunk carries an explicit `"usage": null`, so presence alone would
+    // classify the whole stream as usage frames and drop all of its content.
+    if let Some(usage) = payload.get("usage").filter(|usage| usage.is_object()) {
+        let details = usage.get("prompt_tokens_details");
+        return OpenAiEvent::Usage {
+            cache_read_tokens: details
+                .and_then(|details| details.get("cached_tokens"))
+                .and_then(Value::as_u64),
+            // Reported only by the model families that bill for cache writes. Absent
+            // reads as absent, not as zero, so the two stay distinguishable here even
+            // though the counter sums them the same way.
+            cache_creation_tokens: details
+                .and_then(|details| details.get("cache_write_tokens"))
+                .and_then(Value::as_u64),
         };
     }
 
@@ -121,6 +159,10 @@ pub struct OpenAiObserver {
     pub tool_call_indices: Vec<usize>,
     /// Why generation stopped.
     pub finish_reason: Option<String>,
+    /// Prompt tokens the provider served from its cache.
+    pub cache_read_tokens: u64,
+    /// Prompt tokens the provider wrote to its cache.
+    pub cache_creation_tokens: u64,
     /// Whether the terminating sentinel arrived.
     pub completed: bool,
     /// The provider's error, if the stream failed.
@@ -149,6 +191,16 @@ impl OpenAiObserver {
                 if finish_reason.is_some() {
                     self.finish_reason = finish_reason;
                 }
+            }
+            OpenAiEvent::Usage {
+                cache_read_tokens,
+                cache_creation_tokens,
+            } => {
+                // Summed rather than assigned. One request sends one usage chunk, but
+                // the same observer is not guaranteed a single request's worth of
+                // frames, and assignment would silently keep only the last.
+                self.cache_read_tokens += cache_read_tokens.unwrap_or(0);
+                self.cache_creation_tokens += cache_creation_tokens.unwrap_or(0);
             }
             OpenAiEvent::Done => self.completed = true,
             OpenAiEvent::Error { message } => self.error = Some(message),
@@ -189,6 +241,75 @@ mod tests {
         // the stream ended cleanly as garbage, so every stream looks unterminated.
         assert_eq!(classify(&event("[DONE]")), OpenAiEvent::Done);
         assert_eq!(classify(&event("  [DONE]  ")), OpenAiEvent::Done);
+    }
+
+    #[test]
+    fn the_usage_chunk_is_read_even_though_it_carries_no_choices() {
+        // The defect this guards. OpenAI puts cache accounting in an extra final chunk
+        // whose `choices` array is empty, so the choice-first reader this used to be
+        // classified it as unrecognized and every OpenAI request reported no cache data.
+        let data = concat!(
+            r#"{"choices":[],"usage":{"prompt_tokens":2006,"completion_tokens":300,"#,
+            r#""prompt_tokens_details":{"cached_tokens":1920,"cache_write_tokens":86}}}"#
+        );
+
+        assert_eq!(
+            classify(&event(data)),
+            OpenAiEvent::Usage {
+                cache_read_tokens: Some(1920),
+                cache_creation_tokens: Some(86),
+            }
+        );
+    }
+
+    #[test]
+    fn cache_writes_absent_from_the_usage_chunk_stay_absent_rather_than_becoming_zero() {
+        // `cache_write_tokens` is reported only by the model families that bill for
+        // cache writes. Older ones send `prompt_tokens_details` without it, and the two
+        // cases are different facts even though the counter sums them the same way.
+        let data = r#"{"choices":[],"usage":{"prompt_tokens_details":{"cached_tokens":1920}}}"#;
+
+        assert_eq!(
+            classify(&event(data)),
+            OpenAiEvent::Usage {
+                cache_read_tokens: Some(1920),
+                cache_creation_tokens: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_content_chunk_carrying_an_explicit_null_usage_is_still_prose() {
+        // Once the client sets `stream_options.include_usage`, every ordinary chunk
+        // carries `"usage": null`. Treating the key's presence as a usage frame would
+        // reclassify the entire stream and drop all of its content — the cost of
+        // checking `usage` before `choices`, paid for by requiring an object.
+        let mut observer = OpenAiObserver::default();
+        observer.observe(&event(
+            r#"{"choices":[{"index":0,"delta":{"content":"hello"}}],"usage":null}"#,
+        ));
+
+        assert_eq!(
+            observer.content_chunks, 1,
+            "prose was lost to the usage path"
+        );
+        assert_eq!(observer.cache_read_tokens, 0);
+    }
+
+    #[test]
+    fn the_usage_chunk_reaches_the_observer_totals() {
+        let mut observer = OpenAiObserver::default();
+        for frame in [
+            r#"{"choices":[{"index":0,"delta":{"content":"hi"}}],"usage":null}"#,
+            r#"{"choices":[],"usage":{"prompt_tokens_details":{"cached_tokens":900,"cache_write_tokens":100}}}"#,
+            "[DONE]",
+        ] {
+            observer.observe(&event(frame));
+        }
+
+        assert_eq!(observer.cache_read_tokens, 900);
+        assert_eq!(observer.cache_creation_tokens, 100);
+        assert!(observer.succeeded(), "the sentinel was lost");
     }
 
     #[test]

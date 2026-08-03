@@ -773,6 +773,21 @@ mod tests {
         (format!("http://{addr}"), captured)
     }
 
+    /// Starts a fake provider that answers any path with `body`.
+    async fn fake_any_path_answering(body: &'static str) -> String {
+        let app = Router::new().fallback(move || async move { body });
+
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        format!("http://{addr}")
+    }
+
     async fn post_to(app: Router, path: &str, body: String) -> Response {
         app.oneshot(
             Request::builder()
@@ -824,6 +839,66 @@ mod tests {
             sent.len(),
             source.len()
         );
+    }
+
+    #[tokio::test]
+    async fn both_openai_surfaces_feed_the_cache_metrics_end_to_end() {
+        // Companion to the Anthropic case above, and the reason it was not enough on its
+        // own: the dispatcher answered a hardcoded zero for both OpenAI dialects, so
+        // every request through these two routes reported no cache data while the
+        // Anthropic test kept the metric looking covered.
+        //
+        // Driven through the whole path — route, relay, parser, observer, metrics —
+        // because that is the only thing that shows the number reaching the gauge.
+        const CHAT: &str = concat!(
+            r#"data: {"choices":[{"index":0,"delta":{"content":"hi"}}],"usage":null}"#,
+            "\n\n",
+            r#"data: {"choices":[],"usage":{"prompt_tokens":1000,"#,
+            r#""prompt_tokens_details":{"cached_tokens":900,"cache_write_tokens":100}}}"#,
+            "\n\n",
+            "data: [DONE]\n\n",
+        );
+        const RESPONSES: &str = concat!(
+            "event: response.completed\n",
+            r#"data: {"type":"response.completed","response":{"usage":{"output_tokens":12,"#,
+            r#""input_tokens_details":{"cached_tokens":900,"cache_write_tokens":100}}}}"#,
+            "\n\n",
+        );
+
+        for (path, stream) in [("/v1/chat/completions", CHAT), ("/v1/responses", RESPONSES)] {
+            let base = fake_any_path_answering(stream).await;
+            let state = AppState::new(&base);
+
+            let response = post_to(
+                router_with(state.clone()),
+                path,
+                r#"{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}"#
+                    .to_owned(),
+            )
+            .await;
+
+            // Draining is what makes the observer see it; nothing is buffered on the
+            // proxy's behalf.
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            assert_eq!(
+                bytes.as_ref(),
+                stream.as_bytes(),
+                "{path} altered the stream"
+            );
+
+            let text = state.metrics().render();
+            assert!(
+                text.contains("headroom_cache_read_tokens_total 900"),
+                "{path} did not report its cache reads:\n{text}"
+            );
+            assert!(
+                text.contains("headroom_cache_creation_tokens_total 100"),
+                "{path} did not report its cache writes:\n{text}"
+            );
+            assert_eq!(state.metrics().cache_hit_rate(), Some(0.9), "{path}");
+        }
     }
 
     #[tokio::test]

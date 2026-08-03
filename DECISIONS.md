@@ -814,3 +814,62 @@ compression everywhere is not a safety fix.
 which point the fallback stops carrying I5 for the traffic this proxy mostly sees. Failing
 that, the honest next step is measuring how often real agent traffic contains the shapes
 that under-count, rather than assuming it does not.
+
+---
+
+## D30 — cache accounting is read from all three dialects, not just Anthropic
+
+**Decision:** parse provider-reported cache tokens from the OpenAI chat-completion and
+Responses streams as well as the Anthropic one, and delete the claim that neither OpenAI
+surface reports them.
+
+`Observer::cache_tokens` returned a hardcoded `(0, 0)` for both OpenAI dialects, under a
+comment that read: *"Zero for both OpenAI surfaces because neither reports cache usage in
+its stream — the honest answer, not a gap. Anything else would be a number this proxy made
+up about the metric it exists to move."* The module doc said the same thing in the same
+confident register, and a test named
+`cache_usage_is_reported_only_where_the_provider_sends_it` asserted it.
+
+Both providers do report it. Chat completions carry
+`usage.prompt_tokens_details.{cached_tokens,cache_write_tokens}`; Responses carries the
+same pair under `usage.input_tokens_details`. So every request through two of the three
+proxied surfaces reported no cache data on the one metric this proxy exists to move, and
+`headroom_cache_hit_rate` read as *no data at all* rather than as a number, which is the
+form the metric takes when it wants an operator to know it has nothing to say.
+
+**Why nothing caught it.** The test asserting `(0, 0)` fed
+`data: [DONE]\n\n` — a stream carrying no usage in the first place. It passes with the
+parser and without it. That is the vacuity failure this repository keeps re-learning:
+asserting *nothing happened* proves nothing unless something is also shown to make it
+happen. The end-to-end cache test covered `/v1/messages` only, so the metric looked
+exercised.
+
+**Two things about the shape of the frame mattered.** OpenAI's cache numbers ride in an
+extra final chunk whose `choices` array is *empty*, so the choice-first classifier reached
+`Other` and dropped it — the parse had to move ahead of the `choices` lookup. And once a
+client sets `include_usage`, every ordinary chunk carries an explicit `"usage": null`, so
+the new branch tests for an object rather than for the key; presence alone reclassifies the
+whole stream as usage frames and silently drops all of its prose.
+
+**What is still zero, and honestly so.** Chat completions send the usage chunk only when
+the client sets `stream_options.include_usage` — this proxy will not edit someone else's
+request to improve its own telemetry. And `cache_write_tokens` exists only on the model
+families that bill for cache writes, so on older models a fully-cached prompt yields reads
+with no writes and a hit rate of 1.0. Both are recorded in the README rather than papered
+over; a zero here means the provider said zero *or* said nothing, and the counter cannot
+separate them.
+
+**Also fixed:** cache usage is now read from `response.incomplete` and the other terminal
+Responses events, not just `response.completed`. A turn that hit its output-token limit
+still read its prefix from cache and was still billed for it, and truncation is the common
+shape for a long agent turn.
+
+**The third gap with this shape**, after the routing table (audit check 6) and the volatile
+scan (check 10): a capability built for one surface out of three, with a comment asserting
+the others did not need it. The replacement test is a table over the dialects, and check 11
+requires one row per `Observer` variant — because a table only proves what its rows cover,
+and the previous version of this file is what happens when nobody checks.
+
+**Would change if:** a provider starts reporting a cache figure this proxy cannot map onto
+reads and writes. The counter pair is the shared vocabulary; a third kind of number needs
+its own metric rather than a reinterpretation of these two.

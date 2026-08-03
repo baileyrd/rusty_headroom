@@ -13,6 +13,10 @@
 //! for the response to finish before reading either would mean buffering it, which is
 //! the one thing the relay exists not to do.
 //!
+//! Which end depends on the dialect, and neither end may be assumed: OpenAI puts its
+//! cache figures in the *final* chunk, Anthropic in the first. That is a reason to read
+//! every frame as it passes rather than to reach for whichever one seems to matter.
+//!
 //! # A cancelled stream still counts
 //!
 //! When a client disconnects mid-generation the stream is dropped, not exhausted, so
