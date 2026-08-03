@@ -6,6 +6,30 @@ the crate starts publishing releases.
 
 ---
 
+## An I2 gate with a frozen prefix that is actually frozen
+**2026-08-03** · mutation-testing the existing suite
+
+- **Added:** `i2_bulky_content_behind_a_breakpoint_is_left_alone`, and a fixture with a
+  real `cache_control` breakpoint and equally compressible content on both sides of it.
+- **Found by mutation.** Replacing the frozen floor with a constant `0` left the entire
+  end-to-end suite green. The existing I2 fixture's "frozen turns" were `"turn one"` and
+  `"answer one"` — nothing a compressor would touch — so the gates were asserting that
+  short strings stayed short. Worse, that fixture carried **no `cache_control` marker at
+  all**, and Anthropic caches only what the customer marks: `frozen_message_count`
+  returned zero, so nothing in it was ever frozen in the first place.
+- **What the mutation actually revealed is a second protection, not a hole.** The live
+  zone also applies a newest-claims rule — the newest message holding a category owns it,
+  and older messages holding the same category are skipped. For the common agent shape
+  that rule alone confines compression to the newest turn, and the frozen floor is
+  defence in depth over it. Disabling **either** leaves the suite green; disabling **both**
+  fails the new test, which is how the independence was confirmed rather than assumed.
+- **The test's comment says exactly that.** Claiming it gates the frozen floor would be
+  the same error as calling a module done because its tests pass — it gates the end-to-end
+  outcome, and it asserts both halves (frozen content unchanged, live content compressed)
+  so it cannot be satisfied by a proxy that compresses nothing.
+
+---
+
 ## `headroom savings` pinned against labelled metrics
 **2026-08-03** · follow-up to the routing telemetry
 
