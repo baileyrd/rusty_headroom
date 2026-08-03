@@ -6,6 +6,24 @@ the crate starts publishing releases.
 
 ---
 
+## The audit now checks that the invariants are still gated
+**2026-08-03** · no bug found — the claim was true, and is now held true
+
+- README.md and ARCHITECTURE.md both name which file gates which invariant, and that is
+  the load-bearing claim in this repository: the invariants are described as acceptance
+  criteria on every change rather than aspirations.
+- **Checked rather than assumed, and it holds** — `invariants.rs` carries `i1_`–`i4_` and
+  `i6_`–`i9_`, eight of them; `properties.rs` covers I5 and I10, which are claims about
+  many inputs and cannot be established by one fixture. Exactly what the docs say.
+- **Added:** check 7 of `scripts/reachability-audit.sh`, so it stays true. A renamed or
+  deleted gate test now fails the build instead of quietly turning two documents into
+  fiction. Verified by renaming `i7_tool_definitions_are_never_compressed` and watching
+  the audit name I7 and exit 1.
+- This is the same shape as checks 1–6, one level up: not a capability nothing reaches or
+  a decision copied twice, but a **guarantee nothing checks**.
+
+---
+
 ## The Python binding's reasons match the rest of the project
 **2026-08-03** · the eighth copy, across an FFI boundary, already wrong
 
