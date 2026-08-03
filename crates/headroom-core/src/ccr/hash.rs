@@ -219,6 +219,20 @@ mod tests {
     }
 
     #[test]
+    fn the_marker_wire_format_is_pinned() {
+        // A round trip against itself passes through any format change — rename the
+        // delimiters and both halves move together. But a marker outlives the request it
+        // was created in: it sits in a conversation the model still holds, and is redeemed
+        // later through `headroom_retrieve`, possibly against an upgraded binary. A format
+        // change would make every outstanding marker unredeemable, and the model would be
+        // told the content had expired.
+        assert_eq!(
+            marker(ContentHash::of(b"x")),
+            "<<ccr:3ae7d805f6789a6402acb70ad4096a85>>"
+        );
+    }
+
+    #[test]
     fn parse_marker_rejects_malformed_and_truncated_input() {
         let hash = ContentHash::of(b"x");
         let good = marker(hash);

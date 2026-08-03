@@ -570,6 +570,28 @@ mod tests {
         assert_ne!(payg.as_str(), sub.as_str());
     }
 
+    #[test]
+    fn the_aggregation_key_wire_format_is_pinned() {
+        // This string *is* the key in `recommendations.json`. `headroom learn` writes the
+        // file in one process and the proxy reads it in another, quite possibly from a
+        // different build — so the separator, the field order, and the model-family
+        // reduction are all wire format, not internal detail.
+        //
+        // Testing only that two keys differ (above) would pass through any format change:
+        // swap `|` for `:`, reorder the fields, and every previously written
+        // recommendation stops matching. Nothing errors; compression is simply
+        // re-attempted forever on shapes already measured as useless.
+        //
+        // Same reasoning as `the_fingerprint_is_pinned_to_a_literal`, one layer out.
+        let key = AggregationKey::new(
+            AuthMode::PayAsYouGo,
+            "claude-opus-4-20250514",
+            StructureHash::of(r#"{"a":1,"b":[2,3]}"#, ContentType::Json),
+        );
+
+        assert_eq!(key.as_str(), "payg|claude-opus|b937411607289da4");
+    }
+
     // ---- recommendations ----
 
     #[test]

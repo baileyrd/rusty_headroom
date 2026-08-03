@@ -6,6 +6,28 @@ the crate starts publishing releases.
 
 ---
 
+## Two more wire formats pinned
+**2026-08-03** · same shape as the `StructureHash` gap, one layer out
+
+- **Added:** `the_aggregation_key_wire_format_is_pinned` and
+  `the_marker_wire_format_is_pinned`.
+- **`AggregationKey::as_str()` is the key in `recommendations.json`**, written by
+  `headroom learn` in one process and read by the proxy in another, quite possibly from a
+  different build. The separator, the field order and the model-family reduction are all
+  **wire format**. It was tested only for distinctness — swap `|` for `:` and every
+  previously written recommendation silently stops matching.
+- **The CCR marker outlives its request.** `marker_round_trips` parses what it just
+  formatted, so both halves move together under any format change. But a marker sits in a
+  conversation the model still holds and is redeemed later through `headroom_retrieve` —
+  possibly against an upgraded binary. Changing the delimiters would make every
+  outstanding marker unredeemable, and the model would be told its content had expired.
+- **Both verified by mutation:** changing the separator to `:` and the prefix to `[[ccr:`
+  fails the new tests (and one existing retrieve test), and passed everything before.
+- **Already pinned, and the reason the omissions were visible:** `ContentHash`
+  (`000f01ff`) and `model_family` (`claude-opus-4-20250514` → `claude-opus`).
+
+---
+
 ## `StructureHash` pinned, closing a silent cross-process failure
 **2026-08-03** · mutation-testing determinism
 
