@@ -40,6 +40,26 @@ pub struct CrushConfig {
     /// waiting to happen. Tool output is not trusted input.
     pub max_depth: usize,
 
+    /// Most distinct values a field may have and still count as low-cardinality.
+    ///
+    /// Low-cardinality fields are the ones worth enumerating — "`status` is one of
+    /// `ok`, `retry`, `failed`" says more in fewer tokens than repeating the value on
+    /// every record. Set this too high and the "enumeration" is longer than the data
+    /// it replaces.
+    pub max_low_cardinality: usize,
+
+    /// Fewest fields an object needs before it counts as wide.
+    ///
+    /// Wide objects tend to be envelope boilerplate wrapped around the part that
+    /// matters, which is a different compression opportunity from a record set.
+    pub wide_object_fields: usize,
+
+    /// Total string bytes above which a document is treated as scalar-heavy.
+    ///
+    /// A document dominated by a few long strings has no structure worth exploiting;
+    /// it is a CCR offload candidate rather than something to summarize.
+    pub scalar_heavy_bytes: usize,
+
     /// Whether fields that look like errors are always preserved verbatim.
     ///
     /// Defaults to `true`. A summarized success payload costs the model a little
@@ -55,6 +75,9 @@ impl Default for CrushConfig {
             min_records_to_summarize: 5,
             max_string_len: 512,
             max_depth: 64,
+            max_low_cardinality: 8,
+            wide_object_fields: 12,
+            scalar_heavy_bytes: 1024,
             preserve_error_fields: true,
         }
     }

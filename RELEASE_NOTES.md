@@ -6,6 +6,38 @@ the crate starts publishing releases.
 
 ---
 
+## SmartCrusher analyzer — classification and field statistics
+**2026-08-03** · closes [#20](https://github.com/baileyrd/rusty_headroom/issues/20)
+
+- **Added:** `classify(&Shape, &CrushConfig) -> Pattern` naming the overall pattern —
+  `RecordSet`, `ScalarHeavy`, `WideObject`, `DeepNest`, or `Unremarkable`.
+- **Added:** `analyze_record_set` computing per-field statistics across an array of
+  objects — `Constant`, `LowCardinality`, `Unique`, or `Varied`, each with a
+  `present_in` count.
+- **Added:** `Shape::depth` and `Shape::string_bytes`, and three `CrushConfig`
+  knobs (`max_low_cardinality`, `wide_object_fields`, `scalar_heavy_bytes`).
+- **Correctness note:** a field is reported `Constant` only when it is present in
+  *every* record **and** equal in every record. A field that is uniform where present
+  but absent from one record is optional, not constant — reporting it constant would
+  tell the model every record carries it, which is false. Asserting something untrue
+  to the model is worse than not compressing.
+- **Design note:** `Unique` fields are identifiers and are never elided. They are how
+  the model refers back to a specific record, so summarizing them away costs it the
+  ability to ask about anything it can see.
+- **Design note:** classification and analysis disagree on strictness deliberately.
+  `Shape::is_record_set` treats one odd record as making the array heterogeneous;
+  `analyze_record_set` still analyzes it, because an array where one record carries
+  `error` and the rest do not is exactly what field statistics exist to surface.
+- **Design note:** cardinality keys on the serialized form of each value, so `1` and
+  `"1"` stay distinct. Counting accumulates in a `BTreeMap` — sorting is safe here
+  because these counts drive decisions rather than output ordering.
+- **Known limitation:** statistics are refused for arrays mixing objects and scalars.
+  Analyzing only the object elements would produce numbers that read as though they
+  described the whole array.
+- **Known limitation:** analysis only. Nothing acts on these findings yet — anchor
+  selection, planning, and the compaction formatter are still open, so no JSON is
+  compressed.
+
 ## SmartCrusher foundations — config and structural IR
 **2026-08-03** · closes [#15](https://github.com/baileyrd/rusty_headroom/issues/15)
 

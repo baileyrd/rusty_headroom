@@ -9,11 +9,13 @@
 //! [`CrushConfig`] tuning surface, and the [`Document`] / [`Shape`] IR that
 //! analysis, planning, and formatting all operate over.
 //!
-//! Analysis, statistics, anchor selection, and the compaction formatter arrive in
-//! later issues; this is the substrate they share.
+//! Analysis and classification decide what is worth doing about a document. Anchor
+//! selection, planning, and the compaction formatter arrive in later issues.
 
+mod analyzer;
 mod config;
 mod ir;
 
+pub use analyzer::{analyze_record_set, classify, FieldKind, FieldStat, Pattern, RecordSetStats};
 pub use config::CrushConfig;
 pub use ir::{Document, Shape};
