@@ -6,6 +6,37 @@ the crate starts publishing releases.
 
 ---
 
+## SmartCrusher outlier detection — keep what stands out
+**2026-08-03** · closes [#22](https://github.com/baileyrd/rusty_headroom/issues/22)
+
+- **Added:** `rank_outliers` — ranks records by how much they stand out, most
+  anomalous first, with an `OutlierReason` explaining each contribution.
+- **Why it matters:** summarizing 500 near-identical records is only safe if the ones
+  that are *not* near-identical survive. The interesting record in tool output is
+  almost always the anomalous one — the failed test among 200 passes, the file with a
+  permission error. Compressing that away yields output that is smaller, cheaper, and
+  useless.
+- **Signals:** rare values of a repeated field, a field the record's peers lack,
+  error-shaped fields (double weight), numeric outliers, and size outliers.
+- **Design note:** scores are fixed-point integers, not floats. Ranking must be
+  deterministic down to tie-breaking, and an integer score has a total order by
+  construction with no `NaN` to decide about. Ties break on record index (I4).
+- **Design note:** numeric outliers use median and median-absolute-deviation rather
+  than mean and standard deviation. Tool-output distributions are routinely skewed,
+  and a single extreme value drags the mean toward itself, masking the very outlier it
+  should expose.
+- **Design note:** error field names match whole words, case-insensitively. Substring
+  matching would fire on `error_rate` and rank ordinary telemetry as anomalous.
+- **Design note:** records that stand out in no way are omitted rather than ranked
+  last, so a genuinely uniform array yields nothing instead of an arbitrary pick.
+- **Known limitation:** `Unique` and `Constant` fields contribute no signal — the
+  first distinguishes every record equally, the second none. Correct, but it means a
+  record anomalous *only* in an identifier field goes unflagged.
+- **Known limitation:** size scoring serializes every record, which is a full pass
+  over the document on top of analysis.
+- **Known limitation:** still analysis. Nothing consumes these rankings yet — anchor
+  selection and the compaction formatter remain open.
+
 ## SmartCrusher analyzer — classification and field statistics
 **2026-08-03** · closes [#20](https://github.com/baileyrd/rusty_headroom/issues/20)
 
