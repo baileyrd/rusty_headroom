@@ -262,6 +262,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "bytes",
+ "http",
  "serde",
  "serde_json",
  "thiserror",

@@ -14,6 +14,7 @@ use crate::compression::{compress_request, Compressors};
 use crate::config::Config;
 use crate::headers::{sanitize, HeaderPolicy};
 use crate::health::health;
+use headroom_core::auth_mode::{classify_auth_mode, CompressionPolicy};
 
 /// Shared state: the compressors and the CCR store behind them.
 #[derive(Clone)]
@@ -59,14 +60,27 @@ async fn messages(
 
     // Sanitized here so the header path is exercised on the real request, even while
     // the relay itself is still to come.
-    let upstream_headers = sanitize(&headers, HeaderPolicy::default());
+    let auth_mode = classify_auth_mode(&headers);
+    let policy = CompressionPolicy::for_mode(auth_mode);
+    let upstream_headers = sanitize(
+        &headers,
+        HeaderPolicy {
+            forwarded_headers: policy.forwarded_headers,
+        },
+    );
     tracing::debug!(
         header_count = upstream_headers.len(),
         auth = ?crate::headers::redacted_authorization(&headers),
+        auth_mode = auth_mode.as_str(),
         "prepared upstream headers"
     );
 
-    let compressed = compress_request(&body, &state.compressors, config.compression_enabled());
+    let compressed = compress_request(
+        &body,
+        &state.compressors,
+        config.compression_enabled(),
+        policy,
+    );
     (axum::http::StatusCode::OK, compressed.into_owned())
 }
 
