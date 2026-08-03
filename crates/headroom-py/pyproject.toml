@@ -1,0 +1,21 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "headroom"
+description = "Cache-safe prompt compression for LLM agent traffic"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+# abi3-py310 in Cargo.toml builds against the stable ABI from 3.10 onward, so this floor
+# and that feature have to agree — a wheel claiming 3.9 support would fail to import.
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+dynamic = ["version"]
+
+[tool.maturin]
+# The crate is not a workspace default member, so maturin needs pointing at it.
+manifest-path = "Cargo.toml"

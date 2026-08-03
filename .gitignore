@@ -1,2 +1,5 @@
 /target
 **/*.rs.bk
+
+# maturin build output
+crates/headroom-py/dist/

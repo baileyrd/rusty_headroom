@@ -255,8 +255,8 @@ Every row is a gap: the target repo is empty, so all rows are new implementation
 
 | ID | Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| B1 | pyo3 module + `compress()` | fn | spec | all | README Python API | no | M | abi3-py310, built via maturin. Mirrors `await compress(messages, model=...)`. **Deliberately deferred** — needs maturin and a Python toolchain; see DECISIONS D4. |
-| B2 | `pyo3-log` bridging | fn | spec | all | reference workspace deps | no | S | Rust `tracing`/`log` → Python `logging`. Depends on B1. **Deliberately deferred** — depends on B1; see DECISIONS D4. |
+| B1 | pyo3 module + `compress()` | fn | spec | all | README Python API | no | M | abi3-py310, built via maturin. Done as `crates/headroom-py` — `compress()`, `count_tokens()`, `detect_content_type()`, routing through `Orchestrator` so Python and the proxy agree by construction. D4's deferral is reversed; see D21. |
+| B2 | `pyo3-log` bridging | fn | spec | all | reference workspace deps | no | S | Rust `tracing`/`log` → Python `logging`. Done via `pyo3-log`, initialized at module import. See D21. |
 
 ### Test infrastructure
 

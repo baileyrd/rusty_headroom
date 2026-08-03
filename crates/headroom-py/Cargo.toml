@@ -1,0 +1,30 @@
+[package]
+name = "headroom-py"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Python bindings for the headroom compression engine"
+
+[lib]
+# The import name on the Python side. `crate-type = ["cdylib"]` is what maturin needs to
+# produce a loadable extension module rather than a Rust rlib.
+name = "headroom"
+crate-type = ["cdylib"]
+
+[dependencies]
+headroom-core = { workspace = true }
+
+# `extension-module` tells pyo3 not to link libpython, which is what makes the wheel
+# importable. `abi3-py310` builds against the stable ABI, so one wheel serves 3.10 and
+# every later interpreter instead of one wheel per minor version.
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"] }
+
+# Gap row B2. Without this, every `tracing`/`log` line the engine emits is discarded —
+# the same silent-nothing failure as a proxy with no subscriber installed.
+pyo3-log = "0.12"
+log = "0.4"
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["fmt"] }

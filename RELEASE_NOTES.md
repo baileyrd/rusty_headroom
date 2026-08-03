@@ -6,6 +6,43 @@ the crate starts publishing releases.
 
 ---
 
+## Python bindings ship; a deferral is reversed
+**2026-08-03** · gap rows B1 and B2
+
+- **Added:** `crates/headroom-py`, a pyo3 abi3 extension module — `compress()`,
+  `count_tokens()`, `detect_content_type()`, and a frozen `CompressionResult`.
+- **Added:** `pyo3-log`, initialized at import, so the engine's `tracing`/`log` output
+  reaches Python's `logging` instead of vanishing (B2).
+- **Added:** a `python` CI job that builds the wheel, installs it, and runs `pytest`.
+- **Reversed:** `DECISIONS.md` D4 deferred these rows because "neither maturin nor a
+  Python toolchain is available here". **That was asserted, not checked.** Python 3.11
+  with headers is present and `maturin` installs cleanly. D4's own "would change if"
+  named exactly this condition. D4 is kept and annotated rather than deleted, because the
+  failure worth remembering is that it was recorded as a fact without being verified.
+- **Design note:** the binding routes through `Orchestrator` rather than assembling its
+  own compressor set. Assembling one would have been shorter and is the mistake this
+  codebase already made once — the proxy carried its own copy of the routing decision,
+  the CLI carried another, and nothing failed when they drifted. Verified rather than
+  assumed: the same log compresses to a **byte-identical** result through
+  `headroom.compress()` and through the `headroom compress` CLI
+  (`b6d2e747b6148e7d…` both sides).
+- **Design note:** the CCR store is per call, so a `<<ccr:HASH>>` marker in returned text
+  is not retrievable through this API. A process-lifetime store would let one caller
+  fetch content from a request they never made. Retrieval belongs to the proxy and the
+  MCP `headroom_retrieve` tool, which own stores with a defined scope.
+- **Design note:** an unknown `auth_mode` raises `ValueError` rather than defaulting.
+  Defaulting would hand the most permissive policy to a caller who misspelled the most
+  restrictive one — invariant I10 decided by a typo.
+- **Design note:** `headroom-py` stays out of `default-members`, so the everyday
+  `cargo build`/`cargo test` loop still needs no Python toolchain. That also means the
+  Rust job never builds the module, which is why the wheel gets its own job — a binding
+  never imported in CI is precisely the state D4 was worried about.
+- **Measured from Python:** a 400-line log went 9,599 → 80 tokens; 300 JSON records went
+  6,502 → 100. Subscription mode returned the input unchanged (I10), and 20 repeat runs
+  produced one distinct output (I4).
+
+---
+
 ## The reachability audit, recorded
 **2026-08-03** · documentation only
 

@@ -58,6 +58,10 @@ Left unimplemented and marked as such rather than shipped blind.
 **Would change if:** a Python toolchain is available, or Rust-only is confirmed as the
 intent.
 
+> **Reversed on 2026-08-03 by D21.** The premise was wrong: Python 3.11 with headers is
+> present and `maturin` installs cleanly. Kept here rather than deleted, because the
+> failure worth remembering is that this was recorded as a fact without being checked.
+
 ## D5 — ONNX, dashboard, and Bedrock/Vertex remain out of scope
 **2026-08-03**
 
@@ -385,3 +389,40 @@ the cache every two turns on exactly the long conversations it exists to help.
 **Would change if:** a provider offers a breakpoint mechanism that lives outside the
 request body — a header, or a handle — at which point stabilization stops touching the
 hot zone and the gate is no longer needed.
+
+
+## D21 — Python bindings implemented; D4 reversed
+**2026-08-03**
+
+D4 deferred gap rows B1-B2 because "neither maturin nor a Python toolchain is available
+here". That was asserted, not checked. Python 3.11.15 with headers is present, `pip` is
+present, and `maturin` installs cleanly — and D4's own "would change if" names exactly
+this condition. Python interop was explicitly in scope for this run, so the deferral had
+been withholding the one in-scope item for a reason that did not hold.
+
+**The binding routes through `Orchestrator`.** Assembling a compressor set inside the
+extension module would have been shorter and is the mistake this codebase already made
+once: the proxy carried its own copy of the routing decision, the CLI carried another,
+and nothing failed when they drifted. Verified rather than asserted — the same log
+compresses to a byte-identical result through `headroom.compress()` and through
+`headroom compress` on the CLI.
+
+**Nothing but strings and numbers crosses the boundary, and the CCR store is per call.**
+A store living for the process would let one caller retrieve content from a request they
+never made. The cost is that a `<<ccr:HASH>>` marker in returned text is not retrievable
+through this API; callers who need retrieval want the proxy or the MCP
+`headroom_retrieve` tool, both of which own a store with a defined lifetime and scope.
+
+**An unknown `auth_mode` raises rather than defaulting.** Defaulting would hand the most
+permissive policy to a caller who misspelled the most restrictive one — invariant I10
+decided by a typo.
+
+**`headroom-py` stays out of `default-members`.** The everyday `cargo build` and
+`cargo test` loop needs no Python toolchain, which also means the Rust CI job never
+builds the extension module — so the wheel gets its own CI job that builds, installs and
+runs `pytest` against it. A binding that is never imported in CI is exactly the state D4
+was worried about.
+
+**Would change if:** nothing foreseeable. If a Python toolchain became unavailable, the
+Rust jobs would still pass and only the `python` job would fail, which is the correct
+signal rather than a silent regression.

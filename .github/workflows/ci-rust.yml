@@ -40,3 +40,32 @@ jobs:
 
       - name: Test
         run: cargo test --all-features
+
+  # The Python bindings, in their own job. The Rust job above runs against
+  # `default-members`, which excludes `headroom-py` so the everyday loop needs no Python
+  # toolchain — but that also means nothing there ever builds the extension module.
+  # Gap rows B1 and B2 are only meaningfully "done" if a wheel builds and imports, so
+  # that is what this checks.
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # The floor `abi3-py310` builds against. A wheel built here imports on every
+          # later interpreter too, which is the whole point of the stable ABI.
+          python-version: "3.10"
+
+      - name: Install maturin and pytest
+        run: pip install maturin pytest
+
+      - name: Build and install the wheel
+        working-directory: crates/headroom-py
+        run: |
+          maturin build --release --out dist
+          pip install --force-reinstall dist/*.whl
+
+      - name: Test
+        working-directory: crates/headroom-py
+        run: pytest tests -q
