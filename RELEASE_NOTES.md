@@ -6,6 +6,59 @@ the crate starts publishing releases.
 
 ---
 
+## Operational guards and runtime configuration
+**2026-08-03** · gap rows X20, F5
+
+- **Added:** `guard::is_self_referential` and a startup check — the proxy refuses to
+  start when its upstream is its own listen address.
+- **Added:** `guard::RateLimiter`, wired into the relay. 600 requests/minute, well above
+  any real workload.
+- **Added:** the request log — path, byte count, and the `Authorization` prefix.
+- **Added:** `POST /admin/runtime-env` and a runtime override layer in `config`.
+- **Verified through the release binary:** a self-referential upstream refuses to start
+  with `upstream http://localhost:8795 is this proxy's own listen address
+  (127.0.0.1:8795); every request would forward to itself`; and a live proxy had
+  compression turned off over the admin endpoint and forwarded the next 10,420-byte
+  request uncompressed, without a restart.
+- **Design note:** the admin endpoint is gated on the peer address being loopback,
+  checked in the handler rather than relied on from the default bind. It can change
+  `HEADROOM_UPSTREAM`, so anyone who can reach it can point the proxy at a server they
+  control and every subsequent request carries the customer's credential there. That
+  makes it a credential-exfiltration primitive, not merely a configuration surface — and
+  a control that only holds under the default configuration is not a control.
+- **Design note:** a request with no connection information is refused rather than
+  allowed. The handler cannot establish the caller is local, and being able to is the
+  endpoint's entire protection.
+- **Design note:** the endpoint echoes applied *names* and never values. Configuration
+  can carry an upstream URL with credentials in it, and an endpoint that reflects what
+  it was given is the easiest way for one to reach a log. Names outside `HEADROOM_*` are
+  ignored, so this is a way to retune the proxy rather than a general lever on the
+  process.
+- **Design note:** the rate limit answers **429, not 503**. A provider SDK already knows
+  how to back off and retry a 429; several read 503 as "the service is broken" and give
+  up, turning a momentary limit into a failed request. A test asserts the refused
+  request never reaches the provider — a limiter that forwarded and then reported 429
+  would protect nothing.
+- **Design note:** `RateLimiter::available()` refills before reading. A reader that
+  reported the stored count would say "0 tokens left" for a bucket whose window elapsed
+  an hour ago and which will admit the very next request — wrong exactly when someone is
+  looking at it to find out whether the limiter is the problem. Caught by a test, not by
+  review.
+- **Design note:** loop detection treats `localhost`, `127.0.0.0/8` and `::1` as the same
+  socket. Checking only the literal string would catch the least likely spelling of the
+  mistake. Startup rather than per-request, because the header-based alternative is a
+  fingerprint leak — `DECISIONS.md` D11.
+- **Design note:** runtime overrides live in an `RwLock` map rather than being written
+  to the process environment. `setenv` races `getenv`, and this proxy reads its config
+  per request from a thread pool — see `DECISIONS.md` D10.
+- **Known limitation:** the rate limit is process-wide, not per client. The proxy binds
+  loopback and fronts one credential, so the total rate reaching the provider is the
+  thing worth bounding — but a shared deployment would need per-caller buckets.
+- **Known limitation:** the limit is a compile-time constant. It is a backstop against a
+  runaway retry loop rather than a quota, and it is not yet configurable.
+- **Known limitation:** overrides are process-local and lost on restart, which is
+  intentional for an incident lever but means they are not a configuration store.
+
 ## OpenAI routes
 **2026-08-03** · gap rows X6, X7, X8, X11
 

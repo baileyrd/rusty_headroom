@@ -71,7 +71,7 @@ Every row is a gap: the target repo is empty, so all rows are new implementation
 | F2 | CI pipeline | infra | spec | all | `.github/workflows` | no | S | build + test + clippy `-D warnings` + fmt check. Must be a required status check. |
 | F3 | `Error` / `Result` | type | spec | all | REALIGNMENT §2.3 | no | S | `thiserror`-based, one error enum per crate, no `unwrap`/`expect` outside tests. |
 | F4 | `Config` + env loading | type | spec | all | `docs/configuration.mdx` | no | M | `HEADROOM_*` env vars, read live per request. |
-| F5 | `POST /admin/runtime-env` | fn | spec | all | README "hot-sync" | no | S | Runtime config hot-reload without restart. Depends on F4, X1. |
+| F5 | `POST /admin/runtime-env` | fn | spec | all | README "hot-sync" | no | S | Runtime config hot-reload without restart. Depends on F4, X1. Done via `admin::runtime_env` + `config` override map (DECISIONS D10); gated on a loopback peer address. |
 
 ### Tokenization
 
@@ -176,7 +176,7 @@ Every row is a gap: the target repo is empty, so all rows are new implementation
 | X17 | volatile-content detector | fn | spec | all | REALIGNMENT Phase E | no | M | Warn only — never rewrite (that was the original bug). |
 | X18 | cache-drift telemetry | fn | spec | all | REALIGNMENT Phase E | no | S | Detect and report prefix busts. Done via `observe::ObservingStream` — cache read/creation tokens read from the `message_start` usage block feed `headroom_cache_hit_rate`. |
 | X19 | Prometheus metrics + observability | fn | spec | all | `docs/metrics.mdx` | no | M | cache hit rate, compression ratio, token savings. |
-| X20 | loopback guard + rate limit + request log | fn | spec | all | REALIGNMENT Phase H file list | no | M | Prevent proxy-to-self loops; redact `Authorization` to first 12 chars. |
+| X20 | loopback guard + rate limit + request log | fn | spec | all | REALIGNMENT Phase H file list | no | M | Prevent proxy-to-self loops; redact `Authorization` to first 12 chars. Done via `guard::{is_self_referential, RateLimiter}` — startup loop check (see DECISIONS D11), 600 req/min backstop answering 429. |
 
 ### MCP server
 

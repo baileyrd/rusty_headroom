@@ -1,0 +1,321 @@
+//! `POST /admin/runtime-env` — retune a running proxy without restarting it.
+//!
+//! Restarting is not free here. The proxy sits in the middle of streaming responses,
+//! and a restart truncates every one in flight — which reaches a user as a corrupt
+//! answer rather than as an error they can retry. Turning compression off during an
+//! incident should not cost that.
+//!
+//! # Why this endpoint is gated on the peer address
+//!
+//! It can change `HEADROOM_UPSTREAM`. Anyone who can reach it can therefore point the
+//! proxy at a server they control, and every subsequent request carries the customer's
+//! provider credential to it. That makes an unauthenticated admin endpoint a
+//! credential-exfiltration primitive, not merely a configuration surface.
+//!
+//! The proxy binds loopback by default, which makes that unreachable — but the bind
+//! address is configurable, and a control that only holds under the default
+//! configuration is not a control. So the handler checks the peer address itself and
+//! refuses anything that is not loopback, whatever the proxy is bound to.
+
+use std::collections::BTreeMap;
+use std::net::SocketAddr;
+
+use axum::extract::{ConnectInfo, Request};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+use serde_json::Value;
+
+use crate::config;
+
+/// Largest body this endpoint will read.
+///
+/// A configuration object is a handful of short strings; 64 KiB is generous by three
+/// orders of magnitude and still bounded.
+const MAX_BODY_BYTES: usize = 64 * 1024;
+
+/// Applies runtime configuration overrides.
+///
+/// The body is a flat object of `HEADROOM_*` names to string values. Names outside
+/// that namespace are ignored rather than rejected wholesale, so a caller sending one
+/// unknown key still gets the rest applied — and the response says exactly which were
+/// taken, so "ignored" is never something the caller has to infer.
+pub async fn runtime_env(request: Request) -> Response {
+    // Read straight from the extensions rather than through an `Option<ConnectInfo>`
+    // extractor, which axum will not build: `ConnectInfo` implements
+    // `FromRequestParts` but not its optional counterpart, so the extractor form
+    // rejects the request before this function can decide what to do about it — and
+    // deciding is the whole job here.
+    let peer = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| info.0);
+
+    // Absent connection info means the server was not built with
+    // `into_make_service_with_connect_info`. Refusing is the only safe reading: the
+    // handler cannot establish that the caller is local, and this endpoint's entire
+    // protection is that it can.
+    let Some(peer) = peer else {
+        return refuse("connection information unavailable; refusing to apply overrides");
+    };
+
+    if !peer.ip().is_loopback() {
+        tracing::warn!(
+            peer = %peer.ip(),
+            "refused a non-local runtime-env request"
+        );
+        return refuse("runtime-env may only be set from the local host");
+    }
+
+    // Bounded. A configuration object is a handful of short strings, and an unbounded
+    // read on an endpoint that changes process behavior is a way to exhaust memory
+    // without ever sending anything valid.
+    let Ok(bytes) = axum::body::to_bytes(request.into_body(), MAX_BODY_BYTES).await else {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({
+                "error": format!("body exceeds {MAX_BODY_BYTES} bytes"),
+            })),
+        )
+            .into_response();
+    };
+
+    let Ok(body) = serde_json::from_slice::<Value>(&bytes) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "body is not valid JSON" })),
+        )
+            .into_response();
+    };
+
+    let Some(object) = body.as_object() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "expected a JSON object of HEADROOM_* names to string values",
+            })),
+        )
+            .into_response();
+    };
+
+    let requested: BTreeMap<String, String> = object
+        .iter()
+        .filter_map(|(name, value)| {
+            // Numbers and booleans are accepted and stringified, because an operator
+            // typing `{"HEADROOM_PORT": 8788}` means the obvious thing and a 400 here
+            // would be pedantry during an incident.
+            let value = match value {
+                Value::String(text) => text.clone(),
+                Value::Number(number) => number.to_string(),
+                Value::Bool(flag) => flag.to_string(),
+                _ => return None,
+            };
+            Some((name.clone(), value))
+        })
+        .collect();
+
+    let applied = config::set_overrides(requested);
+    tracing::info!(?applied, "runtime overrides applied");
+
+    // The values are echoed back as *names only*. Configuration can carry an upstream
+    // URL with credentials in it, and an endpoint that reflects what it was given is
+    // the easiest way for one to end up in a log.
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "applied": applied })),
+    )
+        .into_response()
+}
+
+/// Builds the refusal, in the shape the rest of the proxy uses for errors.
+fn refuse(message: &str) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "type": "error",
+            "error": { "type": "permission_error", "message": message },
+        })),
+    )
+        .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::routing::post;
+    use axum::Router;
+    use tower::ServiceExt;
+
+    /// Serializes these tests against each other.
+    ///
+    /// The override map is process-global, which is the point of it — but `cargo test`
+    /// runs tests on a thread pool, so without this two tests clear and set the same
+    /// map concurrently and fail in whichever order the scheduler picked. That is a
+    /// flake in the tests, not in the code, and it deserves a lock rather than a retry.
+    ///
+    /// An async mutex rather than `std::sync::Mutex`, because each test holds it across
+    /// an `.await`. These are single-task tests so a blocking guard could not actually
+    /// deadlock, but "it happens to be safe here" is not a property that survives
+    /// someone adding a second task to one of them.
+    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    fn app() -> Router {
+        Router::new().route("/admin/runtime-env", post(runtime_env))
+    }
+
+    /// Sends `body` from `peer`, or with no connection info when `peer` is `None`.
+    async fn call(peer: Option<&str>, body: &str) -> Response {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/admin/runtime-env")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_owned()))
+            .unwrap();
+
+        if let Some(peer) = peer {
+            let addr: SocketAddr = peer.parse().unwrap();
+            request.extensions_mut().insert(ConnectInfo(addr));
+        }
+
+        app().oneshot(request).await.unwrap()
+    }
+
+    async fn body_of(response: Response) -> Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_local_request_applies_the_overrides() {
+        let _guard = SERIAL.lock().await;
+        config::clear_overrides();
+
+        let response = call(Some("127.0.0.1:5555"), r#"{"HEADROOM_COMPRESSION":"0"}"#).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        assert!(!crate::Config::from_env().compression_enabled());
+        config::clear_overrides();
+    }
+
+    #[tokio::test]
+    async fn a_remote_request_is_refused() {
+        // This endpoint can repoint `HEADROOM_UPSTREAM`, so anyone who can reach it can
+        // redirect every subsequent request — credential attached — to a server they
+        // control.
+        let _guard = SERIAL.lock().await;
+        config::clear_overrides();
+
+        let response = call(
+            Some("203.0.113.9:5555"),
+            r#"{"HEADROOM_UPSTREAM":"http://evil"}"#,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            crate::Config::from_env().upstream(),
+            crate::config::DEFAULT_UPSTREAM,
+            "a remote caller changed the upstream"
+        );
+        config::clear_overrides();
+    }
+
+    #[tokio::test]
+    async fn a_request_without_connection_information_is_refused() {
+        // The handler cannot establish that the caller is local, and being able to is
+        // this endpoint's entire protection. Failing closed is the only safe reading.
+        let _guard = SERIAL.lock().await;
+        config::clear_overrides();
+
+        let response = call(None, r#"{"HEADROOM_UPSTREAM":"http://evil"}"#).await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            crate::Config::from_env().upstream(),
+            crate::config::DEFAULT_UPSTREAM
+        );
+        config::clear_overrides();
+    }
+
+    #[tokio::test]
+    async fn names_outside_the_headroom_namespace_are_ignored() {
+        // Otherwise this is a general-purpose lever on the process for anyone who can
+        // reach it, rather than a way to retune the proxy.
+        let _guard = SERIAL.lock().await;
+        config::clear_overrides();
+
+        let response = call(
+            Some("127.0.0.1:5555"),
+            r#"{"HEADROOM_COMPRESSION":"0","PATH":"/evil","LD_PRELOAD":"/x.so"}"#,
+        )
+        .await;
+
+        let applied = body_of(response).await;
+        let applied = applied["applied"].as_array().unwrap();
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0], "HEADROOM_COMPRESSION");
+        assert!(!config::overrides().contains_key("PATH"));
+
+        config::clear_overrides();
+    }
+
+    #[tokio::test]
+    async fn the_response_echoes_names_but_never_values() {
+        // Configuration can carry an upstream URL with credentials in it, and an
+        // endpoint that reflects what it was given is the easiest way for one to reach
+        // a log.
+        let _guard = SERIAL.lock().await;
+        config::clear_overrides();
+
+        let response = call(
+            Some("127.0.0.1:5555"),
+            r#"{"HEADROOM_UPSTREAM":"https://user:secret@example.com"}"#,
+        )
+        .await;
+
+        let rendered = body_of(response).await.to_string();
+        assert!(rendered.contains("HEADROOM_UPSTREAM"));
+        assert!(
+            !rendered.contains("secret"),
+            "a value was echoed: {rendered}"
+        );
+
+        config::clear_overrides();
+    }
+
+    #[tokio::test]
+    async fn numbers_and_booleans_are_accepted_rather_than_rejected() {
+        // `{"HEADROOM_PORT": 8788}` means the obvious thing, and a 400 here would be
+        // pedantry during an incident.
+        let _guard = SERIAL.lock().await;
+        config::clear_overrides();
+
+        let response = call(
+            Some("127.0.0.1:5555"),
+            r#"{"HEADROOM_PORT":8788,"HEADROOM_COMPRESSION":false}"#,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(config::overrides().get("HEADROOM_PORT").unwrap(), "8788");
+        assert_eq!(
+            config::overrides().get("HEADROOM_COMPRESSION").unwrap(),
+            "false"
+        );
+
+        config::clear_overrides();
+    }
+
+    #[tokio::test]
+    async fn a_non_object_body_is_a_400_not_a_panic() {
+        let _guard = SERIAL.lock().await;
+        config::clear_overrides();
+        let response = call(Some("127.0.0.1:5555"), r#"["not","an","object"]"#).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        config::clear_overrides();
+    }
+}

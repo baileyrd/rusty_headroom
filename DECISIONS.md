@@ -133,3 +133,40 @@ because a TCP/TLS handshake that has not completed in ten seconds is not going t
 **Would change if:** a deployment needs bounded resource usage more than it needs
 uninterrupted long generations, in which case the timeout belongs in `Config` as an
 opt-in rather than as a default.
+
+## D10 — Runtime config uses an override map, not `std::env::set_var`
+**2026-08-03**
+
+Gap row F5 asks for configuration hot-reload. The direct implementation is to have
+`POST /admin/runtime-env` write the process environment, since `Config::from_env`
+already reads it live.
+
+That would be a bug rather than a shortcut. `setenv` is not safe to call while another
+thread may be in `getenv`, and this proxy reads its configuration on every request from
+a thread pool — so a hot-reload would be racing every request in flight, with undefined
+behavior rather than a stale read as the failure mode. It would also pass a bare
+`cargo test` on most days, which is the worst property a data race can have.
+
+Taken: an `RwLock<BTreeMap>` consulted ahead of the environment. An uncontended read
+lock per lookup, and simply correct.
+
+**Would change if:** nothing plausible. The environment is not a mutable global in a
+multithreaded process, whatever the API suggests.
+
+## D11 — Loop detection is a startup check, not a per-request header
+**2026-08-03**
+
+The usual way to catch a proxy forwarding to itself is a hop-count header: add one on
+the way out, refuse when it comes back too high.
+
+That is not available here. `crate::headers` exists because a header revealing that a
+proxy is present is a subscription-revocation hazard, and a loop-detection header is
+precisely such a header. Paying a fingerprint leak on *every* request to detect a
+misconfiguration a startup check already catches is the wrong trade.
+
+Taken: compare the configured upstream against the listen address at startup, treating
+`localhost`, `127.0.0.0/8` and `::1` as equivalent, and refuse to start on a match.
+
+**Would change if:** the proxy needs to detect loops through an *intermediate* hop,
+which a startup check cannot see. That would need a header, and the fingerprint cost
+would have to be weighed deliberately rather than assumed acceptable.
