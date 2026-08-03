@@ -6,6 +6,45 @@ the crate starts publishing releases.
 
 ---
 
+## `/metrics` says why traffic did not compress
+**2026-08-03** · gap row N1's proxy-side half
+
+- **Added:** `headroom_routing_total{reason=...}`, counting every block by the routing
+  decision it received — `compress`, `lossless`, `policy_forbids`, `unsafe`,
+  `no_compressor`, `measured_useless`, and `other`.
+- **Added:** `Compressors::with_metrics`, attached by the proxy and nothing else.
+- **Fixed:** `Compressors::routing()` was called from **one place in the workspace, a
+  test**. `Orchestrator::transform_for`'s doc comment says "callers recording telemetry
+  should use `route`" — no caller recorded telemetry. Six carefully distinguished reasons
+  were computed for the decision and thrown away.
+- **Why it matters:** the reasons have opposite fixes. `policy_forbids` means check the
+  auth mode; `no_compressor` and `not_smaller` mean no action at all. An operator whose
+  traffic was not shrinking saw only `headroom_passthrough_total` and could not tell
+  "broken" from "working as intended".
+- **This is also how #81 and #83 stayed hidden.** The proxy silently recorded
+  `no_compressor` for every source file and every prose tool result, and nothing surfaced
+  it. A per-reason counter would have made both visible on day one.
+- **Design note:** one labelled metric, not six named ones. The reasons are one dimension
+  of one measurement, and six counters would make "how many blocks were declined for any
+  reason" a query nobody writes.
+- **Design note:** counted per *block*, not per request. One request carries blocks that
+  routinely route differently — a JSON tool result compresses while the prose beside it
+  is below threshold — and a per-request label would be whichever block came last.
+- **Design note:** an unrecognized reason lands in `other` rather than being dropped.
+  Telemetry that quietly loses a category is exactly how a content type goes unnoticed.
+- **Invariant I9 holds, with a test:** the compressed bytes are byte-identical with and
+  without the metrics handle attached, and the test fails if nothing was recorded.
+- **Verified through the release binary**, four requests across three auth modes:
+
+```
+headroom_routing_total{reason="compress"} 2
+headroom_routing_total{reason="lossless"} 1
+headroom_routing_total{reason="policy_forbids"} 1
+headroom_routing_total{reason="unsafe"} 0
+```
+
+---
+
 ## The proxy compresses prose from tools — and never what a person wrote
 **2026-08-03** · gap row C10, and a correction to S4/S5
 

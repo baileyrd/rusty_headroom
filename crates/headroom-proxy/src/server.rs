@@ -59,6 +59,11 @@ impl AppState {
             }
         };
 
+        // Built before the compressor set so both share one instance: routing counters
+        // and request counters have to land in the same place the `/metrics` handler
+        // reads from, or half the numbers would be invisible.
+        let metrics = Arc::new(Metrics::new());
+
         Self {
             compressors: Arc::new(
                 Compressors::with_recommendations(
@@ -72,9 +77,12 @@ impl AppState {
                 // Also read once. A memory set that changed between requests would make
                 // the same request produce different bytes depending on when it arrived,
                 // and those bytes go upstream — see `Config::memories`.
-                .with_memories(Config::memories(), Config::memory_limit()),
+                .with_memories(Config::memories(), Config::memory_limit())
+                // Routing reasons are counted here and nowhere else: the CLI and the
+                // library callers have no metrics endpoint to read them from.
+                .with_metrics(metrics.clone()),
             ),
-            metrics: Arc::new(Metrics::new()),
+            metrics,
             upstream,
             limiter: Arc::new(RateLimiter::new(RATE_CAPACITY, RATE_WINDOW)),
         }

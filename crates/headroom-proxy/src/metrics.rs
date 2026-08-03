@@ -28,7 +28,31 @@ pub struct Metrics {
     cache_reads: AtomicU64,
     cache_creations: AtomicU64,
     stream_errors: AtomicU64,
+    /// Blocks counted by why they were routed as they were.
+    ///
+    /// # Why a fixed array rather than a map
+    ///
+    /// The reasons are a closed set — `Routing` has six variants and gaining a seventh
+    /// is a deliberate change to `headroom-core`. A map would add a lock or an atomic
+    /// hash on a path that runs per block, to model a dimension that cannot grow at
+    /// runtime.
+    routing: [AtomicU64; ROUTING_REASONS.len()],
 }
+
+/// Every reason a block can be routed, in the order the counters are stored.
+///
+/// These are the strings `Routing::as_str` produces. A reason missing from this list is
+/// counted as `other`, which is visible in the output rather than silently dropped —
+/// telemetry that quietly loses a category is how a whole content type goes unnoticed.
+const ROUTING_REASONS: [&str; 7] = [
+    "compress",
+    "lossless",
+    "policy_forbids",
+    "unsafe",
+    "no_compressor",
+    "measured_useless",
+    "other",
+];
 
 impl Metrics {
     /// Creates zeroed counters.
@@ -43,6 +67,29 @@ impl Metrics {
         self.tokens_before
             .fetch_add(tokens_before, Ordering::Relaxed);
         self.tokens_after.fetch_add(tokens_after, Ordering::Relaxed);
+    }
+
+    /// Records why one block was routed as it was.
+    ///
+    /// Invariant I9: this observes and nothing else. It takes the reason `route` already
+    /// computed, and changes no decision and no byte.
+    ///
+    /// # Why per block rather than per request
+    ///
+    /// One request carries many blocks, and they routinely route differently — a JSON
+    /// tool result compresses while the prose beside it is below threshold. Counting per
+    /// request would force a single label onto a mixed outcome, and the label would be
+    /// whichever block happened to come last.
+    pub fn record_routing(&self, reason: &str) {
+        let index = ROUTING_REASONS
+            .iter()
+            .position(|known| *known == reason)
+            // The `other` slot, last. An unknown reason is a `Routing` variant this
+            // build does not know about, which should show up as a number rather than
+            // vanish.
+            .unwrap_or(ROUTING_REASONS.len() - 1);
+
+        self.routing[index].fetch_add(1, Ordering::Relaxed);
     }
 
     /// Records a request forwarded unchanged.
@@ -135,6 +182,21 @@ impl Metrics {
         for (name, help, value) in metrics {
             out.push_str(&format!(
                 "# HELP {name} {help}\n# TYPE {name} counter\n{name} {value}\n"
+            ));
+        }
+
+        // A single labelled metric rather than six named ones: the reasons are one
+        // dimension of one measurement, and Prometheus is built to sum and filter across
+        // a label. Six separate counters would make "how many blocks were declined for
+        // any reason" a query nobody writes.
+        out.push_str(
+            "# HELP headroom_routing_total Blocks by why they were routed as they were.\n\
+             # TYPE headroom_routing_total counter\n",
+        );
+        for (index, reason) in ROUTING_REASONS.iter().enumerate() {
+            out.push_str(&format!(
+                "headroom_routing_total{{reason=\"{reason}\"}} {}\n",
+                self.routing[index].load(Ordering::Relaxed)
             ));
         }
 
@@ -239,6 +301,36 @@ mod tests {
     }
 
     #[test]
+    fn routing_reasons_are_counted_separately() {
+        // The six reasons have opposite fixes — "nothing handles this type" needs no
+        // action, "policy forbids it" means checking the auth mode. Collapsing them into
+        // one passthrough counter is how two entire content types went uncompressed
+        // without anything surfacing it.
+        let metrics = Metrics::new();
+        metrics.record_routing("compress");
+        metrics.record_routing("compress");
+        metrics.record_routing("policy_forbids");
+
+        let rendered = metrics.render();
+        assert!(rendered.contains(r#"headroom_routing_total{reason="compress"} 2"#));
+        assert!(rendered.contains(r#"headroom_routing_total{reason="policy_forbids"} 1"#));
+        assert!(rendered.contains(r#"headroom_routing_total{reason="no_compressor"} 0"#));
+    }
+
+    #[test]
+    fn an_unknown_reason_is_counted_rather_than_dropped() {
+        // A `Routing` variant this build does not know about should show up as a number.
+        // Telemetry that quietly loses a category is exactly how a whole content type
+        // goes unnoticed.
+        let metrics = Metrics::new();
+        metrics.record_routing("something_new");
+
+        assert!(metrics
+            .render()
+            .contains(r#"headroom_routing_total{reason="other"} 1"#));
+    }
+
+    #[test]
     fn every_metric_declares_help_and_type() {
         // A scraper accepts samples without them, but an operator reading the endpoint
         // cold has no idea what they are looking at.
@@ -246,10 +338,14 @@ mod tests {
         metrics.record_cache_usage(1, 1);
         let rendered = metrics.render();
 
+        // The label set is stripped before matching. `HELP` and `TYPE` describe a metric
+        // *family*, so one declaration covers every labelled sample under it — a
+        // requirement of the exposition format, not a shortcut.
         let names: Vec<&str> = rendered
             .lines()
             .filter(|l| !l.starts_with('#'))
             .filter_map(|l| l.split_whitespace().next())
+            .map(|name| name.split('{').next().unwrap_or(name))
             .collect();
 
         for name in names {
