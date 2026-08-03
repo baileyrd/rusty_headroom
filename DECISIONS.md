@@ -623,3 +623,34 @@ tells a future reader exactly what to re-check when reqwest updates.
 **Would change if:** reqwest lets a client be built without the default, or the leak
 grows. The fix is upstream. Removing the header from the built request does nothing —
 tried, measured (`on_request=None`), and reverted rather than shipped looking like a fix.
+
+## D26 — the loop guard runs on hot-reload too
+**2026-08-03**
+
+D11 argued that no per-request loop-detection header is needed because a startup check
+already catches a self-referential upstream, and that paying a fingerprint leak on every
+request to detect a misconfiguration was the wrong trade. That reasoning was sound when it
+was written.
+
+**D10 then added runtime config, and the premise stopped holding.** `POST
+/admin/runtime-env` could set `HEADROOM_UPSTREAM` to the proxy's own listen address after
+startup, and nothing re-checked. Demonstrated rather than argued: a probe set the override
+and read the resulting config back — `upstream=http://127.0.0.1:8787 listen=127.0.0.1:8787
+self_referential=true`. Every request would then forward to itself forever, with a pinned
+core and exhausted file descriptors instead of an error anyone can read.
+
+The guard now runs on the hot-reload path as well, against the configuration the overrides
+*would* produce rather than the one requested — the listen address may be overridden in the
+same call.
+
+**It previews rather than applying and rolling back.** Applying first would make the bad
+configuration live for the duration of the check, and this proxy reads its config per
+request from a thread pool, so an in-flight request could pick it up in that window and
+start the very loop being checked for.
+
+**The refusal is a 400, not `refuse`'s 403.** The caller is local and allowed to be here;
+their configuration is what is wrong. A permission error would send an operator hunting
+for an access problem during the incident they are already trying to fix.
+
+**Would change if:** loops through an *intermediate* hop become a concern, which neither
+check can see.

@@ -6,6 +6,37 @@ the crate starts publishing releases.
 
 ---
 
+## Hot-reload could point the proxy at itself
+**2026-08-03** · a decision invalidated by a later feature
+
+- **Fixed:** `POST /admin/runtime-env` applied overrides with no validation, so
+  `HEADROOM_UPSTREAM` could be set to the proxy's own listen address after startup. Every
+  request would then forward to itself forever — pinned core, exhausted file descriptors,
+  no readable error.
+- **D11 justified having no per-request loop header** because a startup check already
+  caught this. **D10 then added hot-reload**, and nothing re-checked. The decision was
+  sound when written and quietly stopped being true.
+- **Demonstrated, not argued:** a probe set the override and read the config back —
+  `upstream=http://127.0.0.1:8787 listen=127.0.0.1:8787 self_referential=true`.
+- **Design note:** the guard previews rather than applying and rolling back. Applying
+  first would leave the bad config live during the check, and config is read per request
+  from a thread pool — an in-flight request could start the loop in that window.
+- **Design note:** the refusal is a 400, not the module's 403. The caller is local and
+  allowed to be there; their configuration is wrong. A permission error sends an operator
+  hunting an access problem during the incident they are trying to fix.
+- **Two mistakes of mine, caught before merge:**
+  - My first three tests exercised `preview_overrides` directly, so deleting the guard
+    *from the handler* left them green — the same "is it actually called?" bug this
+    repository keeps producing, reproduced in the fix for it. There is now a test through
+    the endpoint.
+  - Those tests then made the suite **flaky, failing 3 runs in 6**, by asserting on
+    process-global override state. Worse than no test: a suite that goes green on a re-run
+    teaches people to re-run it. Root cause was a *second* serialization mechanism added
+    beside the `SERIAL` mutex this module already had — clippy caught it as a
+    `MutexGuard` held across an await. Now one lock, 12 consecutive clean runs.
+
+---
+
 ## D25's "no way to suppress it" checked against the source
 **2026-08-03** · argued → measured, again
 
