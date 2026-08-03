@@ -1,16 +1,73 @@
 //! Server construction and lifecycle.
 
-use axum::routing::get;
-use axum::Router;
+use std::sync::Arc;
 
+use axum::body::Bytes;
+use axum::extract::State;
+use axum::http::HeaderMap;
+use axum::response::IntoResponse;
+use axum::routing::{get, post};
+use axum::Router;
+use headroom_core::ccr::InMemoryCcrStore;
+
+use crate::compression::{compress_request, Compressors};
 use crate::config::Config;
+use crate::headers::{sanitize, HeaderPolicy};
 use crate::health::health;
+
+/// Shared state: the compressors and the CCR store behind them.
+#[derive(Clone)]
+pub struct AppState {
+    compressors: Arc<Compressors>,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            compressors: Arc::new(Compressors::new(Arc::new(InMemoryCcrStore::new()))),
+        }
+    }
+}
 
 /// Builds the application router.
 ///
 /// Separated from [`serve`] so tests can exercise routes without binding a socket.
 pub fn router() -> Router {
-    Router::new().route("/health", get(health))
+    Router::new()
+        .route("/health", get(health))
+        .route("/v1/messages", post(messages))
+        .with_state(AppState::default())
+}
+
+/// `POST /v1/messages`.
+///
+/// Compresses the live zone and returns the bytes that would go upstream.
+///
+/// # Not yet forwarding
+///
+/// This returns the transformed request rather than relaying it to a provider.
+/// Upstream relay needs the SSE state machine to exist first — a handler that
+/// forwarded now would have to buffer streaming responses, which breaks the thing
+/// clients most rely on. Every invariant lives in [`compress_request`], which is
+/// fully tested; this wrapper is the part still missing its other half.
+async fn messages(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let config = Config::from_env();
+
+    // Sanitized here so the header path is exercised on the real request, even while
+    // the relay itself is still to come.
+    let upstream_headers = sanitize(&headers, HeaderPolicy::default());
+    tracing::debug!(
+        header_count = upstream_headers.len(),
+        auth = ?crate::headers::redacted_authorization(&headers),
+        "prepared upstream headers"
+    );
+
+    let compressed = compress_request(&body, &state.compressors, config.compression_enabled());
+    (axum::http::StatusCode::OK, compressed.into_owned())
 }
 
 /// Runs the proxy until a shutdown signal arrives.

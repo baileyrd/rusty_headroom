@@ -15,7 +15,9 @@
 #![warn(missing_docs)]
 
 pub mod body;
+pub mod compression;
 pub mod config;
+pub mod frozen;
 pub mod headers;
 pub mod health;
 pub mod server;

@@ -60,5 +60,6 @@ pub use error::{Declined, Error, Result};
 pub use live_zone::{live_zone, LiveZone, Location};
 pub use log_compressor::LogCompressor;
 pub use search_compressor::SearchCompressor;
+pub use smart_crusher::SmartCrusher;
 pub use transform::{LosslessTransform, LossyTransform, Transform};
 pub use validate::{validated_apply, Outcome};

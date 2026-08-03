@@ -6,6 +6,35 @@ the crate starts publishing releases.
 
 ---
 
+## Live-zone compression on the wire — /v1/messages
+**2026-08-03** · closes [#35](https://github.com/baileyrd/rusty_headroom/issues/35), [#36](https://github.com/baileyrd/rusty_headroom/issues/36)
+
+- **Added (#35):** `frozen_message_count` — derives the live-zone floor from customer
+  `cache_control` markers, on a message or on a content block, last breakpoint wins.
+- **Added (#36):** `compress_request`, a pure function over bytes running the whole
+  pipeline, plus `POST /v1/messages` and a content-type dispatcher over the three
+  compressors.
+- **Added:** `SmartCrusher` re-exported at the `headroom-core` root, matching
+  `LogCompressor` and `SearchCompressor`.
+- **The guarantee, tested:** on a request with system, tools, five historical turns
+  and a bulky live tool result, the hot zone and every frozen turn come back
+  SHA-256-identical while the live result shrinks by more than half. The frozen prefix
+  is asserted to appear as a literal substring of the output, not merely to parse
+  equal.
+- **Design note:** unparseable input yields a floor that freezes *everything*, not
+  nothing. Freezing too much costs some compression; freezing too little modifies a
+  message the provider has cached, silently. The safe direction is not symmetric.
+- **Design note:** passthrough is the fallback for every path — disabled, streaming,
+  malformed, no live zone, compressor declines, result not smaller. There is no input
+  for which `compress_request` errors; the worst case is that it does nothing.
+- **Known limitation:** the handler does **not forward upstream yet.** It returns the
+  transformed request. Relay needs the SSE state machine first, since a forwarding
+  handler would have to buffer streaming responses and break what clients rely on.
+- **Known limitation:** `"stream": true` forwards untouched, so the common agent case
+  is currently uncompressed.
+- **Known limitation:** a `tool_result` whose content is an array of blocks rather
+  than a string reads as empty and is never compressed.
+
 ## Byte-faithful bodies and header hygiene
 **2026-08-03** · closes [#33](https://github.com/baileyrd/rusty_headroom/issues/33), [#34](https://github.com/baileyrd/rusty_headroom/issues/34)
 
