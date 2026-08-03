@@ -832,7 +832,7 @@ pub fn learn(min_samples: u64) -> anyhow::Result<()> {
             );
 
             let mut block = Block::new(BlockKind::Text, content.clone());
-            match orchestrator.transform_for(&content, policy) {
+            match orchestrator.transform_for(&content, policy, model) {
                 Some(transform) => match validated_apply(transform, &mut block, &estimator) {
                     Ok(outcome) if outcome.is_compressed() => aggregator.record(
                         &key,

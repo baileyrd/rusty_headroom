@@ -220,7 +220,7 @@ Every row is a gap: the target repo is empty, so all rows are new implementation
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | N1 | `Telemetry` trait (observation-only) | trait | spec | all | REALIGNMENT §2.5 | no | S | **No request-time hint API** — that is invariant I9. Done: `telemetry::Telemetry`, every method returns `()`, asserted structurally by a test. |
 | N2 | structure hashing + aggregation key | fn | spec | all | REALIGNMENT §2.5 | no | M | Key = `(auth_mode, model_family, structure_hash)`. Done: `telemetry::{StructureHash, AggregationKey}`; FNV-1a for cross-build stability, values discarded before hashing. |
-| N3 | recommendations publish + startup load | fn | spec | all | REALIGNMENT §2.5 | no | M | `recommendations.toml`, read at startup only. Done as `telemetry::Recommendations`, published as JSON (DECISIONS D12). Startup load not yet wired into the proxy. |
+| N3 | recommendations publish + startup load | fn | spec | all | REALIGNMENT §2.5 | no | M | `recommendations.toml`, read at startup only. Done as `telemetry::Recommendations`, published as JSON (DECISIONS D12); `headroom learn` writes one and `HEADROOM_RECOMMENDATIONS` loads it at startup, gating routing via `Routing::MeasuredUseless`. |
 
 ### Output shaping
 

@@ -30,6 +30,8 @@ pub mod vars {
     pub const COMPRESSION: &str = "HEADROOM_COMPRESSION";
     /// Output verbosity steering: `terse`, `full`, or unset for neither.
     pub const OUTPUT_SHAPER: &str = "HEADROOM_OUTPUT_SHAPER";
+    /// Path to a `recommendations.json` produced by `headroom learn`.
+    pub const RECOMMENDATIONS: &str = "HEADROOM_RECOMMENDATIONS";
 }
 
 /// Default listen port.
@@ -185,6 +187,42 @@ impl Config {
             "terse" | "1" | "on" | "true" | "yes" => Verbosity::Terse,
             "full" | "verbose" => Verbosity::Full,
             _ => Verbosity::Default,
+        }
+    }
+
+    /// Recommendations learned from a previous run, read at startup.
+    ///
+    /// # Read once, not per request
+    ///
+    /// Unlike every other accessor here, this is *not* a live read. The recommendations
+    /// are a configuration input fixed for the process lifetime — consulting them per
+    /// request would make compression depend on a file that could change mid-flight, so
+    /// the same request would compress differently depending on when it arrived. That is
+    /// invariant I4, and it is the reason `headroom-core`'s telemetry has no
+    /// request-time read at all.
+    ///
+    /// A missing, unreadable, or corrupt file yields an empty set. The file is an
+    /// optimization; refusing to start without a valid one would turn a cache of
+    /// statistics into a hard startup dependency.
+    pub fn recommendations() -> headroom_core::telemetry::Recommendations {
+        let Some(path) = setting(vars::RECOMMENDATIONS) else {
+            return Default::default();
+        };
+
+        match std::fs::read_to_string(&path) {
+            Ok(source) => {
+                let parsed = headroom_core::telemetry::Recommendations::from_json_lossy(&source);
+                tracing::info!(
+                    path = %path,
+                    entries = parsed.entries.len(),
+                    "loaded compression recommendations"
+                );
+                parsed
+            }
+            Err(err) => {
+                tracing::warn!(path = %path, %err, "could not read recommendations; starting with none");
+                Default::default()
+            }
         }
     }
 

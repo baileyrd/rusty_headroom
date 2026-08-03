@@ -65,17 +65,32 @@ impl Compressors {
         }
     }
 
+    /// Builds the set with recommendations learned from a previous run.
+    pub fn with_recommendations(
+        store: Arc<dyn CcrStore>,
+        recommendations: headroom_core::telemetry::Recommendations,
+    ) -> Self {
+        Self {
+            orchestrator: Orchestrator::new(store).with_recommendations(recommendations),
+        }
+    }
+
     /// The transform for `content` under `policy`, if any applies.
     ///
     /// Invariant I10 is enforced inside the orchestrator: restricted traffic is routed
     /// the lossless reformatter, never a lossy compressor.
-    fn route(&self, content: &str, policy: CompressionPolicy) -> Option<&dyn Transform> {
-        self.orchestrator.transform_for(content, policy)
+    fn route(
+        &self,
+        content: &str,
+        policy: CompressionPolicy,
+        model: &str,
+    ) -> Option<&dyn Transform> {
+        self.orchestrator.transform_for(content, policy, model)
     }
 
     /// Why `content` was routed as it was, for telemetry.
-    pub fn routing(&self, content: &str, policy: CompressionPolicy) -> Routing {
-        self.orchestrator.route(content, policy)
+    pub fn routing(&self, content: &str, policy: CompressionPolicy, model: &str) -> Routing {
+        self.orchestrator.route(content, policy, model)
     }
 
     /// The tokenizer to measure `model` with.
@@ -185,7 +200,8 @@ pub fn compress_dialect<'a>(
     // compressor keep a result the heuristic's over-count would have rejected, and the
     // heuristic remains the answer for any model without one — reporting an
     // approximation as a measurement would be worse than the approximation.
-    let estimator = compressors.tokenizer_for(model_of(body));
+    let model = model_of(body);
+    let estimator = compressors.tokenizer_for(model);
     let mut edits: Vec<(usize, usize, String)> = Vec::new();
 
     for location in zone.locations() {
@@ -196,7 +212,7 @@ pub fn compress_dialect<'a>(
         else {
             continue;
         };
-        let Some(transform) = compressors.route(block.content(), policy) else {
+        let Some(transform) = compressors.route(block.content(), policy, model) else {
             continue;
         };
 
