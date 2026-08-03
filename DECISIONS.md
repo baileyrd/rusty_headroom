@@ -170,3 +170,16 @@ Taken: compare the configured upstream against the listen address at startup, tr
 **Would change if:** the proxy needs to detect loops through an *intermediate* hop,
 which a startup check cannot see. That would need a header, and the fingerprint cost
 would have to be weighed deliberately rather than assumed acceptable.
+
+## D12 — Recommendations are published as JSON, not TOML
+**2026-08-03**
+
+Gap row N3 names `recommendations.toml`. `serde_json` is already a workspace dependency
+with the features this project needs; `toml` is not.
+
+Adding a dependency to change the syntax of a file that nothing outside this repo reads
+is not a trade worth making. The content is a flat map of opaque keys to three fields,
+which is equally readable either way.
+
+**Would change if:** the file becomes something an operator hand-edits regularly, where
+TOML's comment support and friendlier syntax would start to earn the dependency.

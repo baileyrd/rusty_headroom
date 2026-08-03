@@ -6,6 +6,76 @@ the crate starts publishing releases.
 
 ---
 
+## Output shaping and observation-only telemetry
+**2026-08-03** · gap rows O1, O2, N1, N2, N3
+
+- **Added:** `headroom_core::output_shaping` — `Verbosity`, `Effort`, `route_effort`,
+  `verbosity_append` — and wired verbosity into the proxy behind
+  `HEADROOM_OUTPUT_SHAPER`.
+- **Added:** `headroom_core::telemetry` — `StructureHash`, `AggregationKey`, the
+  `Telemetry` trait, `Aggregator`, and `Recommendations`.
+- **Design note, and the reason the module exists:** the obvious place for a terseness
+  instruction is the system prompt, and that is the one place it must not go. The system
+  prompt is the first thing in the cached prefix, so a note there invalidates the whole
+  cache on every subsequent request — saving a couple of hundred output tokens while
+  re-billing tens of thousands of cached input ones, and moving the metric people watch
+  in the wrong direction invisibly. The note goes in the live-zone tail instead, which
+  costs a few tokens on an already-uncached message and invalidates nothing.
+- **Design note:** shaping runs *after* compression and appends to the compressor's
+  output rather than to the original block, since both want the same block when the
+  newest message is a bulky tool result. Appending to the original would silently throw
+  the compression away. There is a test that measures the ratio to catch exactly that.
+- **Design note:** the note is not appended twice. An agent loop calls this every turn,
+  and without the guard a long session accumulates the same instruction a dozen times —
+  wasted tokens, and a worse prompt, since a repeated instruction reads as emphasis.
+- **Design note:** effort and verbosity are separate dials. Conflating them produces
+  short wrong answers, which is the failure mode that makes users switch an
+  output-shaping feature off entirely — a terse answer to a hard question still needs
+  the reasoning.
+- **Design note:** effort routing checks error signals *before* routine ones. "thanks,
+  but it still errors" is a recovery, not a pleasantry, and testing the routine list
+  first would route the turn that most needs thought as the cheapest one.
+- **Design note:** output shaping is off unless explicitly enabled. It changes what the
+  model *writes*, which is a visible change to the customer's product rather than an
+  invisible saving — a proxy that quietly made every answer terser would be editing
+  someone's application on their behalf.
+- **Design note, telemetry:** there is **no** `Telemetry::hint_for(&request)`, and the
+  absence is the design. A request-time hint API breaks invariant I4 immediately — the
+  same request would compress differently depending on what happened to be observed
+  before it, and a failure could not be reproduced from the failing request alone. The
+  loop closes at startup instead, through `Recommendations`. A test asserts structurally
+  that every trait method returns `()`.
+- **Design note:** observations are keyed by *structure*, not content. Two tool results
+  listing different files have identical structure and should aggregate together — and
+  since every value is discarded before hashing, a key cannot be reversed into what
+  anyone sent. There is a test that a payload containing an API key and an email hashes
+  identically to a benign one of the same shape.
+- **Design note:** FNV-1a rather than `DefaultHasher`, whose output may change between
+  compiler releases — a recommendations file written by one build would key differently
+  under the next.
+- **Design note:** array length does not affect the fingerprint, so a 10,000-record
+  payload aggregates with a 10-record one. A separate test asserts genuinely different
+  shapes still hash differently, since a fingerprint that collapses everything
+  aggregates perfectly and learns nothing.
+- **Design note:** a corrupt recommendations file yields an empty set rather than an
+  error. The file is an optimization; refusing to boot without a valid one turns a cache
+  of statistics into a hard startup dependency.
+- **Design note:** an unmeasured shape is worth attempting. Skipping it would never
+  gather the data that would let it be skipped for a reason.
+- **Known limitation:** `Effort` is computed and mapped to both provider dialects but
+  nothing writes it into an outgoing request. Doing so means adding a top-level member
+  to the body, which needs the same byte-faithful surgical insert that `prompt_cache_key`
+  is waiting on.
+- **Known limitation:** nothing in the proxy feeds the `Aggregator`, and nothing reads a
+  `recommendations.json` at startup. Both are implemented and tested as a library; the
+  wiring is outstanding.
+- **Known limitation:** recommendations are published as JSON rather than the
+  `recommendations.toml` the gap row names — `serde_json` is already a workspace
+  dependency and `toml` is not, and adding one for a file nothing outside this repo
+  reads was not worth it.
+- **Known limitation:** effort routing is English-keyword based, like the rest of the
+  signals work.
+
 ## Operational guards and runtime configuration
 **2026-08-03** · gap rows X20, F5
 
