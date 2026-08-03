@@ -6,6 +6,34 @@ the crate starts publishing releases.
 
 ---
 
+## Text compression, persistent CCR, and the retrieval tool
+**2026-08-03** · gap rows C10, R3, R5
+
+- **Added:** `TextCrusher` (lossless whitespace normalization) and `TextSummarizer`
+  (lossy line dropping). Split deliberately — the lossless pass is safe on the auth
+  modes that forbid lossy transforms, so it must be a separate type (invariant I10).
+- **Added:** `FileCcrStore`, a persistent CCR backend. Content survives a proxy
+  restart, so a model asking for content it was promised is not told it is gone.
+- **Added:** `ccr_retrieve` tool definition and handler — the mechanism that makes lossy
+  compression reversible from the model's side.
+- **Design note:** the retrieval tool must be registered on **every** request, not only
+  when something was compressed. The tools array is part of the cached prompt prefix; a
+  tool that appears and disappears invalidates the cache on every state flip. A fixed
+  handful of tokens once beats a full cache miss each time compression starts or stops.
+- **Design note:** `Retrieval` distinguishes expired from malformed, because the model
+  should be told different things — one means "this existed and is gone", the other
+  "check what you sent".
+- **Design note:** the file store writes to a temporary name and renames into place, so
+  a reader never observes a half-written entry and hands a model truncated content
+  while calling it the original.
+- **Fixed:** an MSRV violation caught by clippy — `is_none_or` is stable from 1.82 and
+  this crate declares 1.80.
+- **Known limitation:** `FileCcrStore` substitutes for the SQLite backend gap row R3;
+  see `DECISIONS.md` D6. The Redis backend (R4) remains deliberately unimplemented.
+- **Known limitation:** nothing injects the `ccr_retrieve` tool into outgoing requests
+  yet. The definition exists and is tested; wiring it into the proxy's tools array is
+  still open.
+
 ## Signals and the diff compressor
 **2026-08-03** · gap rows S1-S3, C8
 
