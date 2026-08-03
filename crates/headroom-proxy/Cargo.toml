@@ -23,8 +23,11 @@ axum.workspace = true
 tokio.workspace = true
 tower.workspace = true
 http.workspace = true
+reqwest.workspace = true
+futures-core = "0.3"
 
 [dev-dependencies]
 headroom-core = { workspace = true }
 sha2 = "0.10"
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-stream = "0.1.19"

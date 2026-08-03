@@ -49,6 +49,16 @@ pub struct HeaderPolicy {
     /// `Default` gives that for free — `derivable_impls` is right that a hand-written
     /// impl would add nothing but a place for the two to drift apart.
     pub forwarded_headers: bool,
+    /// Whether `accept-encoding` may be stripped before forwarding.
+    ///
+    /// Off by default, and this is the direction that protects subscription traffic:
+    /// the exact `accept-encoding` a client sends is part of how that client looks to
+    /// a provider, so normalizing it is a fingerprint change — the same disclosure
+    /// class this module exists to prevent (invariant I10).
+    ///
+    /// Stripping it is worth doing where policy permits, because a compressed response
+    /// body cannot be observed for cache-usage telemetry without being inflated first.
+    pub strip_accept_encoding: bool,
 }
 
 impl HeaderPolicy {
@@ -56,6 +66,7 @@ impl HeaderPolicy {
     pub fn with_forwarded() -> Self {
         Self {
             forwarded_headers: true,
+            ..Self::default()
         }
     }
 }
@@ -97,6 +108,10 @@ pub fn sanitize(incoming: &HeaderMap, policy: HeaderPolicy) -> HeaderMap {
         for name in ["x-forwarded-for", "x-forwarded-host", "x-forwarded-proto"] {
             outgoing.remove(name);
         }
+    }
+
+    if policy.strip_accept_encoding {
+        outgoing.remove(http::header::ACCEPT_ENCODING);
     }
 
     outgoing
@@ -285,6 +300,33 @@ mod tests {
     #[test]
     fn the_default_policy_is_the_quiet_one() {
         assert!(!HeaderPolicy::default().forwarded_headers);
+        assert!(!HeaderPolicy::default().strip_accept_encoding);
+    }
+
+    #[test]
+    fn accept_encoding_survives_under_the_default_policy() {
+        // The exact `accept-encoding` a client sends is part of how that client looks
+        // to a provider. Normalizing it on subscription traffic is a fingerprint
+        // change, which is the disclosure class this module exists to prevent.
+        let incoming = headers(&[("accept-encoding", "gzip, deflate, br")]);
+        let outgoing = sanitize(&incoming, HeaderPolicy::default());
+        assert_eq!(
+            outgoing.get("accept-encoding").unwrap(),
+            "gzip, deflate, br"
+        );
+    }
+
+    #[test]
+    fn accept_encoding_is_stripped_when_the_policy_allows_it() {
+        let incoming = headers(&[("accept-encoding", "gzip")]);
+        let outgoing = sanitize(
+            &incoming,
+            HeaderPolicy {
+                strip_accept_encoding: true,
+                ..HeaderPolicy::default()
+            },
+        );
+        assert!(outgoing.get("accept-encoding").is_none());
     }
 
     // ---- redaction ----

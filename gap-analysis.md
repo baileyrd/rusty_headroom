@@ -161,7 +161,7 @@ Every row is a gap: the target repo is empty, so all rows are new implementation
 | X2 | byte-faithful body buffering | fn | spec | all | REALIGNMENT I1 | no | M | `serde_json` `raw_value` + `arbitrary_precision` + `preserve_order`. **Gate:** SHA-256 round-trip test. |
 | X3 | header hygiene | fn | spec | all | REALIGNMENT §2.4 | no | S | Strip `x-headroom-*` upstream-bound; conditional `X-Forwarded-*`; never touch `User-Agent`. |
 | X4 | `cache_control` → `frozen_message_count` | fn | spec | all | REALIGNMENT §2.1 step 4 | no | M | Honor customer-set markers. Depends on X2. |
-| X5 | `/v1/messages` (Anthropic) handler | fn | spec | all | `docs/proxy.mdx` | no | L | Passthrough first, then live-zone compression. Depends on P2, X2, X4. |
+| X5 | `/v1/messages` (Anthropic) handler | fn | spec | all | `docs/proxy.mdx` | no | L | Passthrough first, then live-zone compression. Depends on P2, X2, X4. Includes upstream relay (`upstream::Upstream`) — streamed response body, per-hop header rebuild, provider-shaped 502 on failure. |
 | X6 | `/v1/chat/completions` (OpenAI) handler | fn | spec | all | `docs/openai-sdk.mdx` | no | L | Depends on P2, X2. |
 | X7 | `/v1/responses` handler | fn | spec | all | `docs/openai-sdk.mdx` | no | L | Output items, reasoning summary; per-item-type passthrough preservation. |
 | X8 | `/v1/conversations` + `/v1/responses/compact` passthrough | fn | spec | all | REALIGNMENT §2.6 | no | S | Explicitly never compressed. |

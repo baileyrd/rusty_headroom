@@ -6,6 +6,60 @@ the crate starts publishing releases.
 
 ---
 
+## The proxy actually proxies — upstream relay
+**2026-08-03** · completes gap row X5, and clears the "does not forward upstream yet"
+limitation carried since the `/v1/messages` handler first landed
+
+- **Added:** `upstream` — `Upstream`, `RelayedResponse`, `RelayError`. Requests now
+  reach a provider and the provider's answer reaches the client. Until this, the
+  handler compressed a request and handed it straight back, which made the crate a
+  compression library wearing a proxy's routing table.
+- **Added:** `GET /metrics`, and the request path now feeds the counters that landed
+  unwired in the previous change.
+- **Added:** `HeaderPolicy::strip_accept_encoding`, wired to the auth-mode policy's
+  `may_strip_accept_encoding`, which had been declared and never consulted.
+- **Verified end to end through the release binary**, not only through the router: an
+  11,034-byte request reached a local provider as 596 bytes — 94.6% smaller — with the
+  `x-api-key` intact and the provider's response relayed back to the client.
+- **Design note:** the response body is a stream, never buffered. For a JSON reply that
+  is a few milliseconds; for SSE it is the entire feature, since buffering holds the
+  model's whole answer until generation ends and then releases it at once. There is a
+  test that keeps an upstream handler open for 30 seconds and asserts the first frame
+  arrives anyway — it fails if anyone reintroduces buffering.
+- **Design note:** `host` and `content-length` are stripped at the relay boundary
+  specifically. They describe the client-to-proxy hop. A forwarded `content-length` is
+  the more dangerous one: compression changed the body, so the client's length is now
+  short, and an under-declared length truncates the request server-side — surfacing as
+  the model answering a question that was cut off mid-sentence.
+- **Design note:** upstream's `content-length` and `transfer-encoding` are dropped from
+  the *response* too, because the server handing it to the client re-frames the body.
+  Old framing headers beside new framing is how a response arrives truncated at exactly
+  the length the stale header claimed. A test asserts the rate-limit headers survive,
+  so the fix cannot quietly become "drop everything".
+- **Design note:** a non-2xx upstream response is not an error. It is the provider's
+  answer and is relayed unchanged — a 429 the client cannot see is a 429 it cannot back
+  off from, which turns rate limiting into an outage.
+- **Design note:** relay failures render in the provider's own `{"type":"error", ...}`
+  shape and always as 502, never 500. The client is a provider SDK that knows how to
+  parse that shape and nothing about this proxy; and 502 tells whoever is paged that the
+  dependency failed rather than sending them to read proxy source.
+- **Design note:** a failed relay error string carries the URL but never the headers,
+  and a test asserts the credential does not appear in it. Error strings get logged,
+  aggregated, and pasted into tickets.
+- **Design note:** `AppState.upstream` is an `Option` rather than a startup failure. A
+  proxy that refuses to boot when TLS initialization fails takes `/health` down with
+  it, so nothing can report *why* it is down.
+- **Known limitation:** only `POST /v1/messages` relays. The OpenAI routes (X6-X8) and
+  WebSocket (X13) are still unimplemented, and the SSE observer from the previous change
+  is still not attached to the relayed stream — so `headroom_cache_*` and
+  `headroom_stream_errors_total` remain at zero in production.
+- **Known limitation:** `"stream": true` requests relay correctly but are still
+  forwarded uncompressed, because `compress_request` declines them. Streaming is the
+  common agent case, so the traffic that matters most is passed through.
+- **Known limitation:** no total-request timeout; see `DECISIONS.md` D9.
+- **New dependency:** `reqwest` 0.13.3, `default-features = false`. See `DECISIONS.md`
+  D8 for why, and why not `native-tls`.
+
 ## Cache stabilization primitives and proxy observability
 **2026-08-03** · gap rows X14, X15, X16, X19
 
