@@ -12,8 +12,10 @@
 
 mod estimator;
 pub mod registry;
+pub mod tiktoken;
 
 pub use estimator::HeuristicEstimator;
+pub use tiktoken::{Encoding, TiktokenCounter};
 
 /// Counts tokens in text.
 ///

@@ -78,8 +78,8 @@ Every row is a gap: the target repo is empty, so all rows are new implementation
 | ID | Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | T1 | `Tokenizer` trait + `estimator` | trait/fn | spec | all | REALIGNMENT §2.3 `tokenizer/` | no | S | Heuristic byte→token estimator as the always-available fallback. |
-| T2 | tiktoken BPE impl | fn | spec | all | `tokenizer/tiktoken_impl.rs` | no | M | OpenAI model families. Needs a BPE implementation + encoding tables. |
-| T3 | HuggingFace tokenizer impl | fn | spec | all | `tokenizer/hf_impl.rs` | no | M | Via `tokenizers` crate. Anthropic/OSS models. |
+| T2 | tiktoken BPE impl | fn | spec | all | `tokenizer/tiktoken_impl.rs` | no | M | OpenAI model families. Done as `tokenizer::TiktokenCounter` (o200k_base, cl100k_base) via `tiktoken-rs` 0.11 — embedded tables, exact offline. Not yet registered by the proxy. |
+| T3 | HuggingFace tokenizer impl | fn | spec | all | `tokenizer/hf_impl.rs` | no | M | Via `tokenizers` crate. **Deliberately deferred** — needs a per-model `tokenizer.json` fetched at runtime, making the tokenizer a network dependency of the request path, and Anthropic publishes no tokenizer to be exact against. See DECISIONS D16. |
 | T4 | tokenizer registry | fn | spec | all | `tokenizer/registry.rs` | no | S | model-id → tokenizer resolution with fallback to T1. Done as `tokenizer::registry::{Family, Registry}` — always resolves, never `None`; no exact tokenizer registered until T2/T3 land, and not yet consulted by the proxy. |
 
 ### Content detection
