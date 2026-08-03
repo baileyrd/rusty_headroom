@@ -6,6 +6,36 @@ the crate starts publishing releases.
 
 ---
 
+## Nothing verified the proxy's routes were routed
+**2026-08-03** · including the one that exists for Codex
+
+- **The hole:** `router_with` registers ten paths and nothing asked the router for two of
+  them. `/v1/realtime` had **zero** references outside its own declaration — and the
+  comment beside it says it exists because Codex speaks WebSocket and a proxy that only
+  speaks HTTP breaks that client. The `/ws` in `websocket.rs`'s tests is that test's own
+  echo server, not this router's route, so both WebSocket paths were unverified while the
+  handler underneath was well covered.
+- A typo in either path would have disabled Codex support silently. That is CONTRIBUTING's
+  first lesson — *a test proves a function works, not that anything calls it* — applied to
+  routes rather than functions.
+- **Added:** `every_declared_route_is_actually_reachable`, which requests each path and
+  fails on 404 or 405. Everything else means a handler was reached, which is the claim.
+  Plus `an_unregistered_path_is_still_a_404`, so it cannot pass by everything being
+  reachable.
+- **Added:** check 8 of the audit, which reads the `.route(` calls out of `server.rs` and
+  fails if one is missing from the test's list — the list is hand-maintained because
+  axum's `Router` cannot be enumerated, and a hand-maintained list is what this script
+  exists to distrust.
+- **My first version of the test was wrong.** It used the existing `fake_provider`, which
+  registers `/v1/messages` only, so a relayed request to any other path came back 404 from
+  the *provider*. It reported `/v1/chat/completions` as unrouted — the fake upstream's 404
+  wearing the proxy's clothes. A test that cannot tell those apart accuses the wrong
+  component; it now uses a provider that answers any path.
+- Both guards verified by mutation: misspelling `/v1/realtime` fails the test, removing it
+  from the list fails the audit.
+
+---
+
 ## The MCP server could advertise a tool it then rejects
 **2026-08-03** · the ninth copy of a name list, and the one nothing checked
 

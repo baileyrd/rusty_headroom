@@ -177,6 +177,28 @@ for n in 5 10; do
     || fail "I$n is documented as gated in $prop and nothing there cites it"
 done
 
+echo "== 8. every registered route is in the reachability test's list"
+# `every_declared_route_is_actually_reachable` asks the router for each path and fails on
+# a 404 or 405. It needs a list, and axum's `Router` cannot be enumerated, so the list is
+# hand-maintained — which is the thing this script exists to distrust. This check reads
+# the `.route(` calls straight out of `server.rs` and fails if one is missing from it.
+#
+# `/v1/realtime` is why. The comment beside it says it exists because Codex speaks
+# WebSocket and a proxy that only speaks HTTP breaks that client, and nothing in the suite
+# ever asked the router for it — the `/ws` in `websocket.rs`'s tests is that test's own
+# echo server. A typo in either path would have disabled Codex support silently.
+#
+# Wildcard routes are matched on their prefix: `/v1/conversations/{*rest}` is covered by
+# requesting `/v1/conversations`, and listing both spellings would be noise.
+routes=$(grep -oP '\.route\("\K[^"]+' crates/headroom-proxy/src/server.rs | sed 's|/{\*.*||')
+for r in $(printf '%s\n' $routes | sort -u); do
+  if grep -q "\"$r\")" crates/headroom-proxy/src/server.rs; then
+    note "✓ $r"
+  else
+    fail "$r is registered and missing from the test's ROUTES list"
+  fi
+done
+
 echo
 [ "$status" -eq 0 ] && echo "clean" || echo "findings above — see the header for why this matters"
 exit "$status"
