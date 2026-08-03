@@ -91,3 +91,45 @@ is the wrong trade. Where the older spelling is less clear, a comment says why.
 
 **Would change if:** a dependency forces a higher floor anyway, at which point the
 declared MSRV should move deliberately and be documented.
+
+## D8 — Adding `reqwest` for the upstream relay
+**2026-08-03**
+
+The parity-loop rules say a new third-party dependency is a stop-and-ask, alongside a
+breaking public API change. The standing instruction is to decide and log instead, so
+this is the log entry.
+
+The proxy could not forward a request to a provider, which meant it was a compression
+library wearing a proxy's routing table. Closing that needs an HTTP client that speaks
+TLS. The realistic options were `reqwest` or assembling `hyper-util` +
+`hyper-rustls` + a connector by hand — the same transitive tree, minus the part that is
+already tested by everyone else using it.
+
+Taken: `reqwest` 0.13.3 with `default-features = false` and `rustls`, `http2`,
+`stream`. Defaults off is the load-bearing part — the default feature set pulls
+`native-tls`, which links the host OpenSSL and makes the build depend on whatever the
+deployment image happens to ship. `stream` is what makes SSE relay possible at all;
+without it the only way to read a body is to buffer it whole.
+
+Version 0.13.3 specifically: 0.13.4 requires Rust 1.85 and this workspace declares
+1.80 (see D7). Cargo picked the older point release on its own, which is the MSRV
+floor doing its job rather than a manual pin.
+
+**Would change if:** the MSRV moves past 1.85 anyway, at which point the pin can lift;
+or a review objects to the dependency, in which case the hyper-based assembly is the
+fallback and `Upstream` is the only type that changes.
+
+## D9 — The relay has no total-request timeout
+**2026-08-03**
+
+A connect timeout is set (10s); a whole-request timeout is not.
+
+A long generation is a normal outcome for this workload, not a stuck request. Any
+total timeout generous enough never to truncate a legitimate long completion is far too
+generous to catch anything that is genuinely hung — so it would cost real requests
+without buying detection. The connect timeout is where a hang actually gets caught,
+because a TCP/TLS handshake that has not completed in ten seconds is not going to.
+
+**Would change if:** a deployment needs bounded resource usage more than it needs
+uninterrupted long generations, in which case the timeout belongs in `Config` as an
+opt-in rather than as a default.

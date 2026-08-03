@@ -66,6 +66,21 @@ tower = "0.5"
 http = "1"
 clap = { version = "4", features = ["derive"] }
 
+# The upstream HTTP client. `default-features = false` is deliberate: the default
+# pulls native-tls, which links the host OpenSSL and makes the build depend on
+# whatever the deployment image happens to ship. rustls is vendored and reproducible.
+#
+# `stream` is the load-bearing feature. Without it the only way to read a response
+# body is to buffer it whole, which for an SSE response means holding the model's
+# entire answer until it finishes and then releasing it at once — the client sees a
+# long stall instead of tokens arriving, which is precisely what streaming exists to
+# avoid.
+reqwest = { version = "0.13.3", default-features = false, features = [
+    "rustls",
+    "http2",
+    "stream",
+] }
+
 [profile.release]
 strip = "symbols"
 lto = "thin"

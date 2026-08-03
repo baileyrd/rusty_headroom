@@ -24,5 +24,6 @@ pub mod metrics;
 pub mod server;
 pub mod sse;
 pub mod stabilization;
+pub mod upstream;
 
 pub use config::Config;
