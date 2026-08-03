@@ -6,6 +6,27 @@ the crate starts publishing releases.
 
 ---
 
+## D2's premise corrected
+**2026-08-03** · documentation only
+
+- **Corrected:** D2 deferred the Redis CCR backend (R4) partly because "this environment
+  has none". `redis-server` is installed at `/usr/bin/redis-server` and was confirmed to
+  start and answer `PING`. Found by re-checking every *environmental* deferral after D4
+  turned out to be wrong the same way.
+- **The deferral still stands, on an honest reason.** R4 needs the `redis` crate — a
+  dependency this run's scope did not name, unlike `pyo3`/`maturin` which it did — for a
+  backend the reference itself calls optional. That is the owner's call, not one to make
+  unattended.
+- **Design note:** the false premise is corrected in place rather than the entry rewritten
+  to look like it was always right. A deferral resting on a wrong premise reads as settled
+  when it is not, which is exactly how B1/B2 stayed unbuilt for no reason.
+- **Checked and standing:** D16's deferral of T3 (HuggingFace tokenizers) rests on
+  architecture, not environment — a per-model `tokenizer.json` fetched at runtime would
+  make the tokenizer a network dependency of the request path, and Anthropic publishes no
+  tokenizer to be exact against. Nothing about this machine changes that.
+
+---
+
 ## Python bindings ship; a deferral is reversed
 **2026-08-03** · gap rows B1 and B2
 

@@ -165,7 +165,7 @@ Every row is a gap: the target repo is empty, so all rows are new implementation
 | R1 | `CcrStore` trait + in-memory backend | trait | spec | all | REALIGNMENT §2.5 | no | S | `put/get/purge_expired` with TTL. Done. |
 | R2 | content hashing + `<<ccr:HASH>>` marker | fn | spec | all | REALIGNMENT §2.5 | no | S | BLAKE3, content-addressed ⇒ replay-safe and deterministic (I4). Done. |
 | R3 | SQLite backend | fn | spec | all | REALIGNMENT §2.5 | no | M | Primary persistent backend. Done as `FileCcrStore` — one file per hash with an expiry sidecar and an atomic rename, a deliberate substitution rather than SQLite; see DECISIONS D6. |
-| R4 | Redis backend | fn | spec | all | REALIGNMENT §2.5 | no | M | Optional, multi-worker deployments. **Deliberately deferred** — needs a running Redis to test against; see DECISIONS D2. |
+| R4 | Redis backend | fn | spec | all | REALIGNMENT §2.5 | no | M | Optional, multi-worker deployments. **Deliberately deferred** — needs the `redis` crate, a dependency this run's scope did not name, for a backend the reference calls optional. Redis *is* available here; D2's original premise was wrong and is corrected in place. |
 | R5 | always-on `ccr_retrieve` tool registration | fn | spec | all | REALIGNMENT §2.6 | no | M | Must never toggle between requests — toggling busts the tools array. Done — registered unconditionally. |
 
 ### Auth mode
