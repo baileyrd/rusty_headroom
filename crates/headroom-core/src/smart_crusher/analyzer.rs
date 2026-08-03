@@ -74,14 +74,16 @@ pub enum Pattern {
 /// assert_eq!(classify(doc.shape(), &config), Pattern::RecordSet { records: 3 });
 /// ```
 pub fn classify(shape: &Shape, config: &CrushConfig) -> Pattern {
-    if let Shape::Array { len, element } = shape {
-        // A record set is specifically an array of *objects*. An array of 500
-        // consistent integers is homogeneous but has no fields to summarize, so it
-        // is not this pattern.
-        if let Some(element) = element {
-            if *len >= 2 && matches!(**element, Shape::Object { .. }) {
-                return Pattern::RecordSet { records: *len };
-            }
+    // A record set is specifically an array of *objects*. An array of 500 consistent
+    // integers is homogeneous but has no fields to summarize, so it is not this
+    // pattern.
+    if let Shape::Array {
+        len,
+        element: Some(element),
+    } = shape
+    {
+        if *len >= 2 && matches!(**element, Shape::Object { .. }) {
+            return Pattern::RecordSet { records: *len };
         }
     }
 
