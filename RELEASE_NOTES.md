@@ -6,6 +6,25 @@ the crate starts publishing releases.
 
 ---
 
+## `headroom env` stops emitting a URL `headroom wrap` would not
+**2026-08-03** · the seventh copy, and this one was already wrong
+
+- **Fixed:** `env` printed `ANTHROPIC_BASE_URL={proxy}` and `OPENAI_BASE_URL={proxy}/v1`
+  as format strings while `Agent::env` — which `wrap` uses — trims a trailing slash. Same
+  input, two commands, different answers:
+  `headroom env --proxy http://x:8787/` gave `OPENAI_BASE_URL=http://x:8787//v1`;
+  `headroom wrap aider` with the same argument gave `/v1`.
+- **Why it survived:** `wrap` has a test for exactly that input. `env` did not, because it
+  did not share the code the test covers — a test proves the function it calls works.
+- **Changed:** `env` is now the union of `Agent::env` over `Agent::ALL`, deduplicated. It
+  names no agent, so its answer is "whatever any of them might read", and an agent added
+  with a new variable appears without anyone remembering to come back.
+- **Added:** `agents_do_not_disagree_about_a_variable`, which makes the take-the-first rule
+  visible rather than latent, and asserts a variable *is* claimed twice so it is not
+  vacuous.
+
+---
+
 ## The reformat list stops being written down twice
 **2026-08-03** · the sixth copy, in the command the last PR had just fixed
 
