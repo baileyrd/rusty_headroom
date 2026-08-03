@@ -21,6 +21,7 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
+use headroom_core::auth_mode::CompressionPolicy;
 use headroom_core::block::{Block, BlockKind};
 use headroom_core::ccr::CcrStore;
 use headroom_core::conversation::{Conversation, Message, Role};
@@ -28,7 +29,7 @@ use headroom_core::detection::{detect, ContentType};
 use headroom_core::live_zone::live_zone;
 use headroom_core::tokenizer::HeuristicEstimator;
 use headroom_core::validate::validated_apply;
-use headroom_core::{LogCompressor, SearchCompressor, SmartCrusher, Transform};
+use headroom_core::{DiffCompressor, LogCompressor, SearchCompressor, SmartCrusher, Transform};
 use serde_json::Value;
 
 use crate::body::FaithfulBody;
@@ -43,6 +44,7 @@ pub struct Compressors {
     smart_crusher: SmartCrusher,
     log: LogCompressor,
     search: SearchCompressor,
+    diff: DiffCompressor,
 }
 
 impl Compressors {
@@ -51,18 +53,27 @@ impl Compressors {
         Self {
             smart_crusher: SmartCrusher::new(store.clone()),
             log: LogCompressor::new(store.clone()),
-            search: SearchCompressor::new(store),
+            search: SearchCompressor::new(store.clone()),
+            diff: DiffCompressor::new(store),
         }
     }
 
-    /// The compressor for `content`, if any handles its type.
-    fn route(&self, content: &str) -> Option<&dyn Transform> {
+    /// The compressor for `content` under `policy`, if any applies.
+    ///
+    /// Every compressor wired here is lossy, so a policy that forbids lossy transforms
+    /// routes nothing at all. That is invariant I10 enforced at the dispatch point
+    /// rather than trusted to each compressor.
+    fn route(&self, content: &str, policy: CompressionPolicy) -> Option<&dyn Transform> {
+        if !policy.lossy_transforms {
+            return None;
+        }
         match detect(content.as_bytes()).content_type {
             ContentType::Json => Some(&self.smart_crusher),
             ContentType::Log => Some(&self.log),
             ContentType::SearchResults => Some(&self.search),
-            // Diffs, code, and prose have no compressor yet, and `Unknown` never
-            // gets one. Returning `None` forwards the block unchanged.
+            ContentType::Diff => Some(&self.diff),
+            // Code and prose have no compressor wired here, and `Unknown` never gets
+            // one. Returning `None` forwards the block unchanged.
             _ => None,
         }
     }
@@ -76,6 +87,7 @@ pub fn compress_request<'a>(
     body: &'a [u8],
     compressors: &Compressors,
     enabled: bool,
+    policy: CompressionPolicy,
 ) -> Cow<'a, [u8]> {
     if !enabled || is_streaming(body) {
         return Cow::Borrowed(body);
@@ -110,7 +122,7 @@ pub fn compress_request<'a>(
         else {
             continue;
         };
-        let Some(transform) = compressors.route(block.content()) else {
+        let Some(transform) = compressors.route(block.content(), policy) else {
             continue;
         };
 
@@ -305,6 +317,10 @@ mod tests {
         Compressors::new(Arc::new(InMemoryCcrStore::new()))
     }
 
+    fn payg() -> CompressionPolicy {
+        CompressionPolicy::for_mode(headroom_core::AuthMode::PayAsYouGo)
+    }
+
     fn sha(bytes: &[u8]) -> String {
         let mut hasher = Sha256::new();
         hasher.update(bytes);
@@ -337,7 +353,7 @@ mod tests {
     #[test]
     fn the_hot_zone_and_every_frozen_turn_survive_byte_identical() {
         let source = request();
-        let out = compress_request(source.as_bytes(), &compressors(), true);
+        let out = compress_request(source.as_bytes(), &compressors(), true, payg());
         let out = String::from_utf8(out.into_owned()).unwrap();
 
         // Something must actually have happened, or this passes vacuously.
@@ -372,7 +388,7 @@ mod tests {
     #[test]
     fn the_live_tool_result_measurably_shrinks() {
         let source = request();
-        let out = compress_request(source.as_bytes(), &compressors(), true);
+        let out = compress_request(source.as_bytes(), &compressors(), true, payg());
 
         let estimator = HeuristicEstimator::new();
         let before = estimator.count(&source);
@@ -389,7 +405,7 @@ mod tests {
         // Stronger than the parsed comparison above: the raw substring of the request
         // up to the live message must appear verbatim in the output.
         let source = request();
-        let out = compress_request(source.as_bytes(), &compressors(), true);
+        let out = compress_request(source.as_bytes(), &compressors(), true, payg());
         let out = String::from_utf8(out.into_owned()).unwrap();
 
         let prefix_end = source
@@ -406,7 +422,7 @@ mod tests {
     #[test]
     fn compression_disabled_returns_the_original_bytes_untouched() {
         let source = request();
-        let out = compress_request(source.as_bytes(), &compressors(), false);
+        let out = compress_request(source.as_bytes(), &compressors(), false, payg());
         assert!(matches!(out, Cow::Borrowed(_)), "should not have allocated");
         assert_eq!(sha(&out), sha(source.as_bytes()));
     }
@@ -417,14 +433,14 @@ mod tests {
         // break exactly what the client asked for.
         let source =
             request().replace(r#""max_tokens":4096"#, r#""max_tokens":4096,"stream":true"#);
-        let out = compress_request(source.as_bytes(), &compressors(), true);
+        let out = compress_request(source.as_bytes(), &compressors(), true, payg());
         assert_eq!(sha(&out), sha(source.as_bytes()));
     }
 
     #[test]
     fn a_malformed_body_forwards_untouched() {
         for source in [&b"{not json"[..], &b""[..], &b"{\"no\":\"messages\"}"[..]] {
-            let out = compress_request(source, &compressors(), true);
+            let out = compress_request(source, &compressors(), true, payg());
             assert_eq!(sha(&out), sha(source));
         }
     }
@@ -432,7 +448,7 @@ mod tests {
     #[test]
     fn a_request_with_nothing_worth_compressing_forwards_untouched() {
         let source = r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#;
-        let out = compress_request(source.as_bytes(), &compressors(), true);
+        let out = compress_request(source.as_bytes(), &compressors(), true, payg());
         assert_eq!(sha(&out), sha(source.as_bytes()));
     }
 
@@ -445,7 +461,7 @@ mod tests {
             r#""tool_use_id":"t_new","cache_control":{"type":"ephemeral"}"#,
         );
         // The marker sits on the block, and the block's message is the last one.
-        let out = compress_request(source.as_bytes(), &compressors(), true);
+        let out = compress_request(source.as_bytes(), &compressors(), true, payg());
         assert_eq!(
             sha(&out),
             sha(source.as_bytes()),
@@ -461,7 +477,28 @@ mod tests {
             r#"{{"messages":[{{"role":"assistant","content":[{{"type":"thinking","thinking":"...","signature":"sig","content":"{}"}}]}}]}}"#,
             bulky_tool_output()
         );
-        let out = compress_request(source.as_bytes(), &compressors(), true);
+        let out = compress_request(source.as_bytes(), &compressors(), true, payg());
+        assert_eq!(sha(&out), sha(source.as_bytes()));
+    }
+
+    #[test]
+    fn a_restricted_policy_forwards_everything_untouched() {
+        // Invariant I10 at the dispatch point. Every compressor wired here is lossy,
+        // so subscription-mode traffic must come back byte-identical however
+        // compressible the payload looks.
+        let source = request();
+        let restricted = CompressionPolicy::for_mode(headroom_core::AuthMode::Subscription);
+        let out = compress_request(source.as_bytes(), &compressors(), true, restricted);
+
+        assert_eq!(sha(&out), sha(source.as_bytes()));
+        assert!(matches!(out, Cow::Borrowed(_)), "should not have rebuilt");
+    }
+
+    #[test]
+    fn an_oauth_policy_also_forbids_the_lossy_compressors() {
+        let source = request();
+        let oauth = CompressionPolicy::for_mode(headroom_core::AuthMode::OAuth);
+        let out = compress_request(source.as_bytes(), &compressors(), true, oauth);
         assert_eq!(sha(&out), sha(source.as_bytes()));
     }
 
@@ -469,9 +506,10 @@ mod tests {
     fn compression_is_deterministic() {
         // Invariant I4, end to end through the proxy path.
         let source = request();
-        let first = compress_request(source.as_bytes(), &compressors(), true).into_owned();
+        let first = compress_request(source.as_bytes(), &compressors(), true, payg()).into_owned();
         for _ in 0..20 {
-            let again = compress_request(source.as_bytes(), &compressors(), true).into_owned();
+            let again =
+                compress_request(source.as_bytes(), &compressors(), true, payg()).into_owned();
             assert_eq!(sha(&again), sha(&first));
         }
     }
@@ -481,15 +519,15 @@ mod tests {
         // Invariant I3. A second pass over already-compressed output must not reach
         // further back than the first did.
         let source = request();
-        let once = compress_request(source.as_bytes(), &compressors(), true).into_owned();
-        let twice = compress_request(&once, &compressors(), true).into_owned();
+        let once = compress_request(source.as_bytes(), &compressors(), true, payg()).into_owned();
+        let twice = compress_request(&once, &compressors(), true, payg()).into_owned();
         assert_eq!(sha(&twice), sha(&once));
     }
 
     #[test]
     fn the_output_remains_valid_json_with_its_structure_intact() {
         let source = request();
-        let out = compress_request(source.as_bytes(), &compressors(), true);
+        let out = compress_request(source.as_bytes(), &compressors(), true, payg());
         let parsed: Value = serde_json::from_slice(&out).expect("valid json");
 
         assert_eq!(parsed["messages"].as_array().unwrap().len(), 6);
