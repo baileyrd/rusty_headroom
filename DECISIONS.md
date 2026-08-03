@@ -32,6 +32,21 @@ open in `gap-analysis.md` and is called out as deliberately deferred rather than
 **Would change if:** a multi-worker deployment is actually needed, or a Redis instance
 becomes available to test against.
 
+> **Premise corrected on 2026-08-03.** "This environment has none" was asserted without
+> being checked, and it is false: `redis-server` is installed at `/usr/bin/redis-server`
+> and was confirmed to start and answer `PING`. Found by re-checking every environmental
+> deferral after D4 turned out to be wrong the same way (see D21).
+>
+> **The deferral itself still stands, on a different and honest reason.** R4 needs the
+> `redis` crate — a third-party dependency the scope decision for this run did not name,
+> unlike `pyo3`/`maturin` which it did. The reference calls this backend optional
+> (REALIGNMENT §2.5), and adding a dependency for an optional feature is the owner's call
+> rather than one to make unattended. Implementation is contained when wanted: a
+> `RedisCcrStore` behind the existing `CcrStore` trait, alongside `FileCcrStore` (D6).
+>
+> Recorded this way deliberately. A deferral resting on a false premise reads as settled
+> when it is not, and that is precisely how B1/B2 stayed unbuilt for no reason.
+
 ## D3 — Code compression is heuristic, not tree-sitter
 **2026-08-03**
 
