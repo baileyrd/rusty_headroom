@@ -1171,3 +1171,50 @@ first, or declining proves nothing.
 
 **Would change if:** a second compressor becomes tool-output-only. The reason string would
 need to name which one, rather than reporting the category.
+
+---
+
+## D37 — the CLI and the MCP server honour the block-kind gate too
+
+**Decision:** `headroom compress` gains `--kind`, the `headroom_compress` tool gains a
+`kind` property, both defaulting to tool output and both routing through
+`transform_for_block`. The same fix as D36, in the two surfaces D36 did not cover.
+
+D36 fixed the Python binding. The identical construction was in two more places, found by
+asking the question the fix raised rather than by anything failing:
+
+| surface | construction | store outlives the call |
+| --- | --- | --- |
+| Python binding | `Block::new(Text, …)` + `transform_for` | no |
+| `headroom compress` | `Block::new(Text, …)` + `transform_for` | no |
+| `headroom_compress` (MCP) | `Block::new(Text, …)` + `transform_for` | yes, when configured |
+
+Each declared the content was typed text and then asked a routing question that ignores
+kind, so the lossy prose summarizer ran on it. On the two whose stores die with the call,
+irreversibly.
+
+**Both had the answer already in the same file.** `headroom inspect` uses
+`transform_for_block` and prints the verdict *both ways* — "as tool output" and "as a typed
+message" — so one binary gave two answers about the same bytes depending on which
+subcommand you ran. The MCP server's own doc says a model asking `headroom_compress` "should
+get the number the proxy would"; this is a place it did not.
+
+**The MCP's schema is checked against its handler.** A model can only pass what the schema
+offers, so an enum that drifts from the match arms is a capability nothing can reach — this
+repository's oldest failure, in the one place a model is actually reading. The test walks
+the advertised enum and calls the tool with each value; adding `"prose"` to the schema fails
+it with *"the schema advertises \"prose\" and the handler refuses it"*.
+
+**An unknown kind is refused, not guessed.** Treating `"Text"` as tool output would
+summarize precisely the thing the caller was asking to protect. clap does this for the CLI
+for free, with the valid values in the error.
+
+**No audit check for this one, deliberately.** The mechanical form — "a file that calls
+`transform_for` and `validated_apply`" — flags `headroom doctor`, which compresses one
+sample per compressor to check the build works and is right to ignore block kind. An audit
+that cries wolf is worse than no audit, and this script has recorded that lesson three
+times. CONTRIBUTING's fourth lesson carries the instance instead.
+
+**Would change if:** a second compressor becomes tool-output-only, or a third block kind
+appears. Either turns the boolean gate into a table, which is worth checking mechanically
+in a way this is not.

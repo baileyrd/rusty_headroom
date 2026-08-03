@@ -6,6 +6,39 @@ the crate starts publishing releases.
 
 ---
 
+## The CLI and MCP server had the same block-kind bug as the binding
+**2026-08-03** · found by asking the question the previous fix raised
+
+- All three non-proxy surfaces built a `BlockKind::Text` block and then routed with
+  `transform_for`, which ignores block kind — declaring the content was typed and then
+  asking a question that does not care:
+
+  | surface | store outlives the call |
+  | --- | --- |
+  | Python binding (fixed previously) | no |
+  | `headroom compress` | no |
+  | `headroom_compress` (MCP) | yes, when configured |
+
+  So the lossy prose summarizer ran on somebody's typed words — irreversibly on two.
+- **Both had the answer in the same file.** `headroom inspect` uses `transform_for_block`
+  and prints the verdict both ways, "as tool output" and "as a typed message", so one
+  binary gave two answers about the same bytes depending on the subcommand.
+- `headroom compress --kind tool-output|text`, and a `kind` property on the MCP tool. Both
+  default to tool output, so no existing caller changes. Verified on the release CLI:
+  17590 bytes in → 3566 as tool output, → 17590 untouched as text, → 3566 by default, and
+  `--kind nonsense` refused with the valid values.
+- The MCP's advertised schema is now checked against its handler: the test walks the enum
+  and calls the tool with each value, because a model can only pass what the schema offers.
+  Adding `"prose"` to the schema fails it.
+- Verified by mutation: reverting the MCP to `transform_for` fails with *"typed text was
+  summarized anyway"*.
+- Deliberately no audit check — the mechanical form flags `headroom doctor`, which
+  compresses one sample per compressor and is right to ignore block kind. CONTRIBUTING's
+  fourth lesson carries the instance instead, now noting that **four binaries compress**,
+  not three HTTP dialects.
+
+---
+
 ## The Python binding compressed typed prose the proxy refuses to touch
 **2026-08-03** · and irreversibly, because its CCR store is discarded when the call returns
 

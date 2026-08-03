@@ -105,7 +105,10 @@ does not.
 Three surfaces are proxied — `/v1/messages`, `/v1/chat/completions`, `/v1/responses`.
 Anything that crosses them tends to get built against the Anthropic one, tested against the
 Anthropic one, and then written up in prose that says "the proxy does X", with no step in
-between where anyone checks the other two. Four times so far:
+between where anyone checks the other two. Five times so far — and the fifth says the
+surfaces are not only the three HTTP dialects. **Four binaries compress**: the proxy, the
+CLI, the MCP server and the Python binding. A rule the proxy enforces is a rule the other
+three have to be checked for, one at a time.
 
 | capability | true for | false for | what it cost |
 | --- | --- | --- | --- |
@@ -113,6 +116,7 @@ between where anyone checks the other two. Four times so far:
 | `volatile::scan` | `/v1/messages` | both OpenAI handlers | 0 findings on OpenAI shapes; it knew only Anthropic-shaped `system`/`tools` |
 | SSE cache accounting | Anthropic | both OpenAI dialects | `cache_hit_rate` read as *no data* for every OpenAI conversation |
 | `passthrough` help text | `/v1/messages` (69→69) | chat (62→88), responses (59→85) | a metric promising byte-identity it does not have |
+| the block-kind gate | the proxy | the CLI, the MCP server, the Python binding | prose a person typed, lossily summarized — irreversibly on two of the three, whose stores die with the call |
 
 Each was found by asking "which surfaces does this actually run on?" rather than by a test
 failing. **The comment is the tell.** Every one carried prose asserting the gap was
@@ -136,6 +140,14 @@ Not everything cross-cutting is broken this way, and guessing is not the point �
 injection and output shaping were checked under the same suspicion and work on all three
 (`memory_and_output_shaping_reach_every_dialect`). Measuring cost less than arguing about
 it would have.
+
+The fifth entry is the one to read twice. `transform_for` answers a question about
+*content*; `transform_for_block` also applies the gate that says the prose summarizer only
+runs on tool output, because `BlockKind::Text` is what somebody typed. Every non-proxy
+surface built a `Text` block and then called `transform_for` — declaring the content was
+typed and then asking a question that ignores it. Each one had tests, and none of them
+compared its answer against the proxy's for the same bytes. `headroom compress` and
+`headroom inspect` disagreed *inside one binary*.
 
 ## Review & merge
 - Every change lands through a PR — no direct pushes to the default branch.
