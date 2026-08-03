@@ -332,6 +332,35 @@ else
   printf '      unreached and undeclared: %s\n' "$(comm -13 <(printf '%s\n' "$declared") <(printf '%s\n' "$actual") | tr '\n' ' ')"
 fi
 
+echo "== 13. the MCP server reads the same CCR variables the proxy writes"
+# The retrieve half of the CCR promise runs in a different process. `headroom-mcp` cannot
+# depend on `headroom-proxy`, so it carries its own `HEADROOM_CCR_DIR` and
+# `HEADROOM_REDIS_URL` literals — a second copy of a decision, which is check 6's subject
+# in a place check 6 cannot see.
+#
+# The drift is silent and total. Rename the proxy's constant and the MCP binary reads a
+# variable nobody sets, falls back to memory, and answers "not found" for every marker the
+# proxy ever wrote — while both processes start cleanly and report nothing wrong. The
+# model is simply told the content is gone.
+#
+# Verified end to end before this check was written, on release binaries: the proxy
+# compressed a tool result into `<<ccr:3e6aa038...>>` under a directory, was stopped, and
+# the MCP binary redeemed the original from that same directory in a separate process.
+# This keeps the two names that made it work from parting company.
+for pair in "STORE_DIR_VAR:CCR_DIR" "REDIS_URL_VAR:REDIS_URL"; do
+  mcp_const="${pair%%:*}"
+  proxy_const="${pair##*:}"
+  mcp_value=$(grep -oP "const $mcp_const: &str = \"\\K[^\"]+" crates/headroom-mcp/src/main.rs)
+  proxy_value=$(grep -oP "pub const $proxy_const: &str = \"\\K[^\"]+" crates/headroom-proxy/src/config.rs)
+  if [ -z "$mcp_value" ] || [ -z "$proxy_value" ]; then
+    fail "could not read $mcp_const ($mcp_value) or $proxy_const ($proxy_value)"
+  elif [ "$mcp_value" = "$proxy_value" ]; then
+    note "✓ $mcp_value"
+  else
+    fail "the MCP reads $mcp_value and the proxy writes $proxy_value — every marker would be unredeemable"
+  fi
+done
+
 echo
 [ "$status" -eq 0 ] && echo "clean" || echo "findings above — see the header for why this matters"
 exit "$status"

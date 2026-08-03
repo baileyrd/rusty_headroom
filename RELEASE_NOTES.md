@@ -6,6 +6,28 @@ the crate starts publishing releases.
 
 ---
 
+## The CCR round trip, verified across processes; its two shared names now pinned
+**2026-08-03** · the headline promise checked the hard way, and the drift that would break it guarded
+
+- CCR's promise is that compression is *"a bet that can be unwound"*. The write half runs
+  in the proxy, the read half in the MCP server — a different process, often started
+  separately. CONTRIBUTING's second lesson is that self-consistency proves nothing there.
+- **Verified on release binaries:** the proxy stored a compressed tool result as
+  `<<ccr:3e6aa038...>>` under a `HEADROOM_CCR_DIR`, the proxy was **stopped**, and the MCP
+  binary — started fresh against the same directory — returned the original over stdio.
+- `headroom-mcp` cannot depend on `headroom-proxy`, so it carries its own
+  `"HEADROOM_CCR_DIR"` and `"HEADROOM_REDIS_URL"` literals: a second copy of a decision, in
+  a place check 6 cannot see. Rename the proxy's constant and the MCP reads a variable
+  nobody sets, falls back to memory, and answers "not found" for every marker ever written
+  — while both processes start cleanly and report nothing wrong.
+- Audit **check 13** compares the two. Verified by mutation: renaming `CCR_DIR` fails it
+  with *"every marker would be unredeemable"*.
+- Deliberately not a cargo test — `CARGO_BIN_EXE_` does not cross crates, and simulating it
+  in one process is the exact trap. The property is held by the pinned hash format, the
+  store layout living in `headroom-core`, and check 13.
+
+---
+
 ## Retuning one setting silently reverted every other one
 **2026-08-03** · the admin endpoint's validator and its applier disagreed about what a call means
 
