@@ -310,6 +310,7 @@ pub fn inject_append(
     conversation: &Conversation,
     store: &MemoryStore,
     limit: usize,
+    frozen: usize,
 ) -> Option<(usize, usize, String)> {
     let block_text = inject_block(store, limit)?;
 
@@ -319,6 +320,25 @@ pub fn inject_append(
         .enumerate()
         .rev()
         .find(|(_, message)| message.role() == Role::User)?;
+
+    // Invariant I2. `frozen` is the count of messages the provider may already have
+    // cached, so anything below it is off limits — appending a memory there rewrites a
+    // block the customer paid to cache and invalidates the prefix on the turn it lands.
+    //
+    // This was protected only by accident. `compress_dialect` returns early when the live
+    // zone is empty, and that early return sits above the injection site; its comment says
+    // it is there because there is nothing to compress, which is a different reason that
+    // happens to cover this one. Moving it, or injecting on a request with no live zone —
+    // both reasonable changes, since injection does not need anything to compress — would
+    // have removed the protection with nothing to notice.
+    //
+    // I could not construct a request that reaches this with a frozen target: the newest
+    // user message is at or after the floor whenever anything else is compressible. That
+    // is an argument, not a guarantee, and it is the kind of argument this project has
+    // been wrong about before.
+    if message_index < frozen {
+        return None;
+    }
 
     let (block_index, block) = message
         .blocks()
@@ -410,9 +430,83 @@ fn qualify(namespace: &str, key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Block;
 
     fn source(agent: &str) -> Provenance {
         Provenance::new(agent, "session-1")
+    }
+
+    /// A store with one fact, which is all injection needs to produce a block.
+    fn one_memory() -> MemoryStore {
+        let mut store = MemoryStore::new();
+        store.remember("the user prefers concise answers", source("a"));
+        store
+    }
+
+    /// `messages` user turns, each carrying one text block.
+    fn conversation_of(turns: usize) -> Conversation {
+        Conversation::new(
+            None,
+            vec![],
+            (0..turns)
+                .map(|i| {
+                    crate::conversation::Message::new(
+                        Role::User,
+                        vec![Block::new(BlockKind::Text, format!("turn {i}"))],
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    // ---- injection and the frozen floor ----
+
+    #[test]
+    fn injection_never_targets_a_frozen_message() {
+        // Invariant I2. Appending a memory to a message the provider has cached rewrites
+        // a block the customer paid for and invalidates the prefix on the turn it lands.
+        //
+        // This was protected only by an early return in `compress_dialect` — the one that
+        // gives up when the live zone is empty, whose comment says it is there because
+        // there is nothing to compress. A different reason that happened to cover this
+        // one, sitting in a different crate.
+        let store = one_memory();
+        let conversation = conversation_of(3);
+
+        // Every floor that covers the newest user message, which is the only message
+        // injection ever targets.
+        for frozen in [3, 4, usize::MAX] {
+            assert!(
+                inject_append(&conversation, &store, 8, frozen).is_none(),
+                "injected into a message below a floor of {frozen}"
+            );
+        }
+    }
+
+    #[test]
+    fn injection_still_lands_on_a_live_message() {
+        // The other half. A guard that refuses everything would disable the feature and
+        // look exactly like one that works.
+        let store = one_memory();
+        let conversation = conversation_of(3);
+
+        let (message, block, content) =
+            inject_append(&conversation, &store, 8, 2).expect("nothing was injected");
+
+        assert_eq!(message, 2, "injected into a message behind the floor");
+        assert_eq!(block, 0);
+        assert!(content.starts_with("turn 2"), "the original text was lost");
+        assert!(content.contains("<memory>"), "no memory block was appended");
+    }
+
+    #[test]
+    fn a_floor_of_zero_leaves_injection_alone() {
+        // No breakpoints means nothing is cached, which is the ordinary case and must be
+        // unaffected by the guard.
+        let store = one_memory();
+        let conversation = conversation_of(1);
+
+        assert!(inject_append(&conversation, &store, 8, 0).is_some());
     }
 
     // ---- dedup ----
