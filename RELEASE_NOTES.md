@@ -6,6 +6,23 @@ the crate starts publishing releases.
 
 ---
 
+## D25's "no way to suppress it" checked against the source
+**2026-08-03** · argued → measured, again
+
+- D25 said reqwest "exposes no option to suppress" the injected `accept: */*`. That was
+  the right conclusion **reached without looking**, which is the habit this session keeps
+  catching. It is now read from `reqwest 0.13.4` and cited.
+- **Three mechanisms compose to make it unsuppressable:** `ClientBuilder::new` inserts
+  `ACCEPT: */*` before any caller can intervene (`client.rs:284`); `default_headers`
+  *extends* that map rather than replacing it (`:1166`), so an empty `HeaderMap` cannot
+  remove the entry; and at execute time defaults fill only vacant entries (`:2616`), so a
+  header can be overridden but never made absent.
+- **Why the precision matters:** "no option exists" is a claim that rots silently when a
+  dependency updates. Three cited line references tell the next reader exactly what to
+  re-check.
+
+---
+
 ## D9 gets a test; the simulator learns to stall
 **2026-08-03** · a decision with nothing enforcing it
 

@@ -605,6 +605,21 @@ A client that *does* send `accept` has it forwarded verbatim, covered by
 never strip a real one: a client asking for `text/event-stream` and not getting it is a
 client whose streaming silently stops working.
 
-**Would change if:** the HTTP client gains a way to suppress it, or the leak grows. The
-honest fix is upstream, not a workaround here — removing it from the built request does
-nothing, which was tried and measured before this was written down.
+**Why there is no way to suppress it, read rather than assumed.** The first version of
+this entry said reqwest "exposes no option" without checking. In `reqwest 0.13.4`:
+
+- `ClientBuilder::new` inserts `ACCEPT: */*` into the client's default headers
+  (`async_impl/client.rs:284`), before any caller can intervene.
+- `ClientBuilder::default_headers` **extends** that map rather than replacing it
+  (`:1166`), so passing an empty `HeaderMap` cannot remove the entry.
+- At execute time the defaults fill only *vacant* entries (`:2616`). A header set on the
+  request wins — but there is no way to express *absent*, which is what a faithful relay
+  needs.
+
+So a header the client did not send is added, and the three mechanisms compose such that
+no caller-side workaround exists. That is worth knowing precisely rather than vaguely: it
+tells a future reader exactly what to re-check when reqwest updates.
+
+**Would change if:** reqwest lets a client be built without the default, or the leak
+grows. The fix is upstream. Removing the header from the built request does nothing —
+tried, measured (`on_request=None`), and reverted rather than shipped looking like a fix.
