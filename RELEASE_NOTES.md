@@ -6,6 +6,41 @@ the crate starts publishing releases.
 
 ---
 
+## `/admin/runtime-env` confirmed an upstream change that never happened
+**2026-08-03** · three self-reports agreeing with each other, all three wrong
+
+- **The hole:** `HEADROOM_UPSTREAM` was absent from `STARTUP_ONLY`, and it is startup-only
+  in fact — `AppState::new` builds one `Upstream` with the base URL baked in, and the
+  request path never re-reads configuration.
+- **Measured** against two loopback providers, proxy started on A and told to use B:
+
+  ```
+  admin       : {"applied":["HEADROOM_UPSTREAM"],"needs_restart":[]}
+  after       : {"served_by": "UPSTREAM-A"}
+  health says : http://127.0.0.1:9102
+  ```
+
+  The admin endpoint confirmed it, `/health` confirmed it, and every request kept going to
+  the old provider — on the single setting an operator is most likely to change
+  mid-incident, and the one whose silent failure is hardest to spot, because traffic keeps
+  flowing.
+- **Changed:** `UPSTREAM` joins `STARTUP_ONLY`, so admin now answers
+  `needs_restart: ["HEADROOM_UPSTREAM"]`.
+- **Changed:** `/health` reports the base from the built relay (`AppState::upstream_base`)
+  rather than from configuration, so it cannot confirm a change nothing applied.
+- **Changed:** the README's configuration table now marks which settings need a restart.
+  It listed the upstream as live.
+- **Added:** check 9 of the audit, which fails if a `STARTUP_ONLY` variable is missing from
+  that table or not marked. The table is a second copy of the list and it is the copy an
+  operator actually reads.
+- **Logged as D28**, including the fix not taken: the relay's client is reusable across
+  base URLs, so the setting could have been made genuinely live. It was not, because every
+  other once-read setting here is deliberately startup-only for I4 reasons, and the
+  alternative needed either a signature change or a test-only path through the request
+  handler.
+
+---
+
 ## Nothing verified the proxy's routes were routed
 **2026-08-03** · including the one that exists for Codex
 

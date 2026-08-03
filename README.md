@@ -75,28 +75,34 @@ from the same client running unproxied, and that disclosure is not worth a token
 
 ## Configuration
 
-Read live from the environment, so most of it can be changed without a restart.
+Read from the environment. **Restart** marks the ones read once at startup, which a
+running proxy will not pick up — the authoritative list is `config::STARTUP_ONLY`, and
+`POST /admin/runtime-env` reports exactly these under `needs_restart`.
 
-| variable | effect |
-| --- | --- |
-| `HEADROOM_UPSTREAM` | provider base URL (default `https://api.anthropic.com`) |
-| `HEADROOM_HOST` / `HEADROOM_PORT` | listen address (default loopback, `8787`) |
-| `HEADROOM_COMPRESSION` | `0` forwards everything untouched |
-| `HEADROOM_LOG` | log filter (default `warn`; logs go to stderr) |
-| `HEADROOM_CCR_DIR` | directory for retrievable originals; memory only if unset |
-| `HEADROOM_REDIS_URL` | shared store for multi-worker deployments (needs `--features redis`) |
-| `HEADROOM_RECOMMENDATIONS` | file from `headroom learn`, read once at startup |
-| `HEADROOM_MEMORY` | JSON-lines memories to inject into the live-zone tail |
-| `HEADROOM_STABILIZE` | `1` normalizes tools and places cache breakpoints — **off by default**, it modifies the zone I2 protects |
-| `HEADROOM_OUTPUT_SHAPER` | `terse` or `full`; off unless set |
+| variable | restart | effect |
+| --- | --- | --- |
+| `HEADROOM_UPSTREAM` | yes | provider base URL (default `https://api.anthropic.com`) |
+| `HEADROOM_HOST` / `HEADROOM_PORT` | yes | listen address (default loopback, `8787`) |
+| `HEADROOM_CCR_DIR` | yes | directory for retrievable originals; memory only if unset |
+| `HEADROOM_REDIS_URL` | yes | shared store for multi-worker deployments (needs `--features redis`) |
+| `HEADROOM_RECOMMENDATIONS` | yes | file from `headroom learn` |
+| `HEADROOM_MEMORY` / `HEADROOM_MEMORY_LIMIT` | yes | JSON-lines memories to inject into the live-zone tail |
+| `HEADROOM_COMPRESSION` | no | `0` forwards everything untouched |
+| `HEADROOM_STABILIZE` | no | `1` normalizes tools and places cache breakpoints — **off by default**, it modifies the zone I2 protects |
+| `HEADROOM_OUTPUT_SHAPER` | no | `terse` or `full`; off unless set |
+| `HEADROOM_LOG` | no | log filter (default `warn`; logs go to stderr) |
+
+`HEADROOM_UPSTREAM` is on that list because the relay client is built once with its base
+URL baked in. It was *not* on it until measured: the admin endpoint answered
+`needs_restart: []`, `/health` reported the new address, and traffic kept going to the old
+one — three self-reports agreeing with each other and all three wrong.
 
 `GET /metrics` reports savings, cache usage, and — the useful one — a per-reason
 breakdown of *why* traffic was or was not compressed.
 
-`POST /admin/runtime-env` (loopback only) retunes a running proxy. Most settings take
-effect on the next request; the store, memories and recommendations are read once at
-startup, and the response names any of those you set under `needs_restart` rather than
-letting you believe the change took.
+`POST /admin/runtime-env` (loopback only) retunes a running proxy. Settings marked **no**
+above take effect on the next request; the rest are stored and named under `needs_restart`
+rather than letting you believe the change took.
 
 ## Development
 

@@ -105,6 +105,17 @@ impl AppState {
         self.upstream.is_some()
     }
 
+    /// Where the relay actually forwards, or `None` when there is no relay.
+    ///
+    /// Read from the built client rather than from configuration, because the two
+    /// disagree after `POST /admin/runtime-env` stores a new `HEADROOM_UPSTREAM`: the
+    /// override lands in the map, nothing rebuilds this client, and every request keeps
+    /// going where it was going. `/health` reported the configured value and so confirmed
+    /// a change that had not happened.
+    pub fn upstream_base(&self) -> Option<&str> {
+        self.upstream.as_ref().map(|upstream| upstream.base())
+    }
+
     /// The process metrics.
     pub fn metrics(&self) -> &Arc<Metrics> {
         &self.metrics

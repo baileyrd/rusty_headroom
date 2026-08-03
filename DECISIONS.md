@@ -721,3 +721,45 @@ for a release before removing one.
 **Would change if:** the module is published. After that, a value in `REASONS` is a
 compatibility surface, and the exhaustiveness test in core is what tells you a change is
 about to reach it.
+
+## D28 — the upstream stays startup-only; the reports change instead
+**2026-08-03**
+
+`HEADROOM_UPSTREAM` was absent from `STARTUP_ONLY`, and it is startup-only in fact:
+`AppState::new` builds one `Upstream` and bakes the base URL into it, and the request path
+uses that client without re-reading configuration.
+
+Measured against two loopback providers, with the proxy started on A and told to use B:
+
+```
+admin       : {"applied":["HEADROOM_UPSTREAM"],"needs_restart":[]}
+after       : {"served_by": "UPSTREAM-A"}
+health says : http://127.0.0.1:9102
+```
+
+Three self-reports agreeing with each other and all three wrong, on the single setting an
+operator is most likely to change mid-incident and the one whose silent failure is
+hardest to spot — traffic keeps flowing, to the wrong provider.
+
+**Two ways to fix it, and the reasons for choosing this one.** The relay's client is
+reusable across base URLs; only the `base` string is per-destination. So `forward` could
+take the base per request, making the setting genuinely live and matching what the README
+already claimed.
+
+Not taken. Every other once-read setting here is deliberately startup-only, with the
+reasoning recorded: the CCR store is opened once, and memories and recommendations are
+loaded once so the same request cannot compress differently depending on when it arrived
+(I4). The upstream being fixed for a process's life is consistent with that, and the bug
+was never the lifecycle — it was that three components claimed otherwise. Making it live
+would also have meant either changing `Upstream::new`'s signature or giving `AppState` a
+test-only override path, and a test-only path through the request handler is how tests
+stop reflecting production.
+
+So: `UPSTREAM` joins `STARTUP_ONLY`, `/health` reports the base from the built relay
+rather than from configuration, and the README marks which settings need a restart.
+
+**Would change if:** an operator actually needs to repoint a running proxy without
+dropping connections. Then `forward` takes the base per request, `AppState` keeps an
+explicit override for tests rather than an implicit one, and the self-referential check in
+`admin` becomes the only thing standing between a live change and a proxy pointed at
+itself — which is worth designing deliberately rather than inheriting.
