@@ -1015,6 +1015,74 @@ mod tests {
     }
 
     #[test]
+    fn memory_and_output_shaping_reach_every_dialect() {
+        // Every other test for both features runs `Dialect::Anthropic` and stops. That is
+        // the exact shape of four gaps this repository has already shipped — a capability
+        // built and tested against one surface, then described as if it covered all three.
+        // See CONTRIBUTING's fourth lesson.
+        //
+        // These two turned out to be fine. That is worth a test rather than a note,
+        // because "fine" is a fact about today: `read_conversation` grows a branch per
+        // dialect, and the day one of them stops yielding a user message to append to,
+        // both features go quiet on that surface with nothing failing.
+        let chat = r#"{"model":"gpt-4o","messages":[{"role":"user","content":"turn one"},{"role":"assistant","content":"reply one"},{"role":"user","content":"what does this function do?"}]}"#;
+        let responses = r#"{"model":"gpt-4o","input":[{"role":"user","content":"turn one"},{"role":"assistant","content":"reply one"},{"role":"user","content":"what does this function do?"}]}"#;
+
+        for (dialect, source) in [
+            (Dialect::Anthropic, prose_request()),
+            (Dialect::OpenAi, chat.to_owned()),
+            (Dialect::OpenAiResponses, responses.to_owned()),
+        ] {
+            let injected = compress_dialect(
+                dialect,
+                source.as_bytes(),
+                &with_memories(),
+                true,
+                payg(),
+                Verbosity::Default,
+            );
+            let injected = String::from_utf8(injected.into_owned()).unwrap();
+            assert!(
+                injected.contains("uses tokens"),
+                "{dialect:?} dropped the memory block: {injected}"
+            );
+
+            // Asked of a compressor set with *no* memories, so the growth below is the
+            // terseness note and not the injection above leaking into this assertion.
+            let terse = compress_dialect(
+                dialect,
+                source.as_bytes(),
+                &compressors(),
+                true,
+                payg(),
+                Verbosity::Terse,
+            );
+            let terse = String::from_utf8(terse.into_owned()).unwrap();
+            assert_ne!(
+                terse, source,
+                "{dialect:?} ignored Verbosity::Terse and forwarded the request untouched"
+            );
+
+            // The control: the same request at the default verbosity is left alone, so
+            // the inequality above is the shaper acting rather than any rewrite at all.
+            let plain = compress_dialect(
+                dialect,
+                source.as_bytes(),
+                &compressors(),
+                true,
+                payg(),
+                Verbosity::Default,
+            );
+            assert_eq!(
+                String::from_utf8(plain.into_owned()).unwrap(),
+                source,
+                "{dialect:?} rewrote a request that needed nothing, so the terse \
+                 assertion above proves nothing"
+            );
+        }
+    }
+
+    #[test]
     fn memories_are_not_injected_twice_across_turns() {
         // An agent loop calls this every turn. Without the guard a long session
         // accumulates the same facts a dozen times over — wasted tokens, and a worse
