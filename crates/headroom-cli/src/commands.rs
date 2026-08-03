@@ -204,8 +204,28 @@ mod tests {
             Some("smart_crusher")
         );
 
+        // Prose routes to the text compressor here, and deliberately does *not* on the
+        // proxy's path unless the block is tool output — `transform_for_block` draws that
+        // line. A caller piping prose into this command has asked for it to be
+        // compressed; a user typing a message has not.
         let prose = "just some ordinary words with nothing structural about them";
-        assert!(orchestrator().transform_for(prose, payg(), "").is_none());
+        assert_eq!(
+            orchestrator()
+                .transform_for(prose, payg(), "")
+                .map(|t| t.name()),
+            Some("text_summarizer")
+        );
+
+        // And it still declines at apply time, because it is far below the size
+        // threshold — routing is not the same as compressing.
+        let mut block = Block::new(BlockKind::Text, prose);
+        assert!(validated_apply(
+            orchestrator().transform_for(prose, payg(), "").unwrap(),
+            &mut block,
+            &HeuristicEstimator::new()
+        )
+        .map(|outcome| !outcome.is_compressed())
+        .unwrap_or(true));
     }
 
     #[test]

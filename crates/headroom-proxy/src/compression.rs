@@ -101,13 +101,13 @@ impl Compressors {
     ///
     /// Invariant I10 is enforced inside the orchestrator: restricted traffic is routed
     /// the lossless reformatter, never a lossy compressor.
-    fn route(
+    fn route_block(
         &self,
-        content: &str,
+        block: &headroom_core::block::Block,
         policy: CompressionPolicy,
         model: &str,
     ) -> Option<&dyn Transform> {
-        self.orchestrator.transform_for(content, policy, model)
+        self.orchestrator.transform_for_block(block, policy, model)
     }
 
     /// Why `content` was routed as it was, for telemetry.
@@ -234,7 +234,9 @@ pub fn compress_dialect<'a>(
         else {
             continue;
         };
-        let Some(transform) = compressors.route(block.content(), policy, model) else {
+        // Block-aware: prose is compressed only when the block is tool output. The
+        // prose compressor is lossy, and `BlockKind::Text` is what somebody typed.
+        let Some(transform) = compressors.route_block(block, policy, model) else {
             continue;
         };
 

@@ -514,3 +514,38 @@ applies the real policy there.
 
 **Would change if:** a fourth caller appears. It should take an `Orchestrator` rather
 than build a compressor set, and this entry is the reason why.
+
+## D24 — prose is compressed only when it came from a tool
+**2026-08-03**
+
+Gap row C10's compressors were registered nowhere, so the proxy forwarded every prose
+tool result whole. Routing them exposed a question the other content types do not raise.
+
+`BlockKind::is_compressible()` includes `Text` — what a user typed or a model wrote — and
+`TextSummarizer` is lossy: it drops low-importance lines behind a CCR marker. Applying
+that to a directory listing is the product working. Applying it to somebody's message is
+rewriting what they said, and no token saving is worth that.
+
+So `Orchestrator::transform_for_block` routes prose only when
+`block.kind().is_tool_output()`. Every other content type is exempt from the rule
+deliberately: a person does not type a 5 KB unified diff into a chat box, and if they do,
+compressing it is what they were asking for. Narrowing further would exempt content the
+proxy exists to compress.
+
+**This makes the proxy and the content-only callers differ, on purpose.** `transform_for`
+has no block to inspect and is what `headroom compress`, the MCP tool and the Python
+binding use — a caller who handed content over has asked for it to be compressed. Given
+D23 was about eliminating exactly this kind of divergence, the difference lives in two
+named entry points with the reason in both doc comments, rather than in a flag someone
+has to remember.
+
+**It also un-broke S4 and S5.** Those rows were closed by wiring the anchor and tag
+keep-sets into `TextSummarizer`, and reported as reached from the request path. They were
+not: the compressor holding them was itself unreachable. They only started running on
+proxied traffic here. Verified end to end — a tagged 22 KB tool result compresses to
+4.5 KB with `</result>` intact, and a 21 KB one keeps its final line.
+
+**Would change if:** a block kind appears that carries authored text but is not `Text`.
+The check is on `is_tool_output`, so a new tool-output kind is covered automatically and
+a new authored kind is protected automatically. That is why the check is phrased
+positively.
