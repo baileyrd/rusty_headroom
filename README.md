@@ -93,6 +93,11 @@ Read live from the environment, so most of it can be changed without a restart.
 `GET /metrics` reports savings, cache usage, and — the useful one — a per-reason
 breakdown of *why* traffic was or was not compressed.
 
+`POST /admin/runtime-env` (loopback only) retunes a running proxy. Most settings take
+effect on the next request; the store, memories and recommendations are read once at
+startup, and the response names any of those you set under `needs_restart` rather than
+letting you believe the change took.
+
 ## Development
 
 ```bash

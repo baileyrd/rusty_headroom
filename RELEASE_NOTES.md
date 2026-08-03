@@ -6,6 +6,34 @@ the crate starts publishing releases.
 
 ---
 
+## `/admin/runtime-env` stops reporting success for settings it cannot change
+**2026-08-03** · the same endpoint, a second false report
+
+- **Fixed:** five settings are read **once at startup** — `HEADROOM_CCR_DIR`,
+  `HEADROOM_REDIS_URL`, `HEADROOM_MEMORY`, `HEADROOM_MEMORY_LIMIT`,
+  `HEADROOM_RECOMMENDATIONS` — plus the host and port, since the socket is bound once.
+  The endpoint stored them and answered `{"applied": [...]}`, which was false: the value
+  sat in the override map and nothing ever read it again.
+- **Why that matters more than it sounds:** an operator retuning a proxy during an
+  incident is told the change took effect, and moves on to look elsewhere.
+- **Added:** a `needs_restart` list in the response, and a `warn` log when it is
+  non-empty. Empty is the common case and says "everything you set is live now".
+- **Design note:** the values are still stored rather than refused. They take effect on
+  the next restart, and rejecting them would make the endpoint useless for preparing a
+  restart — the problem was the silence, not the storing.
+- **Design note:** `STARTUP_ONLY` lives beside the variables it names, so a new
+  startup-only setting is added to it in the same edit rather than discovered later by
+  someone whose change silently did nothing. A test checks every name in it is a real
+  setting, because a typo would drop a name from the warning and restore the original bug.
+- **Verified through the release binary:**
+
+```
+{"applied":["HEADROOM_MEMORY"],"needs_restart":["HEADROOM_MEMORY"]}
+{"applied":["HEADROOM_COMPRESSION"],"needs_restart":[]}
+```
+
+---
+
 ## Hot-reload could point the proxy at itself
 **2026-08-03** · a decision invalidated by a later feature
 
