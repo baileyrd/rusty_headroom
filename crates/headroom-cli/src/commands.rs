@@ -72,7 +72,7 @@ pub fn compress(dry_run: bool) -> anyhow::Result<()> {
         println!("tokens before: {before}");
         if compressed {
             let saved = before.saturating_sub(after);
-            let percent = if before > 0 { saved * 100 / before } else { 0 };
+            let percent = (saved * 100).checked_div(before).unwrap_or(0);
             println!("tokens after: {after}");
             println!("would save: {saved} ({percent}%)");
         } else {
