@@ -26,7 +26,7 @@
 
 use std::sync::Arc;
 
-use super::{HeuristicEstimator, Tokenizer};
+use super::{HeuristicEstimator, TiktokenCounter, Tokenizer};
 
 /// A model family, resolved from an identifier.
 ///
@@ -150,12 +150,30 @@ impl Default for Registry {
 }
 
 impl Registry {
-    /// Builds a registry with the heuristic estimator as its fallback.
+    /// Builds a registry with the heuristic estimator as its fallback and nothing
+    /// registered.
     pub fn new() -> Self {
         Self {
             exact: Vec::new(),
             fallback: Arc::new(HeuristicEstimator::new()),
         }
+    }
+
+    /// Builds a registry with every exact tokenizer this build carries.
+    ///
+    /// Registering by default rather than on request: the OpenAI vocabularies are
+    /// compiled in either way, so leaving them unregistered would mean carrying the
+    /// tables and then not using them — the worst of both.
+    ///
+    /// The model identifier still decides which encoding applies, so an Anthropic model
+    /// is unaffected and still falls back to the heuristic.
+    pub fn with_defaults() -> Self {
+        let mut registry = Self::new();
+        registry.register(
+            Family::OpenAi,
+            Arc::new(TiktokenCounter::for_model("gpt-4o")),
+        );
+        registry
     }
 
     /// Registers `tokenizer` for `family`, replacing any previous entry.
@@ -283,6 +301,27 @@ mod tests {
     }
 
     // ---- resolution ----
+
+    #[test]
+    fn the_default_registry_counts_openai_models_exactly() {
+        // The vocabularies are compiled in either way; leaving them unregistered would
+        // mean carrying the tables and then not using them.
+        let registry = Registry::with_defaults();
+
+        assert!(registry.is_exact_for("gpt-4o"));
+        assert_eq!(registry.for_model("gpt-4o").name(), "o200k_base");
+    }
+
+    #[test]
+    fn the_default_registry_leaves_other_families_on_the_heuristic() {
+        // An OpenAI vocabulary applied to an Anthropic model would be a wrong count
+        // reported as exact, which is worse than an honest upper bound.
+        let registry = Registry::with_defaults();
+
+        assert!(!registry.is_exact_for("claude-opus-4"));
+        assert!(!registry.is_exact_for("gemini-2.5-pro"));
+        assert!(!registry.is_exact_for("something-new"));
+    }
 
     #[test]
     fn an_empty_registry_still_resolves_every_model() {

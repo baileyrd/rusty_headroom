@@ -6,9 +6,11 @@
 //! compression path, which makes this module a dependency of essentially the whole
 //! pipeline.
 //!
-//! Exact tokenizers for specific model families arrive later behind the
-//! [`Tokenizer`] trait. What ships here is the estimator that is always available,
-//! needs no model files, and is correct enough to make the I5 decision safely.
+//! Two implementations ship. [`HeuristicEstimator`] is always available, needs no
+//! model files, and over-counts by design so the I5 decision is safe on any content.
+//! [`TiktokenCounter`] is exact for OpenAI model families, and [`registry::Registry`]
+//! resolves which applies — falling back to the heuristic for anything unrecognized
+//! rather than reporting an approximation as a measurement.
 
 mod estimator;
 pub mod registry;
