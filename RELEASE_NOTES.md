@@ -6,6 +6,37 @@ the crate starts publishing releases.
 
 ---
 
+## I7 was passing with its guard removed
+**2026-08-03** · the hot zone the tests protected was 29 bytes
+
+- **The hole:** I2 and I7 assert that `system` and `tools` come back byte-identical. The
+  fixture's system block was `"You are a careful assistant."` — 29 bytes — and its tool
+  schema 50. Both are below every compressor's size threshold, so those bytes would have
+  survived with the guard deleted.
+- **Demonstrated.** With a synthetic mutation that compresses the system block — the guard
+  removed, in effect — `i7_tool_definitions_are_never_compressed` **passed** under the old
+  fixture and **fails** under the new one. That is the finding, measured rather than
+  argued.
+- Stated precisely for I2: under the same mutation it failed on its own "nothing was
+  compressed" guard rather than on the hot-zone assertion, so its `system`/`tools`
+  assertions are strengthened here on the same reasoning, but only I7's vacuity was
+  directly demonstrated.
+- **Changed:** the fixture's hot zone now carries ~10 KB of prose across both the system
+  block and a tool description.
+- **Added:** `hot_zone_bulk_is_independently_compressible`, which hands the same bulk to
+  the same orchestrator outside the hot zone and requires that it shrinks. "Unchanged in
+  the hot zone" is now a fact about the guard rather than about the size.
+- The first version of that bulk joined its lines with a space. The prose compressor works
+  on a line budget, so one long line is one line and nothing was dropped — 19019 bytes in,
+  19019 out. Caught immediately by the new test, which is the same mistake, and the same
+  catch, as the doctor prose sample.
+- **Changed:** the live tool result grew from 120 records to 500, because the added hot
+  zone is protected and therefore incompressible, and
+  `compression_measurably_helps_while_every_invariant_holds` correctly read the dilution
+  as a compressor that had stopped working.
+
+---
+
 ## Three property tests were passing without compressing anything
 **2026-08-03** · I4, I5 and I10, gated by a generator that never cleared a threshold
 

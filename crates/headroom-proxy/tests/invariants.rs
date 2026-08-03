@@ -137,9 +137,40 @@ async fn i1_insignificant_whitespace_survives_untouched() {
     );
 }
 
-/// A request with a bulky live tool result and five frozen turns.
+/// Bulk that every compressor in this project would happily eat, as a JSON string body.
+///
+/// Used for the hot zone — the `system` block and the tool schemas — because "the hot
+/// zone was not modified" only means something if something *would* have modified it.
+///
+/// The fixture used to carry `"You are a careful assistant."` and a two-key tool schema:
+/// 29 and 50 bytes, below every compressor's size threshold. I2 and I7 asserted those
+/// bytes came back unchanged, which they would have with the guard deleted, since nothing
+/// would compress them either way. `hot_zone_bulk_is_independently_compressible` below is
+/// what keeps this honest.
+fn hot_zone_bulk() -> String {
+    // Joined with newlines, not spaces. The prose compressor works on a line budget, so
+    // the same words as one long line are one line and nothing is dropped — the first
+    // version of this function joined with a space and did not compress at all, which
+    // `hot_zone_bulk_is_independently_compressible` caught immediately.
+    (0..90)
+        .map(|i| {
+            format!(
+                "Rule {i}: when the caller asks about module_{i}, read src/module_{i}.rs \
+                 first and quote the signature verbatim before answering."
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A request with a bulky live tool result, five frozen turns, and a hot zone big enough
+/// that leaving it alone is a decision rather than an accident.
 fn compressible_request() -> String {
-    let records: Vec<String> = (0..120)
+    // 500 records rather than 120: the hot zone below is now ~10 KB of incompressible
+    // (because protected) bytes, and the live zone has to dominate the total or
+    // `compression_measurably_helps_while_every_invariant_holds` reads the dilution as a
+    // compressor that stopped working.
+    let records: Vec<String> = (0..500)
         .map(|i| {
             format!(
                 r#"{{\"path\":\"src/module_{i}.rs\",\"kind\":\"file\",\"status\":\"ok\",\"size\":{}}}"#,
@@ -148,8 +179,16 @@ fn compressible_request() -> String {
         })
         .collect();
 
+    let bulk = serde_json::to_string(&hot_zone_bulk()).unwrap();
+    let tools = serde_json::json!([{
+        "name": "read_file",
+        "description": hot_zone_bulk(),
+        "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}},
+    }]);
+
     format!(
-        r#"{{"model":"claude-opus-4","max_tokens":4096,"system":"You are a careful assistant.","tools":[{{"name":"read_file","input_schema":{{"type":"object"}}}}],"messages":[{{"role":"user","content":"turn one"}},{{"role":"assistant","content":"answer one"}},{{"role":"user","content":"turn two"}},{{"role":"assistant","content":"answer two"}},{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"t_old","content":"small older result"}}]}},{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"t_new","content":"[{}]"}}]}}]}}"#,
+        r#"{{"model":"claude-opus-4","max_tokens":4096,"system":{bulk},"tools":{},"messages":[{{"role":"user","content":"turn one"}},{{"role":"assistant","content":"answer one"}},{{"role":"user","content":"turn two"}},{{"role":"assistant","content":"answer two"}},{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"t_old","content":"small older result"}}]}},{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"t_new","content":"[{}]"}}]}}]}}"#,
+        serde_json::to_string(&tools).unwrap(),
         records.join(",")
     )
 }
@@ -556,6 +595,45 @@ async fn i8_signed_and_encrypted_blocks_arrive_untouched() {
             .unwrap()
             .as_bytes()),
         "the signed message was re-serialized"
+    );
+}
+
+#[test]
+fn hot_zone_bulk_is_independently_compressible() {
+    // What makes I2 and I7 mean anything.
+    //
+    // Both assert that `system` and `tools` came back byte-identical. That assertion is
+    // empty unless a compressor would otherwise have taken them — and for most of this
+    // project's life it was empty, because the fixture's system block was 29 bytes and
+    // its tool schema was 50. Deleting the guard would not have failed either test.
+    //
+    // So: hand the same bulk to the same orchestrator the proxy uses, outside the hot
+    // zone, and require that it shrinks. Then "unchanged in the hot zone" is a fact about
+    // the guard rather than about the size.
+    use headroom_core::auth_mode::{AuthMode, CompressionPolicy};
+    use headroom_core::ccr::InMemoryCcrStore;
+    use headroom_core::pipeline::Orchestrator;
+    use headroom_core::tokenizer::HeuristicEstimator;
+    use headroom_core::{validated_apply, Block, BlockKind};
+
+    let bulk = hot_zone_bulk();
+    let orchestrator = Orchestrator::new(std::sync::Arc::new(InMemoryCcrStore::new()));
+    let policy = CompressionPolicy::for_mode(AuthMode::PayAsYouGo);
+    let estimator = HeuristicEstimator::new();
+
+    let mut block = Block::new(BlockKind::ToolResult, bulk.clone());
+    let transform = orchestrator
+        .transform_for_block(&block, policy, "")
+        .expect("the hot-zone bulk reaches no compressor, so I2 and I7 prove nothing");
+    let outcome = validated_apply(transform, &mut block, &estimator)
+        .expect("the hot-zone bulk failed to compress");
+
+    assert!(
+        outcome.is_compressed() && block.content().len() < bulk.len(),
+        "the hot-zone bulk does not compress ({} bytes in, {} out), so I2 and I7 would \
+         pass with their guards removed",
+        bulk.len(),
+        block.content().len()
     );
 }
 
