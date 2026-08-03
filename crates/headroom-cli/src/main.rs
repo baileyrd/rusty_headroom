@@ -4,6 +4,7 @@
 #![warn(missing_docs)]
 
 mod commands;
+mod wrap;
 
 use clap::{Parser, Subcommand};
 
@@ -33,6 +34,27 @@ enum Command {
         #[arg(long, default_value = "http://127.0.0.1:8787")]
         proxy: String,
     },
+    /// Point an agent at the proxy.
+    Wrap {
+        /// Agent name — claude, codex, cursor, aider, cline, continue, goose, openhands.
+        agent: String,
+        /// Proxy address to point at.
+        #[arg(long, default_value = "http://127.0.0.1:8787")]
+        proxy: String,
+        /// A JSON settings file to rewrite, backed up so `unwrap` restores it exactly.
+        #[arg(long)]
+        settings: Option<std::path::PathBuf>,
+    },
+    /// Undo `wrap`, restoring any settings file byte for byte.
+    Unwrap {
+        /// Agent name.
+        agent: String,
+        /// The settings file `wrap` rewrote.
+        #[arg(long)]
+        settings: Option<std::path::PathBuf>,
+    },
+    /// Summarize what the proxy has saved, reading its `/metrics` from stdin.
+    Savings,
 }
 
 fn main() -> std::process::ExitCode {
@@ -43,6 +65,13 @@ fn main() -> std::process::ExitCode {
         Command::Compress { dry_run } => commands::compress(dry_run),
         Command::Inspect => commands::inspect(),
         Command::Env { proxy } => commands::env(&proxy),
+        Command::Wrap {
+            agent,
+            proxy,
+            settings,
+        } => commands::wrap(&agent, &proxy, settings.as_deref()),
+        Command::Unwrap { agent, settings } => commands::unwrap(&agent, settings.as_deref()),
+        Command::Savings => commands::savings(),
     };
 
     match outcome {

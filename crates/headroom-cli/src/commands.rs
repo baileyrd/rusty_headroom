@@ -231,3 +231,197 @@ mod tests {
         assert!(env("http://127.0.0.1:8787").is_ok());
     }
 }
+
+/// `headroom wrap <agent>` — print the environment that routes an agent through the
+/// proxy, and rewrite any settings file it uses.
+///
+/// # Why the exports are printed rather than written
+///
+/// A shell profile belongs to its owner. Appending to one means guessing which of
+/// `.bashrc`, `.zshrc`, `.profile` or a fish config is live, editing a file the customer
+/// maintains by hand, and owning the removal forever. Printing lines they can paste or
+/// `eval` leaves the decision where it belongs.
+///
+/// # Errors
+///
+/// Returns an error if the agent is unknown, or if a settings file exists but cannot be
+/// rewritten.
+pub fn wrap(agent: &str, proxy: &str, settings: Option<&std::path::Path>) -> anyhow::Result<()> {
+    let Some(agent) = crate::wrap::Agent::parse(agent) else {
+        anyhow::bail!(
+            "unknown agent {agent:?}; supported: {}",
+            crate::wrap::Agent::ALL
+                .iter()
+                .map(|a| a.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    };
+
+    if !agent.env_configurable() {
+        anyhow::bail!(
+            "{agent} is not configured through environment variables; \
+             set its base URL to {proxy} in its own settings instead"
+        );
+    }
+    let exports = agent.env(proxy);
+
+    if let Some(path) = settings {
+        let written = crate::wrap::wrap_settings_file(path, proxy)?;
+        eprintln!("rewrote {}", written.display());
+        eprintln!("original saved alongside it; `headroom unwrap` restores it exactly");
+    }
+
+    let mut stdout = std::io::stdout().lock();
+    for (name, value) in &exports {
+        writeln!(stdout, "export {name}={value}")?;
+    }
+    stdout.flush()?;
+
+    eprintln!();
+    eprintln!("Apply to the current shell with:");
+    eprintln!("  eval \"$(headroom wrap {agent} --proxy {proxy})\"");
+    Ok(())
+}
+
+/// `headroom unwrap <agent>` — restore a settings file and print the variables to unset.
+///
+/// # Errors
+///
+/// Returns an error if the agent is unknown, or a backup exists but cannot be restored.
+pub fn unwrap(agent: &str, settings: Option<&std::path::Path>) -> anyhow::Result<()> {
+    let Some(agent) = crate::wrap::Agent::parse(agent) else {
+        anyhow::bail!("unknown agent {agent:?}");
+    };
+
+    if let Some(path) = settings {
+        // Checked before restoring so the message is about the state the caller found,
+        // not about what the restore happened to return.
+        if crate::wrap::is_wrapped(path) {
+            crate::wrap::unwrap_settings_file(path)?;
+            eprintln!("restored {} from its backup", path.display());
+        } else {
+            // Not an error. The state the caller asked for is the state they have.
+            eprintln!("{} was not wrapped; nothing to restore", path.display());
+        }
+    }
+
+    let mut stdout = std::io::stdout().lock();
+    for (name, _) in agent.env("http://placeholder") {
+        writeln!(stdout, "unset {name}")?;
+    }
+    stdout.flush()?;
+    Ok(())
+}
+
+/// `headroom savings` — report what the proxy has saved, read from its `/metrics`.
+///
+/// # Errors
+///
+/// Returns an error if the metrics text cannot be read from stdin.
+pub fn savings() -> anyhow::Result<()> {
+    let raw = read_stdin()?;
+    let report = savings_report(&raw);
+
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{report}")?;
+    stdout.flush()?;
+    Ok(())
+}
+
+/// Builds the savings report from Prometheus exposition text.
+///
+/// Separated from I/O so the formatting is testable without a running proxy.
+fn savings_report(metrics: &str) -> String {
+    let value = |name: &str| -> Option<f64> {
+        metrics.lines().find_map(|line| {
+            let rest = line.strip_prefix(name)?;
+            rest.trim().parse().ok()
+        })
+    };
+
+    let requests = value("headroom_requests_total ").unwrap_or(0.0);
+    let compressed = value("headroom_compressed_total ").unwrap_or(0.0);
+    let before = value("headroom_tokens_before_total ").unwrap_or(0.0);
+    let saved = value("headroom_tokens_saved_total ").unwrap_or(0.0);
+
+    let mut out = String::new();
+    out.push_str(&format!("requests      {requests:.0}\n"));
+    out.push_str(&format!("compressed    {compressed:.0}\n"));
+    out.push_str(&format!("tokens saved  {saved:.0}\n"));
+
+    // A ratio needs a denominator. Reporting "0.0%" when nothing has been measured is
+    // indistinguishable from a compressor that has stopped working, which is the one
+    // thing this report exists to reveal.
+    match (before > 0.0).then(|| saved / before * 100.0) {
+        Some(ratio) => out.push_str(&format!("reduction     {ratio:.1}%\n")),
+        None => out.push_str("reduction     no data yet\n"),
+    }
+
+    // Deliberately absent: a currency figure. It needs a per-model price this program
+    // does not have and cannot keep current, and a wrong number about money is worse
+    // than no number.
+    match (requests > 0.0).then(|| compressed / requests * 100.0) {
+        Some(rate) => out.push_str(&format!(
+            "hit rate      {rate:.1}% of requests compressed\n"
+        )),
+        None => out.push_str("hit rate      no data yet\n"),
+    }
+
+    out.trim_end().to_owned()
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+
+    const METRICS: &str = concat!(
+        "# HELP headroom_requests_total Requests seen.\n",
+        "headroom_requests_total 10\n",
+        "headroom_compressed_total 7\n",
+        "headroom_tokens_before_total 1000\n",
+        "headroom_tokens_after_total 200\n",
+        "headroom_tokens_saved_total 800\n",
+    );
+
+    #[test]
+    fn the_savings_report_reads_real_exposition_text() {
+        let report = savings_report(METRICS);
+        assert!(report.contains("tokens saved  800"), "{report}");
+        assert!(report.contains("reduction     80.0%"), "{report}");
+        assert!(report.contains("hit rate      70.0%"), "{report}");
+    }
+
+    #[test]
+    fn a_help_line_is_not_mistaken_for_a_value() {
+        // `# HELP headroom_requests_total ...` shares the metric's prefix. A naive
+        // `contains` would parse the help text as the number and report nonsense.
+        assert!(savings_report(METRICS).contains("requests      10"));
+    }
+
+    #[test]
+    fn no_data_is_reported_as_no_data_rather_than_zero_percent() {
+        // "0.0%" is indistinguishable from a compressor that has stopped working, which
+        // is the one thing this report exists to reveal.
+        let report = savings_report("headroom_requests_total 0\n");
+        assert!(report.contains("reduction     no data yet"), "{report}");
+        assert!(report.contains("hit rate      no data yet"), "{report}");
+    }
+
+    #[test]
+    fn garbage_input_does_not_panic() {
+        for source in ["", "not metrics at all", "headroom_requests_total abc"] {
+            let _ = savings_report(source);
+        }
+    }
+
+    #[test]
+    fn the_report_never_claims_a_currency_amount() {
+        // It would need a per-model price this program does not have and cannot keep
+        // current, and a wrong number about money is worse than no number.
+        let report = savings_report(METRICS);
+        for marker in ['$', '£', '€'] {
+            assert!(!report.contains(marker), "{report}");
+        }
+    }
+}
