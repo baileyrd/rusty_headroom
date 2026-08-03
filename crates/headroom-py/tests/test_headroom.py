@@ -91,10 +91,16 @@ def test_compression_is_deterministic():
 
 
 def test_the_reason_distinguishes_why_nothing_happened():
-    # "Nothing handles this content type" and "policy forbids it" are opposite problems
-    # with opposite fixes, and a caller seeing only compressed=False cannot tell them
-    # apart.
-    assert headroom.compress("short prose").reason == "no-compressor"
+    # "Nothing handles this content type", "a compressor ran and did not help", and
+    # "policy forbids it" are three different problems with three different fixes, and a
+    # caller seeing only compressed=False cannot tell them apart.
+    #
+    # Whitespace only, because short prose is no longer an example of "nothing handles
+    # this": prose routes to the text compressor as of gap row C10's wiring, and then
+    # declines because it is far below the size threshold. That distinction is the
+    # reason this test exists rather than an inconvenience to it.
+    assert headroom.compress("   \n\t  \n").reason == "no-compressor"
+    assert headroom.compress("short prose").reason == "not-smaller"
     assert headroom.compress(a_log(), auth_mode="subscription").reason == "policy-forbids"
 
 
