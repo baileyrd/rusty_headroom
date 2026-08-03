@@ -77,3 +77,17 @@ deliberate substitution rather than passed off as the SQLite backend.
 
 **Would change if:** the store needs queries beyond point lookup, or entry counts grow
 past what one directory handles comfortably.
+
+## D7 — MSRV 1.80 is a real constraint, not a formality
+**2026-08-03**
+
+Twice now I have reached for `Option::is_none_or`, which reads better than
+`map_or(true, ...)` and is stable only from Rust 1.82. Both times clippy's
+`incompatible_msrv` caught it.
+
+Keeping MSRV at 1.80 rather than raising it to match my habits: the declared floor is
+a promise to anyone building this, and moving it to accommodate a stylistic preference
+is the wrong trade. Where the older spelling is less clear, a comment says why.
+
+**Would change if:** a dependency forces a higher floor anyway, at which point the
+declared MSRV should move deliberately and be documented.
