@@ -6,6 +6,52 @@ the crate starts publishing releases.
 
 ---
 
+## Volatile-content detector — and the logging that was going nowhere
+**2026-08-03** · gap row X17, and a real defect in X20
+
+- **Added:** `volatile` — `scan`, `Finding`, `VolatileKind`, wired into the
+  `/v1/messages` request path.
+- **Fixed, and this is the important part:** the proxy binary **installed no tracing
+  subscriber**. `tracing` macros compile to nothing observable without one, so the
+  startup line, the request log added with X20, and every warning in the crate were
+  being silently discarded. Every call succeeded, so nothing in a test or a review
+  revealed it — it showed up only as a process that runs and says nothing. The X20
+  request log was reported as done in an earlier entry and was in fact emitting nothing.
+- **Verified through the release binary** after the fix: the volatile warning fires with
+  both findings, and at `HEADROOM_LOG=headroom_proxy=info` the request log reads
+  `relaying upstream path="/v1/messages" bytes=111 auth=Some(Redacted(Bearer sk-an...))`
+  — twelve visible characters, secret absent.
+- **Design note, and the whole reason the module is shaped this way:** it **only
+  reports**. There is no function returning modified content. The reference records that
+  the original implementation tried to *fix* volatility by rewriting the value, and that
+  was the defect — it changes what the model is told without asking, modifies the cache
+  hot zone that invariant I2 forbids touching, and busts the cache itself on the turn it
+  takes effect. A human decides whether a timestamp in their system prompt is worth
+  removing.
+- **Design note:** only the hot zone is scanned. Volatile content in the *live* zone is
+  expected and harmless — it was never cached, so nothing is invalidated by it changing
+  — and reporting it would bury the findings that matter under noise from every request
+  carrying a fresh tool result.
+- **Design note:** a counter is recognized from its *field name*, not its value. A bare
+  `47` could be anything, and flagging every integer in a tool schema would make the
+  report useless; `"turn_number": 47` says it increments.
+- **Design note:** the timestamp matcher is anchored on the `YYYY-MM-DD` shape rather
+  than on digits-and-dashes, because `claude-opus-4-20250514` is not a timestamp and
+  flagging it would make every system prompt naming a model a finding. Likewise the hex
+  matcher has a 16-character floor, so `deadbeef` and `cafe` do not trip it. A report
+  with false positives is one people stop reading, and then the real finding arrives and
+  nobody looks.
+- **Design note:** samples are truncated. Findings go into log lines, and a system
+  prompt is customer content that should not be reproduced wholesale somewhere it will
+  be aggregated and retained.
+- **Design note:** the default log level is `warn`, not `info`. The proxy logs a line
+  per request, and a default that fills a terminal with one line per API call is a
+  default people turn off entirely — taking the warnings with it.
+- **Known limitation:** detection is pattern-based. A volatile value that looks like
+  ordinary prose — a rotating quote of the day, a changing user name — is not detected.
+- **Known limitation:** the scan runs on the Anthropic route only; the OpenAI handlers
+  do not call it.
+
 ## Tokenizer registry
 **2026-08-03** · gap row T4
 

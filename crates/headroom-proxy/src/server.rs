@@ -159,6 +159,16 @@ async fn messages(
         "prepared upstream headers"
     );
 
+    // Scanned before compression, on the bytes the client sent. Volatile content in
+    // the hot zone means the provider's cache misses on every request, which no amount
+    // of live-zone compression compensates for — and the savings metric looks healthy
+    // throughout, so nothing else would surface it.
+    //
+    // Reported only. The reference records that the original implementation tried to
+    // *fix* this by rewriting the value, which modified the cache hot zone that
+    // invariant I2 protects and busted the cache itself on the turn it took effect.
+    crate::volatile::warn_about(&crate::volatile::scan(&body));
+
     let compressed = compress_dialect(
         Dialect::Anthropic,
         &body,

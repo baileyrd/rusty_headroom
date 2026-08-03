@@ -29,5 +29,6 @@ pub mod server;
 pub mod sse;
 pub mod stabilization;
 pub mod upstream;
+pub mod volatile;
 
 pub use config::Config;
