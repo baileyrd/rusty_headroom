@@ -6,6 +6,27 @@ the crate starts publishing releases.
 
 ---
 
+## No invariant gate can now pass by doing nothing
+**2026-08-03** · finishing the sweep across the whole file
+
+- I2 and I9 already asserted that compression actually happened before checking what
+  survived. **I3, I6 and both I4 tests did not** — and each of them is satisfied by a
+  passthrough:
+  - I3 asserts a second pass is a fixed point. Never moving is a fixed point.
+  - I4 asserts eight runs produce equal bytes. Eight passthroughs are equal.
+  - I4's warm/cold variant asserts a populated CCR store changes nothing. An empty one
+    changes nothing either.
+  - I6 asserts positions are preserved. Nothing moved, so they were.
+- None was hollow *today* — the fixture does compress — but nothing held that true, and
+  the property-test twin of I4 was hollow for its whole life until yesterday's fix.
+- **Added:** the same guard the other two carry, to all four. Verified by shrinking the
+  fixture's live tool result to one record and watching each fail with its own reason:
+  `the first pass compressed nothing, so the fixed point is trivial`, `nothing was
+  compressed in any of the eight runs`, `nothing was compressed, so the warm store was
+  never populated`, `nothing was compressed, so preserved positions prove nothing`.
+
+---
+
 ## I7 was passing with its guard removed
 **2026-08-03** · the hot zone the tests protected was 29 bytes
 

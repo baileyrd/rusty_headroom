@@ -431,6 +431,14 @@ async fn i3_compressing_an_already_compressed_request_reaches_no_further_back() 
     .await;
     let twice = second.recorder().last().unwrap().body;
 
+    // A fixed point reached by never moving is not the property. If the first pass
+    // compressed nothing then `once` is the source, the second pass compresses nothing
+    // either, and the equality below holds while the compressor is dead. I2 and I9 carry
+    // this guard; I3, I4 and I6 did not.
+    assert!(
+        once.len() < compressible_request().len(),
+        "the first pass compressed nothing, so the fixed point is trivial"
+    );
     assert_eq!(sha(&twice), sha(&once), "a second pass compressed further");
 }
 
@@ -443,15 +451,28 @@ async fn i4_the_same_request_produces_byte_equal_output_every_time() {
     let source = compressible_request();
     let mut hashes = Vec::new();
 
+    let mut compressed_at_least_once = false;
+
     for _ in 0..8 {
         let simulator = Simulator::anthropic().await.unwrap();
         through_proxy(&simulator, &source, "sk-ant-api03-x").await;
-        hashes.push(sha(&simulator.recorder().last().unwrap().body));
+        let body = simulator.recorder().last().unwrap().body;
+        compressed_at_least_once |= body.len() < source.len();
+        hashes.push(sha(&body));
     }
 
     assert!(
         hashes.windows(2).all(|pair| pair[0] == pair[1]),
         "compression was not deterministic: {hashes:?}"
+    );
+
+    // Eight identical passthroughs are also eight equal hashes. Determinism is the one
+    // invariant that genuinely differs per compressor, so asserting it over a request
+    // nothing touched is the least useful place to spend the assertion — and the
+    // property-test twin of this test was exactly that until it was fixed.
+    assert!(
+        compressed_at_least_once,
+        "nothing was compressed in any of the eight runs, so determinism was not tested"
     );
 }
 
@@ -492,6 +513,13 @@ async fn i4_holds_across_separate_proxy_instances() {
     through_proxy(&cold, &source, "sk-ant-api03-x").await;
     let cold_hash = sha(&cold.recorder().last().unwrap().body);
 
+    // Same guard as the other three. A cold store and a warm one agree trivially when
+    // neither compressed, and the point here is specifically that a *populated* CCR store
+    // does not change the output — which requires something to have been stored.
+    assert!(
+        cold.recorder().last().unwrap().body.len() < source.len(),
+        "nothing was compressed, so the warm store was never populated"
+    );
     assert_eq!(
         warm_hash, cold_hash,
         "a warm store produced different bytes from a cold one"
@@ -680,6 +708,14 @@ async fn i6_surviving_content_keeps_its_position() {
 
     through_proxy(&simulator, &source, "sk-ant-api03-x").await;
     let received = simulator.recorder().last().expect("nothing arrived");
+
+    // Positions are trivially preserved when no content moved. Asserted before the
+    // structure is walked, so a fixture that stopped compressing fails here with the
+    // reason rather than passing as a green position check.
+    assert!(
+        received.body.len() < source.len(),
+        "nothing was compressed, so preserved positions prove nothing"
+    );
 
     let before: serde_json::Value = serde_json::from_str(&source).unwrap();
     let after: serde_json::Value = serde_json::from_slice(&received.body).unwrap();
