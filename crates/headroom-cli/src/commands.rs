@@ -827,6 +827,43 @@ mod tests {
     }
 
     #[test]
+    fn savings_reads_the_names_the_proxy_actually_emits() {
+        // `savings_report` matches four metric names as string literals — a second copy
+        // of what `Metrics::render` writes, on the far side of a process boundary where
+        // no compiler checks it. Rename a counter in the proxy and this command reports
+        // `tokens saved 0` forever: `value` returns `None` for an absent name and the
+        // caller defaults it to zero, so the failure is a plausible number rather than
+        // an error.
+        //
+        // Checked: renaming `headroom_tokens_saved_total` in `metrics.rs` left the entire
+        // test suite green. The fixture-based test below is written by the same hand as
+        // the parser, so it agrees with itself no matter what the proxy emits.
+        //
+        // This one renders a real `Metrics`, so the two names have to be the same name.
+        let metrics = headroom_proxy::metrics::Metrics::new();
+        metrics.record_compressed(1000, 600);
+        metrics.record_compressed(500, 400);
+        metrics.record_passthrough();
+        // A labelled series in the same scrape, from the same source rather than typed
+        // into a fixture — the shape that would break a prefix match.
+        metrics.record_routing("compress");
+        metrics.record_routing("policy_forbids");
+
+        let report = savings_report(&metrics.render());
+
+        // 3 requests, 2 compressed, 1500 before, 1000 after → 500 saved, 33.3%.
+        assert!(report.contains("requests      3"), "{report}");
+        assert!(report.contains("compressed    2"), "{report}");
+        assert!(
+            report.contains(&format!("tokens saved  {}", metrics.tokens_saved())),
+            "{report}"
+        );
+        assert!(report.contains("33.3%"), "{report}");
+        // Not the vacuous pass: an empty scrape must not produce these.
+        assert!(!savings_report("").contains("requests      3"));
+    }
+
+    #[test]
     fn savings_ignores_labelled_series() {
         // `headroom_routing_total{reason=...}` is the first labelled metric the proxy
         // exposes, and this report predates it. A parser that matched on the bare name
@@ -1091,7 +1128,15 @@ mod command_tests {
     );
 
     #[test]
-    fn the_savings_report_reads_real_exposition_text() {
+    fn the_savings_report_parses_the_exposition_format() {
+        // Renamed from `..._reads_real_exposition_text`, which overclaimed: `METRICS` is
+        // a fixture written by hand beside the parser, so it agrees with the parser
+        // whatever the proxy emits. Renaming a counter in `metrics.rs` left this green.
+        //
+        // What it does check is the parsing — HELP lines, ratios, the `_total` suffixes —
+        // and that is worth having. The names are pinned across the process boundary by
+        // `savings_reads_the_names_the_proxy_actually_emits`, which renders a real
+        // `Metrics`.
         let report = savings_report(METRICS);
         assert!(report.contains("tokens saved  800"), "{report}");
         assert!(report.contains("reduction     80.0%"), "{report}");
