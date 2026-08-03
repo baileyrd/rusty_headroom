@@ -6,6 +6,28 @@ the crate starts publishing releases.
 
 ---
 
+## Every relaying route is checked to forward its own path
+**2026-08-03** · no bug found — three of five routes were guarded, now all five
+
+- Each OpenAI handler hands `relay` a **hardcoded** upstream path — `"/v1/chat/completions"`
+  in `chat_completions`, `"/v1/responses"` in `responses`. A literal that drifted from its
+  route would send the provider a path it does not serve, and the client would get the
+  provider's 404 for a request the proxy accepted.
+- **Checked all five against a loopback provider that echoes the path it was given, and
+  all five are correct.** `/v1/responses`, `/v1/responses/compact` and `/v1/conversations/*`
+  already had individual assertions; `/v1/messages` and `/v1/chat/completions` did not.
+- **Added:** `every_relaying_route_forwards_its_own_path`, covering all five and any route
+  added later without anyone remembering to write the assertion. It also asserts the
+  relaying list is a subset of the registered routes, so it cannot name a route that does
+  not exist.
+- The path also picks the SSE vocabulary — `Observer::for_path` falls back to the Anthropic
+  classifier, so a misspelled OpenAI path would be read with the wrong grammar and report a
+  healthy stream as unfinished (D18).
+- Verified by misspelling `/v1/chat/completions` in the handler:
+  `/v1/chat/completions reached the provider as /v1/chat/completion`.
+
+---
+
 ## `/admin/runtime-env` confirmed an upstream change that never happened
 **2026-08-03** · three self-reports agreeing with each other, all three wrong
 
