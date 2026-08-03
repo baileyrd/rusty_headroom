@@ -6,6 +6,8 @@
 
 mod anthropic;
 mod framing;
+mod openai;
 
 pub use anthropic::{classify, AnthropicEvent, DeltaKind, StreamObserver};
 pub use framing::{render, Event, SseParser};
+pub use openai::{classify as classify_openai, OpenAiEvent, OpenAiObserver};
