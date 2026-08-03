@@ -16,8 +16,10 @@ mod analyzer;
 mod config;
 mod ir;
 mod outliers;
+mod planning;
 
 pub use analyzer::{analyze_record_set, classify, FieldKind, FieldStat, Pattern, RecordSetStats};
 pub use config::CrushConfig;
 pub use ir::{Document, Shape};
 pub use outliers::{rank_outliers, Outlier, OutlierReason};
+pub use planning::{plan, CrushPlan, FieldPlan};
