@@ -100,6 +100,47 @@ pub fn set_overrides(values: BTreeMap<String, String>) -> Vec<String> {
     names
 }
 
+/// The configuration that `values` *would* produce, without applying them.
+///
+/// # Why a preview rather than "apply, check, roll back"
+///
+/// Applying first would make the bad configuration live for the duration of the check,
+/// and this proxy reads its config on every request from a thread pool — so an
+/// in-flight request could pick up a self-referential upstream in that window and start
+/// the very loop the check exists to prevent.
+///
+/// Overrides already in force are included, because a call that sets only the upstream
+/// still has to be judged against whatever listen address is currently overridden.
+pub fn preview_overrides(values: &BTreeMap<String, String>) -> Config {
+    let mut merged = overrides();
+    for (name, value) in values {
+        if name.starts_with("HEADROOM_") {
+            merged.insert(name.clone(), value.clone());
+        }
+    }
+
+    let lookup = |name: &str| -> Option<String> {
+        merged.get(name).cloned().or_else(|| env::var(name).ok())
+    };
+    let defaults = Config::default();
+
+    Config {
+        host: lookup(vars::HOST)
+            .and_then(|raw| raw.parse().ok())
+            .unwrap_or(defaults.host),
+        port: lookup(vars::PORT)
+            .and_then(|raw| raw.parse().ok())
+            .unwrap_or(defaults.port),
+        upstream: lookup(vars::UPSTREAM)
+            .filter(|raw| !raw.trim().is_empty())
+            .map(|raw| raw.trim_end_matches('/').to_owned())
+            .unwrap_or(defaults.upstream),
+        compression_enabled: lookup(vars::COMPRESSION)
+            .map(|raw| !matches!(raw.trim(), "0" | "false" | "off" | "no"))
+            .unwrap_or(defaults.compression_enabled),
+    }
+}
+
 /// Clears every runtime override, restoring the process environment.
 pub fn clear_overrides() {
     if let Ok(mut guard) = OVERRIDES.write() {

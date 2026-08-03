@@ -27,6 +27,7 @@ use axum::Json;
 use serde_json::Value;
 
 use crate::config;
+use crate::guard::is_self_referential;
 
 /// Largest body this endpoint will read.
 ///
@@ -114,6 +115,46 @@ pub async fn runtime_env(request: Request) -> Response {
         })
         .collect();
 
+    // The same guard `serve` runs at startup, re-run here.
+    //
+    // D11 justified having no per-request loop-detection header on the grounds that a
+    // startup check already catches a self-referential upstream. D10 then added runtime
+    // config, which can set one *after* startup — so the premise stopped holding and
+    // nothing noticed. A proxy pointed at itself forwards every request to itself
+    // forever, and the symptom is a pinned core and exhausted file descriptors rather
+    // than an error anyone can read.
+    //
+    // Checked against the config the overrides *would* produce, not the one requested,
+    // because the listen address may itself be overridden in the same call.
+    let candidate = config::preview_overrides(&requested);
+    if is_self_referential(candidate.upstream(), candidate.listen_addr()) {
+        tracing::warn!(
+            upstream = %candidate.upstream(),
+            listen = %candidate.listen_addr(),
+            "refused a runtime-env change that would point the proxy at itself"
+        );
+        // A 400 rather than `refuse`'s 403. The caller is local and allowed to be here;
+        // the configuration they sent is the problem. A permission error would send an
+        // operator hunting for an access issue during the incident they are already
+        // trying to fix.
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": format!(
+                        "upstream {} would be this proxy's own listen address ({}); \
+                         every request would forward to itself",
+                        candidate.upstream(),
+                        candidate.listen_addr()
+                    ),
+                },
+            })),
+        )
+            .into_response();
+    }
+
     let applied = config::set_overrides(requested);
     tracing::info!(?applied, "runtime overrides applied");
 
@@ -141,6 +182,68 @@ fn refuse(message: &str) -> Response {
 
 #[cfg(test)]
 mod tests {
+
+    // Async purely so it can take `SERIAL`, the one lock this module already uses to
+    // serialize tests that touch process-global overrides. A second mechanism beside it
+    // is how two guards drift apart.
+    #[tokio::test]
+    async fn a_preview_that_would_point_the_proxy_at_itself_is_recognized() {
+        let _guard = SERIAL.lock().await;
+        // The hole this guard closes. D11 justified having no per-request loop-detection
+        // header because a startup check already catches a self-referential upstream;
+        // D10 then added runtime config, which can set one *after* startup. The premise
+        // stopped holding and nothing noticed until it was probed.
+        let listen = config::Config::from_env().listen_addr();
+        let mut requested = BTreeMap::new();
+        requested.insert("HEADROOM_UPSTREAM".to_owned(), format!("http://{listen}"));
+
+        let candidate = config::preview_overrides(&requested);
+        assert!(is_self_referential(
+            candidate.upstream(),
+            candidate.listen_addr()
+        ));
+    }
+
+    // Async purely so it can take `SERIAL`, the one lock this module already uses to
+    // serialize tests that touch process-global overrides. A second mechanism beside it
+    // is how two guards drift apart.
+    #[tokio::test]
+    async fn a_preview_does_not_apply_anything() {
+        let _guard = SERIAL.lock().await;
+        // Applying and rolling back would leave the bad configuration live for the
+        // duration of the check, and config is read per request from a thread pool — an
+        // in-flight request could pick it up in that window and start the loop.
+        let before = config::Config::from_env().upstream().to_owned();
+
+        let mut requested = BTreeMap::new();
+        requested.insert(
+            "HEADROOM_UPSTREAM".to_owned(),
+            "http://somewhere-else.invalid".to_owned(),
+        );
+        let _ = config::preview_overrides(&requested);
+
+        assert_eq!(config::Config::from_env().upstream(), before);
+    }
+
+    // Async purely so it can take `SERIAL`, the one lock this module already uses to
+    // serialize tests that touch process-global overrides. A second mechanism beside it
+    // is how two guards drift apart.
+    #[tokio::test]
+    async fn an_ordinary_upstream_change_previews_clean() {
+        let _guard = SERIAL.lock().await;
+        // The guard must not refuse the thing this endpoint exists to do.
+        let mut requested = BTreeMap::new();
+        requested.insert(
+            "HEADROOM_UPSTREAM".to_owned(),
+            "https://api.anthropic.com".to_owned(),
+        );
+
+        let candidate = config::preview_overrides(&requested);
+        assert!(!is_self_referential(
+            candidate.upstream(),
+            candidate.listen_addr()
+        ));
+    }
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
@@ -198,6 +301,49 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         assert!(!crate::Config::from_env().compression_enabled());
+        config::clear_overrides();
+    }
+
+    #[tokio::test]
+    async fn a_change_that_would_point_the_proxy_at_itself_is_refused() {
+        let _guard = SERIAL.lock().await;
+        // Through the handler, not through `preview_overrides` — the three unit tests
+        // above pass with the guard deleted from the handler, because they exercise the
+        // helper rather than the wiring. That is the same "is it actually called?" bug
+        // this repository keeps producing, so this one goes through the endpoint.
+        config::clear_overrides();
+        let listen = config::Config::from_env().listen_addr();
+
+        let response = call(
+            Some("127.0.0.1:5000"),
+            &format!(r#"{{"HEADROOM_UPSTREAM":"http://{listen}"}}"#),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        // And nothing was applied — a refusal that still changed the config would be
+        // worse than no check at all.
+        assert!(config::overrides().is_empty());
+        config::clear_overrides();
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_upstream_change_is_still_applied() {
+        let _guard = SERIAL.lock().await;
+        // The guard must not refuse the thing this endpoint exists to do.
+        config::clear_overrides();
+
+        let response = call(
+            Some("127.0.0.1:5000"),
+            r#"{"HEADROOM_UPSTREAM":"https://api.anthropic.com"}"#,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            config::Config::from_env().upstream(),
+            "https://api.anthropic.com"
+        );
         config::clear_overrides();
     }
 
