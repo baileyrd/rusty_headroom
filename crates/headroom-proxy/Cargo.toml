@@ -25,5 +25,6 @@ tower.workspace = true
 http.workspace = true
 
 [dev-dependencies]
+headroom-core = { workspace = true }
 sha2 = "0.10"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
