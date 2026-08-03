@@ -173,7 +173,7 @@ Every row is a gap: the target repo is empty, so all rows are new implementation
 | X14 | tool array sort + JSON Schema key sort | fn | spec | all | REALIGNMENT I7 | no | M | Deterministic recursive sort. Normalize, never compress. |
 | X15 | `cache_control` auto-placement | fn | spec | all | REALIGNMENT Phase E | no | M | Anthropic, ≤4 ephemeral breakpoints. PAYG only per I10. |
 | X16 | `prompt_cache_key` injection | fn | spec | all | REALIGNMENT Phase E | no | S | OpenAI, only when not customer-set. PAYG only. Done via `body::insert_top_level_member` — byte-faithful, key derived from every message but the newest. |
-| X17 | volatile-content detector | fn | spec | all | REALIGNMENT Phase E | no | M | Warn only — never rewrite (that was the original bug). |
+| X17 | volatile-content detector | fn | spec | all | REALIGNMENT Phase E | no | M | Warn only — never rewrite (that was the original bug). Done as `volatile::scan`, wired into `/v1/messages`; no function returns modified content. Anthropic route only. |
 | X18 | cache-drift telemetry | fn | spec | all | REALIGNMENT Phase E | no | S | Detect and report prefix busts. Done via `observe::ObservingStream` — cache read/creation tokens read from the `message_start` usage block feed `headroom_cache_hit_rate`. |
 | X19 | Prometheus metrics + observability | fn | spec | all | `docs/metrics.mdx` | no | M | cache hit rate, compression ratio, token savings. |
 | X20 | loopback guard + rate limit + request log | fn | spec | all | REALIGNMENT Phase H file list | no | M | Prevent proxy-to-self loops; redact `Authorization` to first 12 chars. Done via `guard::{is_self_referential, RateLimiter}` — startup loop check (see DECISIONS D11), 600 req/min backstop answering 429. |
