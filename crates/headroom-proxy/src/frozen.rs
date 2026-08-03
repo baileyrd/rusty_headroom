@@ -78,7 +78,12 @@ pub fn frozen_message_count(body: &[u8]) -> usize {
 ///
 /// Both placements mean the same thing for this purpose. A marker on a block inside
 /// message 4 still says "cache through message 4".
-fn has_cache_control(message: &Value) -> bool {
+///
+/// Shared with [`crate::stabilization`], which asks the same question when deciding
+/// whether a breakpoint is already in place. It had its own whole-body version; two
+/// answers to "does this carry a breakpoint" is the shape of drift this repository keeps
+/// finding, so there is one.
+pub(crate) fn has_cache_control(message: &Value) -> bool {
     if message.get("cache_control").is_some() {
         return true;
     }
