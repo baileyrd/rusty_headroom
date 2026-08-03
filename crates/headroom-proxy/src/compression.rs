@@ -40,7 +40,6 @@ use headroom_core::conversation::{Conversation, Message, Role};
 use headroom_core::live_zone::live_zone;
 use headroom_core::output_shaping::{self, Verbosity};
 use headroom_core::pipeline::{Orchestrator, Routing};
-use headroom_core::tokenizer::HeuristicEstimator;
 use headroom_core::validate::validated_apply;
 use headroom_core::Transform;
 use serde_json::Value;
@@ -77,6 +76,14 @@ impl Compressors {
     /// Why `content` was routed as it was, for telemetry.
     pub fn routing(&self, content: &str, policy: CompressionPolicy) -> Routing {
         self.orchestrator.route(content, policy)
+    }
+
+    /// The tokenizer to measure `model` with.
+    pub fn tokenizer_for(
+        &self,
+        model: &str,
+    ) -> std::sync::Arc<dyn headroom_core::tokenizer::Tokenizer> {
+        self.orchestrator.tokenizer_for(model)
     }
 }
 
@@ -173,7 +180,12 @@ pub fn compress_dialect<'a>(
 
     // Decide everything before writing anything. `validated_apply` enforces I5 per
     // block, so a compressor that declines or fails to help leaves no trace here.
-    let estimator = HeuristicEstimator::new();
+    //
+    // The tokenizer is chosen by the request's own model. An exact count lets a
+    // compressor keep a result the heuristic's over-count would have rejected, and the
+    // heuristic remains the answer for any model without one — reporting an
+    // approximation as a measurement would be worse than the approximation.
+    let estimator = compressors.tokenizer_for(model_of(body));
     let mut edits: Vec<(usize, usize, String)> = Vec::new();
 
     for location in zone.locations() {
@@ -189,7 +201,7 @@ pub fn compress_dialect<'a>(
         };
 
         let mut candidate = block.clone();
-        match validated_apply(transform, &mut candidate, &estimator) {
+        match validated_apply(transform, &mut candidate, estimator.as_ref()) {
             Ok(outcome) if outcome.is_compressed() => {
                 edits.push((
                     location.message,
@@ -423,6 +435,27 @@ fn rewrite_message(raw: &str, shape: ContentShape, edits: &[(usize, &str)]) -> O
     serde_json::to_string(&value).ok()
 }
 
+/// The model identifier a request names, for tokenizer selection.
+///
+/// Read rather than rewritten, so the usual byte-faithfulness concern does not apply —
+/// this parse never produces output. An absent or unreadable model yields an empty
+/// string, which resolves to the heuristic.
+fn model_of(body: &[u8]) -> &str {
+    // A borrowed `&str` from the raw bytes rather than an owned `String`, since this is
+    // called once per request and the value is used immediately.
+    serde_json::from_slice::<&serde_json::value::RawValue>(body)
+        .ok()
+        .and_then(|_| {
+            let text = std::str::from_utf8(body).ok()?;
+            let start = text.find(r#""model""#)? + r#""model""#.len();
+            let rest = text[start..].trim_start().strip_prefix(':')?.trim_start();
+            let quoted = rest.strip_prefix('"')?;
+            let end = quoted.find('"')?;
+            Some(&quoted[..end])
+        })
+        .unwrap_or_default()
+}
+
 /// Message indices touched by `edits`, ascending and deduplicated.
 fn unique_message_indices(edits: &[(usize, usize, String)]) -> Vec<usize> {
     let mut indices: Vec<usize> = edits.iter().map(|(m, _, _)| *m).collect();
@@ -435,7 +468,7 @@ fn unique_message_indices(edits: &[(usize, usize, String)]) -> Vec<usize> {
 mod tests {
     use super::*;
     use headroom_core::ccr::InMemoryCcrStore;
-    use headroom_core::tokenizer::Tokenizer;
+    use headroom_core::tokenizer::{HeuristicEstimator, Tokenizer};
     use sha2::{Digest, Sha256};
 
     fn compressors() -> Compressors {
@@ -781,6 +814,93 @@ mod tests {
         .into_owned();
 
         assert_eq!(sha(&twice), sha(&once));
+    }
+
+    // ---- tokenizer selection ----
+
+    #[test]
+    fn the_model_in_the_request_selects_the_tokenizer() {
+        // The wiring that makes gap row T2 take effect. Without it the exact
+        // vocabularies are compiled in and never consulted.
+        let compressors = compressors();
+
+        assert!(compressors.tokenizer_for("gpt-4o").is_exact());
+        assert_eq!(compressors.tokenizer_for("gpt-4o").name(), "o200k_base");
+    }
+
+    #[test]
+    fn a_model_with_no_exact_tokenizer_keeps_the_heuristic() {
+        // An OpenAI vocabulary applied to an Anthropic model would be a wrong count
+        // reported as exact, which is worse than an honest upper bound.
+        let compressors = compressors();
+
+        for model in ["claude-opus-4", "gemini-2.5-pro", "", "something-new"] {
+            assert!(
+                !compressors.tokenizer_for(model).is_exact(),
+                "{model:?} claimed an exact tokenizer"
+            );
+        }
+    }
+
+    #[test]
+    fn the_model_is_read_from_the_request_body() {
+        assert_eq!(model_of(br#"{"model":"gpt-4o","messages":[]}"#), "gpt-4o");
+        assert_eq!(
+            model_of(br#"{"messages":[], "model" : "claude-opus-4" }"#),
+            "claude-opus-4"
+        );
+    }
+
+    #[test]
+    fn a_body_with_no_model_resolves_to_the_heuristic() {
+        // Wrong in the safe direction: no model means no exact vocabulary to claim.
+        for body in [
+            &br#"{"messages":[]}"#[..],
+            &b"{not json"[..],
+            &b""[..],
+            &br#"{"model":123}"#[..],
+        ] {
+            assert_eq!(model_of(body), "", "{body:?}");
+            assert!(!compressors().tokenizer_for(model_of(body)).is_exact());
+        }
+    }
+
+    #[test]
+    fn compression_still_holds_every_invariant_with_an_exact_tokenizer() {
+        // The exact count accepts results the heuristic would have rejected, so the
+        // guarantees have to be re-checked on that path rather than assumed to carry.
+        let source = request().replace(r#""model":"claude-opus-4""#, r#""model":"gpt-4o""#);
+        let out = compress_dialect(
+            Dialect::Anthropic,
+            source.as_bytes(),
+            &compressors(),
+            true,
+            payg(),
+            Verbosity::Default,
+        );
+
+        let before: Value = serde_json::from_str(&source).unwrap();
+        let after: Value = serde_json::from_slice(&out).unwrap();
+
+        assert_eq!(before["system"], after["system"], "I2: hot zone modified");
+        assert_eq!(before["tools"], after["tools"]);
+        for index in 0..5 {
+            assert_eq!(
+                before["messages"][index], after["messages"][index],
+                "I2: frozen turn {index} modified"
+            );
+        }
+
+        // I4, on the exact path.
+        let again = compress_dialect(
+            Dialect::Anthropic,
+            source.as_bytes(),
+            &compressors(),
+            true,
+            payg(),
+            Verbosity::Default,
+        );
+        assert_eq!(sha(&out), sha(&again));
     }
 
     // ---- invariants ----

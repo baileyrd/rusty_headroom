@@ -21,6 +21,8 @@ use crate::ccr::CcrStore;
 use crate::detection::{detect, ContentType};
 use crate::pipeline::reformats::Reformatter;
 use crate::pipeline::safety::{check, Hazard, Limits};
+use crate::tokenizer::registry::Registry;
+use crate::tokenizer::Tokenizer;
 use crate::transform::Transform;
 use crate::{DiffCompressor, LogCompressor, SearchCompressor, SmartCrusher};
 
@@ -91,6 +93,7 @@ pub struct Orchestrator {
     diff: DiffCompressor,
     reformatter: Reformatter,
     limits: Limits,
+    tokenizers: Registry,
 }
 
 impl Orchestrator {
@@ -108,6 +111,10 @@ impl Orchestrator {
             diff: DiffCompressor::new(store),
             reformatter: Reformatter::new(),
             limits: Limits::default(),
+            // The exact OpenAI counters are registered by default. They are already
+            // compiled in — leaving them unregistered would mean carrying the
+            // vocabularies and then not using them, which is the worst of both.
+            tokenizers: Registry::with_defaults(),
         }
     }
 
@@ -115,6 +122,15 @@ impl Orchestrator {
     pub fn with_limits(mut self, limits: Limits) -> Self {
         self.limits = limits;
         self
+    }
+
+    /// The tokenizer to measure `model` with.
+    ///
+    /// Exact where one is registered, and the heuristic upper bound otherwise. The
+    /// distinction matters to invariant I5: an exact count lets a compressor keep a
+    /// result the heuristic's over-count would have rejected.
+    pub fn tokenizer_for(&self, model: &str) -> Arc<dyn Tokenizer> {
+        self.tokenizers.for_model(model)
     }
 
     /// Decides what to do with `content` under `policy`.
