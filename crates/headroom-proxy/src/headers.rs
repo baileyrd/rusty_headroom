@@ -37,23 +37,18 @@ const AUTH_VISIBLE_CHARS: usize = 12;
 /// Supplied by the caller rather than derived here. Auth-mode classification is its
 /// own concern; keeping it out means the classifier can land later without this
 /// module changing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HeaderPolicy {
     /// Whether `X-Forwarded-*` may be added.
     ///
     /// Off for subscription-mode traffic: those headers announce that a proxy is
     /// present, which is the disclosure this module exists to prevent.
+    ///
+    /// Defaults to `false`, and the direction is deliberate: a policy nobody has
+    /// thought about should not be the one that discloses the most. The derived
+    /// `Default` gives that for free — `derivable_impls` is right that a hand-written
+    /// impl would add nothing but a place for the two to drift apart.
     pub forwarded_headers: bool,
-}
-
-impl Default for HeaderPolicy {
-    fn default() -> Self {
-        // The quiet option. A policy that has not been thought about should not be
-        // the one that discloses the most.
-        Self {
-            forwarded_headers: false,
-        }
-    }
 }
 
 impl HeaderPolicy {
