@@ -91,11 +91,60 @@ impl Compressors {
     }
 }
 
+/// Which provider's request shape a body is written in.
+///
+/// The two differ in more than field names, and the difference that matters is how
+/// each provider decides what to cache — see [`Dialect::frozen_floor`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dialect {
+    /// `POST /v1/messages`. Caching is explicit, via customer `cache_control` markers.
+    Anthropic,
+    /// `POST /v1/chat/completions`. Caching is automatic and prefix-based.
+    OpenAi,
+}
+
+impl Dialect {
+    /// The index below which messages are never eligible for compression.
+    ///
+    /// # Why the two providers need different answers
+    ///
+    /// Anthropic caches what the customer marks, so the floor is derived from their
+    /// `cache_control` breakpoints and the absence of markers legitimately means
+    /// nothing is pinned.
+    ///
+    /// OpenAI caches automatically: any sufficiently long prompt prefix is cached
+    /// without anyone asking. Applying the Anthropic rule to an OpenAI body would read
+    /// "no markers, so nothing is frozen" — which is exactly backwards, because
+    /// *everything* the customer has already sent is a candidate prefix. So the floor
+    /// is every message but the newest, and that is not a conservative guess so much
+    /// as the only correct reading of automatic prefix caching.
+    fn frozen_floor(self, body: &[u8], message_count: usize) -> usize {
+        match self {
+            Self::Anthropic => frozen_message_count(body),
+            Self::OpenAi => message_count.saturating_sub(1),
+        }
+    }
+}
+
 /// Compresses an Anthropic-shaped request body.
 ///
 /// Returns the original bytes unchanged whenever compression does not apply or does
 /// not help.
 pub fn compress_request<'a>(
+    body: &'a [u8],
+    compressors: &Compressors,
+    enabled: bool,
+    policy: CompressionPolicy,
+) -> Cow<'a, [u8]> {
+    compress_dialect(Dialect::Anthropic, body, compressors, enabled, policy)
+}
+
+/// Compresses a request body written in `dialect`.
+///
+/// Returns the original bytes unchanged whenever compression does not apply or does
+/// not help.
+pub fn compress_dialect<'a>(
+    dialect: Dialect,
     body: &'a [u8],
     compressors: &Compressors,
     enabled: bool,
@@ -110,9 +159,9 @@ pub fn compress_request<'a>(
         return Cow::Borrowed(body);
     }
 
-    let frozen = frozen_message_count(body);
+    let frozen = dialect.frozen_floor(body, faithful.message_count());
 
-    let Some((conversation, shapes)) = read_conversation(&faithful) else {
+    let Some((conversation, shapes)) = read_conversation(&faithful, dialect) else {
         return Cow::Borrowed(body);
     };
 
@@ -204,7 +253,10 @@ enum ContentShape {
 /// The conversation is only ever used to *decide*. Edits are applied back to the raw
 /// JSON, so a message this view models imperfectly is still forwarded byte-exact
 /// unless something explicitly changed it.
-fn read_conversation(faithful: &FaithfulBody<'_>) -> Option<(Conversation, Vec<ContentShape>)> {
+fn read_conversation(
+    faithful: &FaithfulBody<'_>,
+    dialect: Dialect,
+) -> Option<(Conversation, Vec<ContentShape>)> {
     let mut messages = Vec::with_capacity(faithful.message_count());
     let mut shapes = Vec::with_capacity(faithful.message_count());
 
@@ -212,7 +264,8 @@ fn read_conversation(faithful: &FaithfulBody<'_>) -> Option<(Conversation, Vec<C
         let raw = faithful.message(index)?;
         let value: Value = serde_json::from_str(raw).ok()?;
 
-        let role = match value.get("role").and_then(Value::as_str) {
+        let declared_role = value.get("role").and_then(Value::as_str);
+        let role = match declared_role {
             Some("assistant") => Role::Assistant,
             // Anything else is treated as user-side. Tool results arrive in
             // user-role messages, and an unrecognized role should not accidentally
@@ -221,10 +274,19 @@ fn read_conversation(faithful: &FaithfulBody<'_>) -> Option<(Conversation, Vec<C
         };
 
         let (blocks, shape) = match value.get("content") {
-            Some(Value::String(text)) => (
-                vec![Block::new(BlockKind::Text, text.clone())],
-                ContentShape::Scalar,
-            ),
+            Some(Value::String(text)) => {
+                // OpenAI carries a tool result as a whole message with `role: "tool"`
+                // and a plain string body, where Anthropic nests a typed block inside a
+                // user message. Reading it as ordinary text would leave it out of the
+                // live zone entirely, so the bulkiest thing in an OpenAI conversation —
+                // the tool output — would never be compressed.
+                let kind = if dialect == Dialect::OpenAi && declared_role == Some("tool") {
+                    BlockKind::ToolResult
+                } else {
+                    BlockKind::Text
+                };
+                (vec![Block::new(kind, text.clone())], ContentShape::Scalar)
+            }
             Some(Value::Array(items)) => {
                 (items.iter().map(read_block).collect(), ContentShape::Blocks)
             }

@@ -17,6 +17,7 @@ use crate::headers::{sanitize, HeaderPolicy};
 use crate::health::health;
 use crate::metrics::Metrics;
 use crate::observe::ObservingStream;
+use crate::openai;
 use crate::upstream::{RelayError, Upstream};
 use headroom_core::auth_mode::{classify_auth_mode, CompressionPolicy};
 
@@ -55,6 +56,11 @@ impl AppState {
     pub fn metrics(&self) -> &Arc<Metrics> {
         &self.metrics
     }
+
+    /// The compressor set, shared across routes so they share one CCR store.
+    pub fn compressors(&self) -> &Compressors {
+        &self.compressors
+    }
 }
 
 impl Default for AppState {
@@ -78,6 +84,14 @@ pub fn router_with(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/metrics", get(metrics_endpoint))
         .route("/v1/messages", post(messages))
+        .route("/v1/chat/completions", post(openai::chat_completions))
+        .route("/v1/responses", post(openai::responses))
+        // Declared non-compressible by the reference architecture: both describe
+        // conversation *state* rather than carrying a prompt, so compressing one would
+        // corrupt the provider's own record of the conversation.
+        .route("/v1/responses/compact", post(openai::passthrough))
+        .route("/v1/conversations", post(openai::passthrough))
+        .route("/v1/conversations/{*rest}", post(openai::passthrough))
         .with_state(state)
 }
 
@@ -140,20 +154,39 @@ async fn messages(
         );
     }
 
+    relay(
+        &state,
+        Method::POST,
+        "/v1/messages",
+        &upstream_headers,
+        compressed.into_owned(),
+    )
+    .await
+}
+
+/// Forwards a prepared request and returns the provider's streamed answer.
+///
+/// The tail every route shares. `headers` must already have been through
+/// [`sanitize`]; this function adds nothing and removes only what the relay itself
+/// must rebuild.
+///
+/// # Errors
+///
+/// Returns [`RelayError`] if no upstream client exists or the request fails.
+pub(crate) async fn relay(
+    state: &AppState,
+    method: Method,
+    path: &str,
+    headers: &HeaderMap,
+    body: Vec<u8>,
+) -> Result<Response, RelayError> {
     let Some(upstream) = state.upstream.as_ref() else {
         return Err(RelayError::InvalidUrl(
             "no upstream client was constructed at startup".into(),
         ));
     };
 
-    let relayed = upstream
-        .forward(
-            Method::POST,
-            "/v1/messages",
-            &upstream_headers,
-            compressed.into_owned(),
-        )
-        .await?;
+    let relayed = upstream.forward(method, path, headers, body).await?;
 
     let status = relayed.status();
     let mut response = Response::builder().status(status);
@@ -576,6 +609,171 @@ mod tests {
         // The client asked for a stream; that must survive the compression.
         let parsed: serde_json::Value = serde_json::from_slice(&sent).unwrap();
         assert_eq!(parsed["stream"], serde_json::Value::Bool(true));
+    }
+
+    // ---- OpenAI routes ----
+
+    /// The path and body a path-agnostic fake upstream last received.
+    type CapturedCall = Arc<Mutex<Option<(String, Vec<u8>)>>>;
+
+    /// Starts a fake provider that answers any path, capturing body and path.
+    async fn fake_any_path() -> (String, CapturedCall) {
+        let captured: CapturedCall = Arc::new(Mutex::new(None));
+        let seen = captured.clone();
+
+        let app = Router::new().fallback(move |uri: axum::http::Uri, body: Bytes| {
+            let seen = seen.clone();
+            async move {
+                if let Ok(mut slot) = seen.lock() {
+                    *slot = Some((uri.path().to_owned(), body.to_vec()));
+                }
+                "{}"
+            }
+        });
+
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        (format!("http://{addr}"), captured)
+    }
+
+    async fn post_to(app: Router, path: &str, body: String) -> Response {
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("x-api-key", "sk-ant-api03-x")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// An OpenAI chat request whose newest message is a bulky tool result.
+    fn openai_chat_request() -> String {
+        let records: Vec<String> = (0..120)
+            .map(|i| {
+                format!(
+                    r#"{{\"path\":\"src/module_{i}.rs\",\"kind\":\"file\",\"status\":\"ok\",\"size\":{}}}"#,
+                    1000 + i
+                )
+            })
+            .collect();
+        format!(
+            r#"{{"model":"gpt-4o","messages":[{{"role":"user","content":"list"}},{{"role":"assistant","content":"ok"}},{{"role":"tool","tool_call_id":"c","content":"[{}]"}}]}}"#,
+            records.join(",")
+        )
+    }
+
+    #[tokio::test]
+    async fn chat_completions_compresses_and_relays_to_the_right_path() {
+        let (base, captured) = fake_any_path().await;
+        let source = openai_chat_request();
+
+        let response = post_to(
+            router_with(AppState::new(&base)),
+            "/v1/chat/completions",
+            source.clone(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let (path, sent) = captured.lock().unwrap().clone().expect("nothing forwarded");
+        assert_eq!(path, "/v1/chat/completions");
+        assert!(
+            sent.len() < source.len(),
+            "an OpenAI request was forwarded uncompressed: {} for {}",
+            sent.len(),
+            source.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_conversations_request_is_relayed_byte_identical() {
+        // Declared non-compressible: the body describes conversation *state* rather
+        // than carrying a prompt, so compressing it would corrupt the provider's own
+        // record of the conversation rather than just shortening a message.
+        let (base, captured) = fake_any_path().await;
+        let source = openai_chat_request();
+
+        post_to(
+            router_with(AppState::new(&base)),
+            "/v1/conversations",
+            source.clone(),
+        )
+        .await;
+
+        let (path, sent) = captured.lock().unwrap().clone().expect("nothing forwarded");
+        assert_eq!(path, "/v1/conversations");
+        assert_eq!(sent, source.as_bytes(), "a passthrough route was modified");
+    }
+
+    #[tokio::test]
+    async fn a_nested_conversations_path_is_preserved_not_collapsed() {
+        // `/v1/conversations/{id}/items` must reach the provider at the path the client
+        // used. Collapsing it to the route prefix would send every sub-resource request
+        // to the collection endpoint.
+        let (base, captured) = fake_any_path().await;
+
+        post_to(
+            router_with(AppState::new(&base)),
+            "/v1/conversations/conv_123/items",
+            "{}".to_owned(),
+        )
+        .await;
+
+        let (path, _) = captured.lock().unwrap().clone().expect("nothing forwarded");
+        assert_eq!(path, "/v1/conversations/conv_123/items");
+    }
+
+    #[tokio::test]
+    async fn a_responses_compact_request_is_relayed_byte_identical() {
+        let (base, captured) = fake_any_path().await;
+        let source = openai_chat_request();
+
+        post_to(
+            router_with(AppState::new(&base)),
+            "/v1/responses/compact",
+            source.clone(),
+        )
+        .await;
+
+        let (path, sent) = captured.lock().unwrap().clone().expect("nothing forwarded");
+        assert_eq!(path, "/v1/responses/compact");
+        assert_eq!(sent, source.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn responses_and_compact_do_not_collide_as_routes() {
+        // `/v1/responses` compresses and `/v1/responses/compact` must not — a routing
+        // mistake here would silently compress the one body that must never be.
+        let (base, captured) = fake_any_path().await;
+
+        post_to(
+            router_with(AppState::new(&base)),
+            "/v1/responses",
+            r#"{"model":"gpt-4o","input":"hi"}"#.to_owned(),
+        )
+        .await;
+        assert_eq!(captured.lock().unwrap().clone().unwrap().0, "/v1/responses");
+
+        post_to(
+            router_with(AppState::new(&base)),
+            "/v1/responses/compact",
+            r#"{"conversation":"c"}"#.to_owned(),
+        )
+        .await;
+        assert_eq!(
+            captured.lock().unwrap().clone().unwrap().0,
+            "/v1/responses/compact"
+        );
     }
 
     // ---- lifecycle ----

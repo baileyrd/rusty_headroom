@@ -22,6 +22,7 @@ pub mod headers;
 pub mod health;
 pub mod metrics;
 pub mod observe;
+pub mod openai;
 pub mod server;
 pub mod sse;
 pub mod stabilization;

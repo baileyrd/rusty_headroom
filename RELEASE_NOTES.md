@@ -6,6 +6,55 @@ the crate starts publishing releases.
 
 ---
 
+## OpenAI routes
+**2026-08-03** · gap rows X6, X7, X8, X11
+
+- **Added:** `POST /v1/chat/completions` and `POST /v1/responses`, compressed; and
+  `POST /v1/conversations` (including sub-paths) and `POST /v1/responses/compact`,
+  relayed byte-identical.
+- **Added:** `compression::Dialect`, so the OpenAI routes reuse the whole existing
+  pipeline rather than getting a parallel implementation that would drift.
+- **Added:** `sse::openai` — `OpenAiEvent`, `OpenAiObserver`, `classify_openai`.
+- **Design note, and the important one:** the two providers need *different* frozen
+  floors. Anthropic caches what the customer marks, so the floor comes from their
+  `cache_control` breakpoints and no markers legitimately means nothing is pinned.
+  OpenAI caches prompt prefixes automatically — nobody asks for it — so applying the
+  Anthropic rule reads "no markers, so nothing is frozen", which is exactly backwards.
+  The OpenAI floor is every message but the newest. There is a regression test with a
+  bulky older message and a trivial newest one, which the Anthropic rule would have
+  happily compressed.
+- **Design note:** OpenAI carries a tool result as a whole message with `role: "tool"`
+  and a plain string body, where Anthropic nests a typed block inside a user message.
+  Read as ordinary text it falls outside the live zone, so the bulkiest thing in an
+  OpenAI conversation would never be compressed at all.
+- **Design note:** `data: [DONE]` is checked *before* JSON parsing. It is not JSON, so a
+  parse-first reader classifies the one frame that says the stream ended cleanly as
+  malformed — and every stream then looks unterminated. Tested across every byte split,
+  since a six-character sentinel lands on a chunk boundary easily.
+- **Design note:** OpenAI tool calls arrive in fragments — the first chunk carries the
+  name and `id`, later ones carry slices of the argument JSON. Counting `tool_calls`
+  entries per chunk reports one call as five, so calls are tracked by index. A second
+  test asserts genuinely parallel calls are still counted separately, so the fix cannot
+  become an over-correction.
+- **Design note:** `"content": null` marks a chunk carrying only a tool-call fragment.
+  Treating it as empty prose would report text output that never existed.
+- **Design note:** `/v1/conversations` and `/v1/responses/compact` are passthrough
+  *on purpose*, not unimplemented. Both describe conversation state rather than carrying
+  a prompt, so compressing one corrupts the provider's own record of the conversation
+  rather than merely shortening a message. The passthrough handler reads the path from
+  the request, so `/v1/conversations/{id}/items` is not collapsed to its route prefix.
+- **Known limitation:** `/v1/responses` uses `input` rather than `messages`, which
+  `FaithfulBody` does not model, so it relays untouched today. Wired and tested as a
+  route; the body shape (X7) is still to come.
+- **Known limitation:** `prompt_cache_key` injection (X16) is deliberately *not* applied.
+  `stabilization::inject_prompt_cache_key` works on a `serde_json::Value`, so using it
+  means re-serializing the whole body — rewriting every byte the customer sent in order
+  to change none of them, which is precisely what invariant I1 forbids. Doing it
+  faithfully needs a surgical insert against the raw bytes.
+- **Known limitation:** `OpenAiObserver` exists and is tested but is not attached to the
+  relayed stream; `ObservingStream` still only models the Anthropic vocabulary, so
+  OpenAI responses relay correctly and report nothing.
+
 ## Streaming traffic is compressed and observed
 **2026-08-03** · gap row X18, completes X19
 
