@@ -86,7 +86,7 @@ running proxy will not pick up — the authoritative list is `config::STARTUP_ON
 | `HEADROOM_CCR_DIR` | yes | directory for retrievable originals; memory only if unset |
 | `HEADROOM_REDIS_URL` | yes | shared store for multi-worker deployments (needs `--features redis`) |
 | `HEADROOM_RECOMMENDATIONS` | yes | file from `headroom learn` |
-| `HEADROOM_MEMORY` / `HEADROOM_MEMORY_LIMIT` | yes | JSON-lines memories to inject into the live-zone tail |
+| `HEADROOM_MEMORY` / `HEADROOM_MEMORY_LIMIT` | yes | JSON-lines memories to inject into the live-zone tail — one object per line with a `content` string; 8 at a time by default |
 | `HEADROOM_COMPRESSION` | no | `0` forwards everything untouched |
 | `HEADROOM_STABILIZE` | no | `1` normalizes tools and places cache breakpoints — **off by default**, it modifies the zone I2 protects |
 | `HEADROOM_OUTPUT_SHAPER` | no | `terse` or `full`; off unless set |
@@ -98,7 +98,9 @@ URL baked in. It was *not* on it until measured: the admin endpoint answered
 one — three self-reports agreeing with each other and all three wrong.
 
 `GET /metrics` reports savings, cache usage, and — the useful one — a per-reason
-breakdown of *why* traffic was or was not compressed.
+breakdown of *why* traffic was or was not compressed. `headroom_expanded_total` counts
+requests this proxy made **larger**: memory injection adds content by design, so that is a
+real outcome and not an error, but it is not compression and is no longer counted as it.
 
 `POST /admin/runtime-env` (loopback only) retunes a running proxy. Settings marked **no**
 above take effect on the next request; the rest are stored and named under `needs_restart`

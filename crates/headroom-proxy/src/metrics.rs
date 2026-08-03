@@ -25,6 +25,11 @@ pub struct Metrics {
     requests: AtomicU64,
     compressed: AtomicU64,
     passthrough: AtomicU64,
+    /// Requests this proxy made *larger*.
+    ///
+    /// Separate from `compressed` because they are opposite outcomes and were counted as
+    /// the same one. See [`Metrics::record_rewritten`].
+    expanded: AtomicU64,
     tokens_before: AtomicU64,
     tokens_after: AtomicU64,
     cache_reads: AtomicU64,
@@ -74,10 +79,31 @@ impl Metrics {
         Self::default()
     }
 
-    /// Records a request that was compressed.
-    pub fn record_compressed(&self, tokens_before: u64, tokens_after: u64) {
+    /// Records a request whose body this proxy changed.
+    ///
+    /// # Why a request that *grew* is counted apart
+    ///
+    /// The handlers call this whenever the outgoing body differs from the incoming one,
+    /// and that is not the same as "compression helped". Memory injection adds content by
+    /// design (gated on I10), and with `HEADROOM_MEMORY` set, a short request leaves
+    /// larger than it arrived — measured, 65 tokens in and 440 out.
+    ///
+    /// That used to be counted as a compression. `/metrics` then reported
+    /// `headroom_compressed_total 1` with `headroom_tokens_saved_total 0`, which reads as
+    /// "compression ran and found nothing" rather than "this request was made 6.8 times
+    /// bigger". The counter that answers *is the proxy helping* said yes while the proxy
+    /// was making things worse.
+    ///
+    /// The token totals were always honest — `tokens_saved` subtracts the totals, so
+    /// growth nets against savings across requests. What was missing is that a single
+    /// request can go the wrong way, and nothing said so.
+    pub fn record_rewritten(&self, tokens_before: u64, tokens_after: u64) {
         self.requests.fetch_add(1, Ordering::Relaxed);
-        self.compressed.fetch_add(1, Ordering::Relaxed);
+        if tokens_after > tokens_before {
+            self.expanded.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.compressed.fetch_add(1, Ordering::Relaxed);
+        }
         self.tokens_before
             .fetch_add(tokens_before, Ordering::Relaxed);
         self.tokens_after.fetch_add(tokens_after, Ordering::Relaxed);
@@ -150,7 +176,7 @@ impl Metrics {
     pub fn render(&self) -> String {
         let mut out = String::new();
 
-        let metrics: [(&str, &str, u64); 8] = [
+        let metrics: [(&str, &str, u64); 9] = [
             (
                 "headroom_requests_total",
                 "Requests seen.",
@@ -165,6 +191,11 @@ impl Metrics {
                 "headroom_passthrough_total",
                 "Requests forwarded unchanged.",
                 self.passthrough.load(Ordering::Relaxed),
+            ),
+            (
+                "headroom_expanded_total",
+                "Requests this proxy made larger, e.g. by memory injection.",
+                self.expanded.load(Ordering::Relaxed),
             ),
             (
                 "headroom_tokens_before_total",
@@ -245,8 +276,8 @@ mod tests {
     #[test]
     fn counters_accumulate() {
         let metrics = Metrics::new();
-        metrics.record_compressed(1000, 100);
-        metrics.record_compressed(500, 50);
+        metrics.record_rewritten(1000, 100);
+        metrics.record_rewritten(500, 50);
         metrics.record_passthrough();
 
         assert_eq!(metrics.tokens_saved(), 1350);
@@ -289,14 +320,14 @@ mod tests {
         // A compressor that somehow grew the input must not wrap to an enormous
         // "saving".
         let metrics = Metrics::new();
-        metrics.record_compressed(100, 500);
+        metrics.record_rewritten(100, 500);
         assert_eq!(metrics.tokens_saved(), 0);
     }
 
     #[test]
     fn the_output_is_valid_prometheus_exposition() {
         let metrics = Metrics::new();
-        metrics.record_compressed(10, 5);
+        metrics.record_rewritten(10, 5);
         metrics.record_cache_usage(10, 10);
         let rendered = metrics.render();
 
@@ -384,7 +415,7 @@ mod tests {
             let metrics = Arc::clone(&metrics);
             handles.push(std::thread::spawn(move || {
                 for _ in 0..100 {
-                    metrics.record_compressed(10, 1);
+                    metrics.record_rewritten(10, 1);
                 }
             }));
         }
