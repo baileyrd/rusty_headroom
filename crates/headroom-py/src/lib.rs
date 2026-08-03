@@ -110,6 +110,24 @@ fn auth_mode_from(name: &str) -> PyResult<AuthMode> {
 /// Underscored to match [`Routing::as_str`], which every other reason comes from.
 const NOT_SMALLER: &str = "not_smaller";
 
+/// The second reason this module reports that routing cannot: a compressor exists for the
+/// content, and it only runs on tool output.
+///
+/// Routing answers a question about *content*; this gate is about where the content came
+/// from, which only the caller knows. See [`compress`]'s `kind` argument.
+const TEXT_ONLY_COMPRESSOR: &str = "tool_output_only";
+
+/// Reads the `kind` argument.
+fn block_kind_from(kind: &str) -> PyResult<BlockKind> {
+    match kind {
+        "tool_output" | "tool_result" => Ok(BlockKind::ToolResult),
+        "text" => Ok(BlockKind::Text),
+        other => Err(PyValueError::new_err(format!(
+            "unknown kind {other:?}; expected 'tool_output' or 'text'"
+        ))),
+    }
+}
+
 /// Compresses one blob of content.
 ///
 /// Returns a [`CompressionResult`]. The content comes back **unchanged** whenever
@@ -128,13 +146,36 @@ const NOT_SMALLER: &str = "not_smaller";
 /// the MCP `headroom_retrieve` tool, both of which own a store with a defined lifetime
 /// and scope.
 ///
+/// # `kind`, and why it defaults to tool output
+///
+/// One compressor — the prose summarizer — runs only on tool output. The proxy enforces
+/// that because `BlockKind::Text` is *what somebody typed*, and summarizing a person's own
+/// words back at the model is a different act from summarizing a tool's output.
+///
+/// This module used to build a text block and then route with a call that ignores block
+/// kind, so it summarized prose the proxy declines — and irreversibly, because the store
+/// here is discarded when the call returns, so the `<<ccr:HASH>>` marker refers to nothing.
+/// The proxy will not do that even *reversibly*.
+///
+/// `kind` defaults to `"tool_output"` because that is what a library caller is almost
+/// always holding — a scraped page, a command's output, a file dump — and it keeps the
+/// behaviour every existing caller already has. Pass `"text"` for content a person wrote,
+/// and prose compression is declined with `reason == "tool_output_only"`. It changes
+/// nothing for any other content type; only the prose summarizer is gated.
+///
 /// # Determinism
 ///
-/// The same `(content, model, auth_mode)` always produces the same output — invariant
-/// I4. Nothing here reads a clock or a random number.
+/// The same `(content, model, auth_mode, kind)` always produces the same output —
+/// invariant I4. Nothing here reads a clock or a random number.
 #[pyfunction]
-#[pyo3(signature = (content, *, model = "", auth_mode = "pay-as-you-go"))]
-fn compress(content: &str, model: &str, auth_mode: &str) -> PyResult<CompressionResult> {
+#[pyo3(signature = (content, *, model = "", auth_mode = "pay-as-you-go", kind = "tool_output"))]
+fn compress(
+    content: &str,
+    model: &str,
+    auth_mode: &str,
+    kind: &str,
+) -> PyResult<CompressionResult> {
+    let block_kind = block_kind_from(kind)?;
     let policy = CompressionPolicy::for_mode(auth_mode_from(auth_mode)?);
     // Per call. See the note above on why this is not shared.
     let orchestrator = Orchestrator::new(Arc::new(InMemoryCcrStore::new()));
@@ -150,9 +191,22 @@ fn compress(content: &str, model: &str, auth_mode: &str) -> PyResult<Compression
     // both say `policy_forbids`. Reporting the reason is only useful if it is the same
     // reason, and a caller correlating a Python result against a dashboard got no match.
     let mut reason = routing.as_str().to_owned();
+    // Routing does not know where the content came from, so it answers "compress" for
+    // prose that the block-kind gate will then decline. Reporting its answer unchanged
+    // would tell a caller their text was compressed when nothing touched it.
+    if matches!(routing, Routing::Compress { content_type } if orchestrator
+        .tool_output_only(content_type)
+        && !block_kind.is_tool_output())
+    {
+        reason = TEXT_ONLY_COMPRESSOR.to_owned();
+    }
 
-    let mut block = Block::new(BlockKind::Text, content);
-    let compressed = match orchestrator.transform_for(content, policy, model) {
+    let mut block = Block::new(block_kind, content);
+    // `transform_for_block`, not `transform_for`. This module used to build a
+    // `BlockKind::Text` block and then ask a question that ignores kind, so it lossily
+    // summarized prose the proxy refuses to touch — and did it irreversibly, because the
+    // store here is discarded when the call returns.
+    let compressed = match orchestrator.transform_for_block(&block, policy, model) {
         Some(transform) => match validated_apply(transform, &mut block, tokenizer.as_ref()) {
             Ok(outcome) if outcome.is_compressed() => true,
             // The transform ran and the result was not smaller in tokens, so the
@@ -229,7 +283,7 @@ fn headroom(module: &Bound<'_, PyModule>) -> PyResult<()> {
     let reasons: Vec<&str> = Routing::REASONS
         .iter()
         .copied()
-        .chain(std::iter::once(NOT_SMALLER))
+        .chain([NOT_SMALLER, TEXT_ONLY_COMPRESSOR])
         .collect();
     module.add("REASONS", reasons)?;
 

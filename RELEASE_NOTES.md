@@ -6,6 +6,33 @@ the crate starts publishing releases.
 
 ---
 
+## The Python binding compressed typed prose the proxy refuses to touch
+**2026-08-03** · and irreversibly, because its CCR store is discarded when the call returns
+
+- `compress()` built a `BlockKind::Text` block and then routed with `transform_for`, which
+  ignores block kind. Measured on 300 lines of prose:
+
+  | call | result |
+  | --- | --- |
+  | `transform_for` (what the binding used) | `Some("text_summarizer")` |
+  | `transform_for_block`, `Text` block (what the proxy uses) | `None` |
+  | `transform_for_block`, `ToolResult` block | `Some("text_summarizer")` |
+
+- The gate exists because `BlockKind::Text` is *what somebody typed*. In the proxy, lossy
+  prose compression is at least recoverable — the store persists and the model can redeem
+  the marker. Here the store is per-call and discarded, so the binding was doing
+  irreversibly what the proxy declines to do reversibly.
+- **`compress(content, kind="tool_output" | "text")`.** The default keeps every existing
+  caller's behaviour — a library caller is almost always holding a scraped page or a
+  command's output — and only the prose summarizer is gated, so nothing else changes.
+  `"text"` declines with `reason == "tool_output_only"`, a new entry in `REASONS`.
+- Verified against a built wheel rather than the Rust surface: `maturin build --release`,
+  install, `pytest` — 15 pass. Reverting to `transform_for` fails on
+  `assert not as_text.compressed`. The test's control compresses the same prose as tool
+  output first, so declining is a decision rather than an absence.
+
+---
+
 ## SmartCrusher's outlier detection now has a test that spans the wiring
 **2026-08-03** · the detector had eighteen tests; nothing checked it was consulted
 
