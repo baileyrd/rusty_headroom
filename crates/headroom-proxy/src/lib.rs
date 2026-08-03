@@ -20,6 +20,8 @@ pub mod config;
 pub mod frozen;
 pub mod headers;
 pub mod health;
+pub mod metrics;
 pub mod server;
+pub mod stabilization;
 
 pub use config::Config;
