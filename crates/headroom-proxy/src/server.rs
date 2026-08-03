@@ -16,6 +16,7 @@ use crate::config::Config;
 use crate::headers::{sanitize, HeaderPolicy};
 use crate::health::health;
 use crate::metrics::Metrics;
+use crate::observe::ObservingStream;
 use crate::upstream::{RelayError, Upstream};
 use headroom_core::auth_mode::{classify_auth_mode, CompressionPolicy};
 
@@ -160,8 +161,13 @@ async fn messages(
         headers.extend(relayed.headers().clone());
     }
 
+    // Wrapped, not buffered. The observer reads frames as they pass and yields the
+    // bytes it received — invariant I9 — which is the only way to read the cache usage
+    // in `message_start` without holding the response back.
+    let observed = ObservingStream::new(relayed.into_stream(), state.metrics.clone());
+
     response
-        .body(Body::from_stream(relayed.into_stream()))
+        .body(Body::from_stream(observed))
         // Only fails if the status or headers are invalid, and both came from a
         // response that was already parsed — but this must not be an `unwrap()` on the
         // request path regardless.
@@ -509,6 +515,67 @@ mod tests {
         let text = state.metrics().render();
         assert!(text.contains("headroom_passthrough_total 1"), "{text}");
         assert!(text.contains("headroom_compressed_total 0"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_streaming_response_feeds_the_cache_metrics_end_to_end() {
+        // The number that says whether this proxy is helping. It arrives in the very
+        // first SSE frame of the response, so nothing short of the full path — relay,
+        // observer, metrics — proves it is actually reaching the gauge.
+        let sse = concat!(
+            "event: message_start\n",
+            r#"data: {"type":"message_start","message":{"usage":{"cache_read_input_tokens":900,"cache_creation_input_tokens":100}}}"#,
+            "\n\n",
+            "event: message_stop\n",
+            r#"data: {"type":"message_stop"}"#,
+            "\n\n",
+        );
+        let (base, _) = fake_provider(StatusCode::OK, sse).await;
+        let state = AppState::new(&base);
+
+        let response = post_messages(
+            router_with(state.clone()),
+            r#"{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}"#.to_owned(),
+            "sk-ant-api03-x",
+        )
+        .await;
+
+        // The body has to be drained for the observer to see it — which is the point:
+        // nothing is buffered on the proxy's behalf.
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(bytes.as_ref(), sse.as_bytes(), "the stream was altered");
+
+        assert_eq!(state.metrics().cache_hit_rate(), Some(0.9));
+    }
+
+    #[tokio::test]
+    async fn a_streaming_request_is_compressed_on_the_way_out() {
+        // Streaming is the common agent case. While `compress_request` bailed out on
+        // `"stream": true`, most real traffic was exempt from compression and every
+        // test still reported that compression worked.
+        let (base, captured) = fake_provider(StatusCode::OK, "{}").await;
+        let source = compressible_request()
+            .replace(r#""max_tokens":4096"#, r#""max_tokens":4096,"stream":true"#);
+
+        post_messages(
+            router_with(AppState::new(&base)),
+            source.clone(),
+            "sk-ant-api03-x",
+        )
+        .await;
+
+        let sent = captured.lock().unwrap().clone().expect("nothing forwarded");
+        assert!(
+            sent.len() < source.len(),
+            "a streaming request was forwarded uncompressed: {} bytes for {}",
+            sent.len(),
+            source.len()
+        );
+        // The client asked for a stream; that must survive the compression.
+        let parsed: serde_json::Value = serde_json::from_slice(&sent).unwrap();
+        assert_eq!(parsed["stream"], serde_json::Value::Bool(true));
     }
 
     // ---- lifecycle ----

@@ -21,6 +21,7 @@ pub mod frozen;
 pub mod headers;
 pub mod health;
 pub mod metrics;
+pub mod observe;
 pub mod server;
 pub mod sse;
 pub mod stabilization;

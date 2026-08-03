@@ -20,7 +20,17 @@ use super::Event;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnthropicEvent {
     /// The response is starting.
-    MessageStart,
+    ///
+    /// Carries the initial usage block, which is where the provider reports what the
+    /// prompt cache did. That is the only place it appears in the stream, and it is
+    /// the number that says whether this proxy is helping or quietly making every
+    /// request more expensive.
+    MessageStart {
+        /// Prompt tokens served from the cache.
+        cache_read_tokens: Option<u64>,
+        /// Prompt tokens written into the cache.
+        cache_creation_tokens: Option<u64>,
+    },
     /// A content block is opening.
     ContentBlockStart {
         /// Index of the block within the message.
@@ -138,7 +148,21 @@ pub fn classify(event: &Event) -> AnthropicEvent {
         .or_else(|| payload.get("type").and_then(Value::as_str));
 
     match event_type {
-        Some("message_start") => AnthropicEvent::MessageStart,
+        Some("message_start") => {
+            // Nested under `message`, unlike `message_delta` which puts `usage` at the
+            // top level. Reading the wrong one yields `None` on every real stream and
+            // a permanently empty cache metric, which reads as "no traffic" rather
+            // than as a bug.
+            let usage = payload.get("message").and_then(|m| m.get("usage"));
+            AnthropicEvent::MessageStart {
+                cache_read_tokens: usage
+                    .and_then(|u| u.get("cache_read_input_tokens"))
+                    .and_then(Value::as_u64),
+                cache_creation_tokens: usage
+                    .and_then(|u| u.get("cache_creation_input_tokens"))
+                    .and_then(Value::as_u64),
+            }
+        }
         Some("content_block_start") => AnthropicEvent::ContentBlockStart {
             index: index_of(&payload),
         },
@@ -199,6 +223,10 @@ pub struct StreamObserver {
     pub thinking_deltas: usize,
     /// Output tokens the provider last reported.
     pub output_tokens: Option<u64>,
+    /// Prompt tokens the provider served from cache.
+    pub cache_read_tokens: u64,
+    /// Prompt tokens the provider wrote into the cache.
+    pub cache_creation_tokens: u64,
     /// Whether a terminal event arrived.
     pub completed: bool,
     /// The provider's error, if the stream failed.
@@ -213,6 +241,16 @@ impl StreamObserver {
         self.events += 1;
 
         match classify(event) {
+            AnthropicEvent::MessageStart {
+                cache_read_tokens,
+                cache_creation_tokens,
+            } => {
+                // Accumulated rather than assigned. One connection can carry more than
+                // one message, and the second `message_start` would otherwise erase
+                // what the first reported.
+                self.cache_read_tokens += cache_read_tokens.unwrap_or(0);
+                self.cache_creation_tokens += cache_creation_tokens.unwrap_or(0);
+            }
             AnthropicEvent::ContentBlockDelta { delta, .. } => {
                 if delta == DeltaKind::Text {
                     self.text_deltas += 1;
@@ -269,7 +307,13 @@ mod tests {
     fn the_lifecycle_events_classify() {
         assert_eq!(
             classify(&event("message_start", r#"{"type":"message_start"}"#)),
-            AnthropicEvent::MessageStart
+            // No usage block at all is `None`, not zero. A `message_start` without
+            // usage says nothing about the cache; reporting zero would say the cache
+            // missed entirely.
+            AnthropicEvent::MessageStart {
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+            }
         );
         assert_eq!(
             classify(&event("message_stop", r#"{"type":"message_stop"}"#)),
@@ -363,12 +407,64 @@ mod tests {
         // something that is not the proxy's business.
         assert_eq!(
             classify(&event("message_start", "not json at all")),
-            AnthropicEvent::MessageStart
+            AnthropicEvent::MessageStart {
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+            }
         );
         assert!(matches!(
             classify(&Event::default()),
             AnthropicEvent::Other { .. }
         ));
+    }
+
+    #[test]
+    fn cache_usage_is_read_from_the_nested_message_usage_block() {
+        // `message_start` nests usage under `message`, unlike `message_delta` which
+        // puts it at the top level. Reading the wrong one yields `None` on every real
+        // stream — a permanently empty cache metric that reads as "no traffic" rather
+        // than as a defect.
+        let data = r#"{"type":"message_start","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":900,"cache_creation_input_tokens":100}}}"#;
+
+        assert_eq!(
+            classify(&event("message_start", data)),
+            AnthropicEvent::MessageStart {
+                cache_read_tokens: Some(900),
+                cache_creation_tokens: Some(100),
+            }
+        );
+    }
+
+    #[test]
+    fn top_level_usage_on_message_start_is_not_mistaken_for_the_nested_one() {
+        // Guards the fix from the other direction: a lenient reader that accepted
+        // either nesting would pass the test above while still being wrong about which
+        // field it read.
+        let data = r#"{"type":"message_start","usage":{"cache_read_input_tokens":900}}"#;
+
+        assert_eq!(
+            classify(&event("message_start", data)),
+            AnthropicEvent::MessageStart {
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+            }
+        );
+    }
+
+    #[test]
+    fn cache_usage_accumulates_across_messages_on_one_connection() {
+        // Assigning rather than accumulating would let a second `message_start` erase
+        // what the first reported.
+        let mut observer = StreamObserver::default();
+        for _ in 0..3 {
+            observer.observe(&event(
+                "message_start",
+                r#"{"type":"message_start","message":{"usage":{"cache_read_input_tokens":100,"cache_creation_input_tokens":10}}}"#,
+            ));
+        }
+
+        assert_eq!(observer.cache_read_tokens, 300);
+        assert_eq!(observer.cache_creation_tokens, 30);
     }
 
     // ---- observation ----

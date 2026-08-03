@@ -13,10 +13,22 @@
 //!
 //! # Passthrough is the fallback for everything
 //!
-//! Compression disabled, a streaming request, an unparseable body, no live zone, a
-//! compressor that declines, a result that is not smaller — all of them forward the
-//! original bytes. There is no input for which this function errors; the worst case
-//! is that it does nothing.
+//! Compression disabled, an unparseable body, no live zone, a compressor that
+//! declines, a result that is not smaller — all of them forward the original bytes.
+//! There is no input for which this function errors; the worst case is that it does
+//! nothing.
+//!
+//! # `"stream": true` is not one of those cases
+//!
+//! It used to be. The reasoning was that compressing a stream would mean buffering it,
+//! which breaks the thing the client asked for — and that reasoning conflated two
+//! different bodies. The *request* body arrives complete before this function is
+//! called, whatever the client wants the *response* to look like; `stream` describes
+//! the response framing and says nothing about whether the request can be compressed.
+//!
+//! The distinction is not academic. Streaming is the common agent case, so treating it
+//! as passthrough exempted most real traffic from compression while the tests
+//! confirmed compression worked.
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -89,7 +101,7 @@ pub fn compress_request<'a>(
     enabled: bool,
     policy: CompressionPolicy,
 ) -> Cow<'a, [u8]> {
-    if !enabled || is_streaming(body) {
+    if !enabled {
         return Cow::Borrowed(body);
     }
 
@@ -185,18 +197,6 @@ enum ContentShape {
     Scalar,
     /// `"content": [ ... ]`.
     Blocks,
-}
-
-/// Whether the request asked for a streaming response.
-///
-/// Streaming is passthrough until the SSE state machine exists. Buffering a stream to
-/// compress it would break the very thing the client asked for, and doing it badly is
-/// worse than not doing it.
-fn is_streaming(body: &[u8]) -> bool {
-    serde_json::from_slice::<Value>(body)
-        .ok()
-        .and_then(|v| v.get("stream").and_then(Value::as_bool))
-        .unwrap_or(false)
 }
 
 /// Builds a [`Conversation`] view for deciding what is live.
@@ -428,13 +428,49 @@ mod tests {
     }
 
     #[test]
-    fn a_streaming_request_forwards_untouched() {
-        // SSE handling does not exist yet. Buffering a stream to compress it would
-        // break exactly what the client asked for.
+    fn a_streaming_request_is_compressed_like_any_other() {
+        // Regression against the version of this function that bailed out on
+        // `"stream": true`. `stream` describes the *response* framing; the request body
+        // arrived complete either way. Since streaming is the common agent case, the
+        // bail-out exempted most real traffic from compression while every test kept
+        // confirming that compression worked.
         let source =
             request().replace(r#""max_tokens":4096"#, r#""max_tokens":4096,"stream":true"#);
         let out = compress_request(source.as_bytes(), &compressors(), true, payg());
-        assert_eq!(sha(&out), sha(source.as_bytes()));
+
+        assert_ne!(
+            sha(&out),
+            sha(source.as_bytes()),
+            "a streaming request was left uncompressed"
+        );
+
+        // And the flag itself survives — compressing the body must not change what the
+        // client asked the provider for.
+        let parsed: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(parsed["stream"], Value::Bool(true));
+    }
+
+    #[test]
+    fn a_streaming_request_still_protects_the_frozen_prefix() {
+        // The guarantee has to hold on the path that now compresses more traffic, not
+        // only on the one the original tests covered.
+        let source =
+            request().replace(r#""max_tokens":4096"#, r#""max_tokens":4096,"stream":true"#);
+        let out = compress_request(source.as_bytes(), &compressors(), true, payg());
+        let out = String::from_utf8(out.into_owned()).unwrap();
+
+        let before: Value = serde_json::from_str(&source).unwrap();
+        let after: Value = serde_json::from_str(&out).unwrap();
+
+        for member in ["system", "tools", "model", "max_tokens"] {
+            assert_eq!(before[member], after[member], "{member} was modified");
+        }
+        for index in 0..5 {
+            assert_eq!(
+                before["messages"][index], after["messages"][index],
+                "historical turn {index} was modified"
+            );
+        }
     }
 
     #[test]
