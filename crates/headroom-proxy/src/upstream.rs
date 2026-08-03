@@ -160,6 +160,16 @@ impl Upstream {
         })
     }
 
+    /// The base URL this relay actually forwards to.
+    ///
+    /// Fixed when the client was built. `/health` reports this rather than
+    /// `Config::upstream()`, because the two can disagree: `POST /admin/runtime-env`
+    /// stores a new `HEADROOM_UPSTREAM` in the override map, and nothing rebuilds the
+    /// relay — so config said one thing while every request went somewhere else.
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
     /// Forwards a request and returns the response with its body unread.
     ///
     /// `headers` should already have been through [`crate::headers::sanitize`]; the

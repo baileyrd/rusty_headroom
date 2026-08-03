@@ -199,6 +199,33 @@ for r in $(printf '%s\n' $routes | sort -u); do
   fi
 done
 
+echo "== 9. the README marks every startup-only setting as needing a restart"
+# README.md's configuration table says which settings a running proxy will not pick up.
+# That is a second copy of `config::STARTUP_ONLY`, and the table is what an operator
+# actually reads — so it is the copy most worth checking.
+#
+# `HEADROOM_UPSTREAM` is why. The README listed it as live and it is not: the relay client
+# is built once with its base URL baked in, so a new value landed in the override map and
+# changed nothing while `/admin/runtime-env` and `/health` both confirmed the change.
+#
+# The init template is checked the same way, by a test rather than here — see
+# `the_generated_config_marks_every_startup_only_setting`.
+consts=$(grep -oP '^\s+vars::\K[A-Z_]+(?=,)' crates/headroom-proxy/src/config.rs \
+  | awk 'NR<=20' | sort -u)
+for c in $consts; do
+  value=$(grep -oP "pub const $c: &str = \"\K[^\"]+" crates/headroom-proxy/src/config.rs)
+  [ -z "$value" ] && continue
+  # The row for this variable, if the table has one, and whether it is marked.
+  row=$(grep -F "\`$value\`" README.md | grep -F '|' | head -1)
+  if [ -z "$row" ]; then
+    fail "$value is startup-only and absent from the README's configuration table"
+  elif printf '%s' "$row" | grep -qE '\|\s*yes\s*\|'; then
+    note "✓ $value"
+  else
+    fail "$value is startup-only and the README does not mark it as needing a restart"
+  fi
+done
+
 echo
 [ "$status" -eq 0 ] && echo "clean" || echo "findings above — see the header for why this matters"
 exit "$status"

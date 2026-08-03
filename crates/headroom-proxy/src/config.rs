@@ -61,9 +61,21 @@ pub mod vars {
 ///
 /// Kept beside the variables themselves so a new startup-only setting is added here in the
 /// same edit rather than discovered later by someone whose change silently did nothing.
-pub const STARTUP_ONLY: [&str; 7] = [
+pub const STARTUP_ONLY: [&str; 8] = [
     vars::HOST,
     vars::PORT,
+    // The one that mattered most, and the one this list was missing.
+    //
+    // `AppState::new` builds an `Upstream` once and stores the base URL inside it; the
+    // request path uses that client and never re-reads configuration. So a new
+    // `HEADROOM_UPSTREAM` landed in the override map and changed nothing.
+    //
+    // Measured, against two loopback providers: the admin endpoint answered
+    // `{"applied":["HEADROOM_UPSTREAM"],"needs_restart":[]}`, `/health` reported the new
+    // address, and the next request was served by the old one. Three self-reports
+    // agreeing with each other and all three wrong — during exactly the incident an
+    // operator would be using them to resolve.
+    vars::UPSTREAM,
     vars::RECOMMENDATIONS,
     vars::MEMORY,
     vars::MEMORY_LIMIT,
