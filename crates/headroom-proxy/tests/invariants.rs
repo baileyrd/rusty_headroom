@@ -30,7 +30,7 @@
 //! stays green.
 
 use headroom_proxy::server::{router_with, AppState};
-use headroom_simulators::Simulator;
+use headroom_simulators::{Reply, Simulator};
 use sha2::{Digest, Sha256};
 
 use axum::body::Body;
@@ -671,5 +671,61 @@ async fn i9_telemetry_records_without_altering_the_request() {
         state.metrics().render(),
         metrics_before,
         "nothing was recorded, so this test proves nothing"
+    );
+}
+
+// ---- D9: long generations are not truncated ----
+
+#[tokio::test]
+async fn a_stream_that_pauses_mid_generation_still_arrives_whole() {
+    // `DECISIONS.md` D9 sets a connect timeout and deliberately no total-request timeout,
+    // on the grounds that a long generation is a normal outcome rather than a stuck
+    // request. Nothing tested that. Adding `.timeout(30s)` to the upstream client is a
+    // natural thing for a reviewer to suggest, and it would start truncating real
+    // completions in production with every test still green.
+    //
+    // The pause here is deliberately short — this cannot prove the absence of a timeout,
+    // only of a very aggressive one. What it does pin is that the relay holds a stream
+    // open across a gap instead of ending it, which is the behaviour D9 is choosing.
+    let stream = concat!(
+        "event: message_start\n",
+        r#"data: {"type":"message_start","message":{"usage":{"input_tokens":1}}}"#,
+        "\n\n",
+        "event: content_block_delta\n",
+        r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"after the pause"}}"#,
+        "\n\n",
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    );
+
+    // Split inside the first frame, so the pause lands mid-event rather than on a tidy
+    // boundary — a timeout that only counted whole frames would otherwise slip through.
+    let simulator =
+        Simulator::start(Reply::sse(stream).stalling(40, std::time::Duration::from_millis(1500)))
+            .await
+            .unwrap();
+
+    let app = router_with(AppState::new(simulator.base_url()));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/messages")
+                .header("x-api-key", "sk-ant-api03-x")
+                .header("content-type", "application/json")
+                .body(Body::from(compressible_request()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let received = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("the relayed stream was cut off mid-generation");
+
+    assert_eq!(
+        received.as_ref(),
+        stream.as_bytes(),
+        "the stream arrived altered or incomplete"
     );
 }

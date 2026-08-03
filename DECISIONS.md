@@ -156,6 +156,16 @@ because a TCP/TLS handshake that has not completed in ten seconds is not going t
 uninterrupted long generations, in which case the timeout belongs in `Config` as an
 opt-in rather than as a default.
 
+> **Now defended by a test, 2026-08-03.** This was a decision with nothing enforcing it.
+> Adding `.timeout(30s)` to the upstream client is a natural review suggestion, and it
+> would have started truncating real completions with every test still green.
+>
+> `a_stream_that_pauses_mid_generation_still_arrives_whole` relays a stream that pauses
+> mid-frame and asserts it arrives whole; adding a 500 ms total timeout fails it. The
+> pause is short, so this cannot prove the absence of a timeout — only of an aggressive
+> one. What it pins is that the relay holds a stream open across a gap rather than ending
+> it, which is the behaviour this decision chooses.
+
 ## D10 — Runtime config uses an override map, not `std::env::set_var`
 **2026-08-03**
 
