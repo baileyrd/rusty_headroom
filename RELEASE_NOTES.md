@@ -6,6 +6,34 @@ the crate starts publishing releases.
 
 ---
 
+## SmartCrusher planning — decide before mutating
+**2026-08-03** · closes [#24](https://github.com/baileyrd/rusty_headroom/issues/24)
+
+- **Added:** `plan(...) -> Option<CrushPlan>` — a complete, inert decision about what
+  to keep and what to say about the rest. Building one mutates nothing.
+- **Added:** `CrushPlan` with anchors (records kept verbatim, sorted and deduplicated)
+  and `FieldPlan`s (constants stated once, low-cardinality fields enumerated).
+- **Design note:** outliers are anchored unconditionally. If they exceed the sample
+  budget the head sample yields — an outlier is never dropped to make room, because
+  dropping the anomalous record is the one failure that makes compressed output
+  actively worse than no compression.
+- **Design note:** `plan` returns `None` when compression would not pay. Invariant I5
+  would catch a bad plan afterwards, but burning a format-and-tokenize pass to learn
+  what the planner already knew is waste.
+- **Design note:** optional low-cardinality fields are not enumerated. Describing one
+  by its value set needs an "on some records" qualification that costs more than the
+  enumeration saves.
+- **Bug fixed in already-merged code:** outlier rarity scoring asked only whether a
+  value was held by fewer than half the records. True for a two-valued field, wrong
+  from three onwards — a 10/10/10 split across 30 records flagged *every* record as
+  anomalous, so the planner saw an all-outlier array and declined. Rarity is now
+  measured against the share an even split would give. Found by this issue's tests,
+  with regression tests in both directions.
+- **Known limitation:** the head sample is taken from the front only. A record set
+  whose interesting structure is at the tail relies entirely on outlier detection to
+  surface it.
+- **Known limitation:** still no output. The formatter that renders a plan is #25.
+
 ## SmartCrusher outlier detection — keep what stands out
 **2026-08-03** · closes [#22](https://github.com/baileyrd/rusty_headroom/issues/22)
 

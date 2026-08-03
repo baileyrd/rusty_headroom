@@ -111,14 +111,18 @@ pub struct Outlier {
 /// };
 ///
 /// let config = CrushConfig::default();
-/// let doc = Document::parse(
-///     r#"[{"t":"a","ok":true},{"t":"b","ok":true},{"t":"c","ok":false}]"#,
-///     &config,
-/// ).unwrap();
-/// let stats = analyze_record_set(&doc, &config).unwrap();
 ///
+/// // Nine passes and one failure. Rarity is judged against the share an even
+/// // split would give, so one-in-ten registers where one-in-three would not.
+/// let mut records: Vec<String> = (0..9)
+///     .map(|i| format!(r#"{{"id":{i},"ok":true}}"#))
+///     .collect();
+/// records.push(r#"{"id":9,"ok":false}"#.to_string());
+/// let doc = Document::parse(&format!("[{}]", records.join(",")), &config).unwrap();
+///
+/// let stats = analyze_record_set(&doc, &config).unwrap();
 /// let ranked = rank_outliers(&doc, &stats, &config);
-/// assert_eq!(ranked[0].record, 2); // the one that is not ok
+/// assert_eq!(ranked[0].record, 9); // the one that is not ok
 /// ```
 pub fn rank_outliers(
     document: &Document,
@@ -195,15 +199,26 @@ fn score_rare_values(
         }
     }
 
+    // Rarity is relative to how many values the field has, not to a majority.
+    //
+    // An earlier version asked only whether a value was held by fewer than half the
+    // records. That is right for a two-valued field but wrong the moment there are
+    // three: with values split 10/10/10 across 30 records, every value is a minority
+    // and every record got flagged, which reports the whole array as anomalous and
+    // leaves the planner nothing to elide.
+    //
+    // The question worth asking is whether a value appears far less often than an
+    // even split would predict. Below half the even share (`total / distinct`) counts
+    // as rare; an even three-way split does not.
+    let distinct = counts.len().max(1);
+
     for (index, record) in records.iter().enumerate() {
         let Some(value) = record.get(field) else {
             continue;
         };
         let shared_by = counts.get(&serialize(value)).copied().unwrap_or(0);
 
-        // A value the majority shares is not remarkable. Requiring a strict minority
-        // keeps this from firing on every record of a two-valued field split evenly.
-        if shared_by == 0 || shared_by * 2 >= total {
+        if shared_by == 0 || shared_by * distinct * 2 > total {
             continue;
         }
 
@@ -421,6 +436,53 @@ mod tests {
             .reasons
             .iter()
             .any(|r| matches!(r, OutlierReason::RareValue { .. })));
+    }
+
+    #[test]
+    fn an_even_multi_way_split_is_not_treated_as_rare() {
+        // Regression. An earlier rule asked only "is this a minority value", which is
+        // true of every value in a three-way even split — so every record was flagged
+        // anomalous, and the planner was left with nothing to elide. Rarity is
+        // measured against the even share, not against a majority.
+        let records: Vec<String> = (0..30)
+            .map(|i| {
+                let status = ["ok", "retry", "failed"][i % 3];
+                format!(r#"{{"id":{i},"status":"{status}"}}"#)
+            })
+            .collect();
+        let ranked = rank(&format!("[{}]", records.join(",")));
+
+        assert!(
+            !ranked.iter().any(|o| o
+                .reasons
+                .iter()
+                .any(|r| matches!(r, OutlierReason::RareValue { .. }))),
+            "an even three-way split is not rarity"
+        );
+    }
+
+    #[test]
+    fn a_genuine_minority_still_registers_against_a_multi_valued_field() {
+        // The complement: the new rule must not suppress real rarity. 27 "ok", one
+        // each of three other statuses.
+        let mut records: Vec<String> = (0..27)
+            .map(|i| format!(r#"{{"id":{i},"status":"ok"}}"#))
+            .collect();
+        for (i, status) in ["retry", "failed", "timeout"].iter().enumerate() {
+            records.push(format!(r#"{{"id":{},"status":"{status}"}}"#, 27 + i));
+        }
+        let ranked = rank(&format!("[{}]", records.join(",")));
+
+        let flagged: Vec<usize> = ranked
+            .iter()
+            .filter(|o| {
+                o.reasons
+                    .iter()
+                    .any(|r| matches!(r, OutlierReason::RareValue { .. }))
+            })
+            .map(|o| o.record)
+            .collect();
+        assert_eq!(flagged, vec![27, 28, 29]);
     }
 
     #[test]
