@@ -60,6 +60,33 @@ pub enum OpenAiEvent {
     Other,
 }
 
+/// Reads the cache pair out of a chat-completion `usage` object.
+///
+/// Shared by the stream classifier and by [`cache_tokens_in_body`]: the final usage chunk
+/// and a non-streaming reply carry the same object. `cache_write_tokens` is reported only
+/// by the model families that bill for cache writes, so absent reads as absent here and
+/// only becomes zero where the counter sums it.
+fn cache_from_usage(usage: Option<&Value>) -> (Option<u64>, Option<u64>) {
+    let details = usage.and_then(|usage| usage.get("prompt_tokens_details"));
+    (
+        details
+            .and_then(|details| details.get("cached_tokens"))
+            .and_then(Value::as_u64),
+        details
+            .and_then(|details| details.get("cache_write_tokens"))
+            .and_then(Value::as_u64),
+    )
+}
+
+/// Cache tokens reported by a **non-streaming** chat completion.
+pub fn cache_tokens_in_body(body: &[u8]) -> (u64, u64) {
+    let Ok(payload) = serde_json::from_slice::<Value>(body) else {
+        return (0, 0);
+    };
+    let (read, creation) = cache_from_usage(payload.get("usage"));
+    (read.unwrap_or(0), creation.unwrap_or(0))
+}
+
 /// Classifies one OpenAI stream event.
 pub fn classify(event: &Event) -> OpenAiEvent {
     let data = event.data.trim();
@@ -94,17 +121,10 @@ pub fn classify(event: &Event) -> OpenAiEvent {
     // every *other* chunk carries an explicit `"usage": null`, so presence alone would
     // classify the whole stream as usage frames and drop all of its content.
     if let Some(usage) = payload.get("usage").filter(|usage| usage.is_object()) {
-        let details = usage.get("prompt_tokens_details");
+        let (cache_read_tokens, cache_creation_tokens) = cache_from_usage(Some(usage));
         return OpenAiEvent::Usage {
-            cache_read_tokens: details
-                .and_then(|details| details.get("cached_tokens"))
-                .and_then(Value::as_u64),
-            // Reported only by the model families that bill for cache writes. Absent
-            // reads as absent, not as zero, so the two stay distinguishable here even
-            // though the counter sums them the same way.
-            cache_creation_tokens: details
-                .and_then(|details| details.get("cache_write_tokens"))
-                .and_then(Value::as_u64),
+            cache_read_tokens,
+            cache_creation_tokens,
         };
     }
 

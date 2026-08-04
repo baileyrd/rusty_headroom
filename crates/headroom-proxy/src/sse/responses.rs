@@ -52,12 +52,12 @@ pub struct CacheTokens {
     pub creation: Option<u64>,
 }
 
-/// Reads `response.usage.input_tokens_details` out of a terminal event's payload.
-fn cache_tokens(payload: Option<&Value>) -> CacheTokens {
-    let details = payload
-        .and_then(|payload| payload.get("response"))
-        .and_then(|response| response.get("usage"))
-        .and_then(|usage| usage.get("input_tokens_details"));
+/// Reads the cache pair out of a Responses `usage` object.
+///
+/// Shared by [`cache_tokens`] and [`cache_tokens_in_body`]. A terminal event nests the
+/// usage under `response`; a non-streaming reply puts the same object at the top level.
+fn cache_from_usage(usage: Option<&Value>) -> CacheTokens {
+    let details = usage.and_then(|usage| usage.get("input_tokens_details"));
 
     CacheTokens {
         read: details
@@ -67,6 +67,24 @@ fn cache_tokens(payload: Option<&Value>) -> CacheTokens {
             .and_then(|details| details.get("cache_write_tokens"))
             .and_then(Value::as_u64),
     }
+}
+
+/// Reads `response.usage.input_tokens_details` out of a terminal event's payload.
+fn cache_tokens(payload: Option<&Value>) -> CacheTokens {
+    cache_from_usage(
+        payload
+            .and_then(|payload| payload.get("response"))
+            .and_then(|response| response.get("usage")),
+    )
+}
+
+/// Cache tokens reported by a **non-streaming** Responses reply.
+pub fn cache_tokens_in_body(body: &[u8]) -> (u64, u64) {
+    let Ok(payload) = serde_json::from_slice::<Value>(body) else {
+        return (0, 0);
+    };
+    let cache = cache_from_usage(payload.get("usage"));
+    (cache.read.unwrap_or(0), cache.creation.unwrap_or(0))
 }
 
 /// A classified Responses stream event.

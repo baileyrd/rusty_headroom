@@ -101,6 +101,24 @@ impl Observer {
         }
     }
 
+    /// Cache tokens reported by a **non-streaming** reply, in this dialect's vocabulary.
+    ///
+    /// The streaming path reads frames; a reply that is not an event stream carries the
+    /// same numbers in its body and nothing was reading them. Measured against one
+    /// stand-in returning identical usage both ways: streaming recorded 900 reads and 100
+    /// writes, non-streaming recorded nothing — same provider, same numbers, same proxy,
+    /// only the framing differed.
+    ///
+    /// Each dialect reuses the reader its own classifier uses, so the field names are
+    /// written once per dialect rather than once per framing.
+    pub fn cache_tokens_in_body(&self, body: &[u8]) -> (u64, u64) {
+        match self {
+            Self::Anthropic(_) => super::anthropic::cache_tokens_in_body(body),
+            Self::Chat(_) => super::openai::cache_tokens_in_body(body),
+            Self::Responses(_) => super::responses::cache_tokens_in_body(body),
+        }
+    }
+
     /// What the provider said went wrong, if anything.
     ///
     /// The Responses vocabulary reports this as a terminal *reason* rather than an
@@ -374,5 +392,60 @@ mod tests {
         // answer, not a list that failed to populate.
         let observer = observe("/v1/chat/completions", "data: {\"nonsense\":true}\n\n");
         assert!(observer.unknown_types().is_empty());
+    }
+
+    #[test]
+    fn every_dialect_reads_cache_usage_from_a_non_streaming_body_too() {
+        // Found while building `scripts/live-cache-measurement.py`, whose requests do not
+        // stream: the provider reported 4,700 cache reads and the proxy reported none.
+        // Isolated against a stand-in returning identical usage both ways — streaming
+        // recorded 900/100, non-streaming recorded 0/0. Same provider, same numbers, same
+        // proxy; only the framing differed, because usage was only ever read from frames.
+        //
+        // A table over the dialects for the reason the streaming one is: this is the same
+        // metric, and it was already wrong for two surfaces out of three once.
+        for (path, body) in [
+            (
+                "/v1/messages",
+                r#"{"usage":{"input_tokens":10,"cache_read_input_tokens":900,
+                   "cache_creation_input_tokens":100}}"#,
+            ),
+            (
+                "/v1/chat/completions",
+                r#"{"usage":{"prompt_tokens":1000,"prompt_tokens_details":
+                   {"cached_tokens":900,"cache_write_tokens":100}}}"#,
+            ),
+            (
+                "/v1/responses",
+                r#"{"usage":{"input_tokens":1000,"input_tokens_details":
+                   {"cached_tokens":900,"cache_write_tokens":100}}}"#,
+            ),
+        ] {
+            assert_eq!(
+                Observer::for_path(path).cache_tokens_in_body(body.as_bytes()),
+                (900, 100),
+                "{path} did not read the cache usage from a non-streaming body"
+            );
+        }
+    }
+
+    #[test]
+    fn a_body_with_no_usage_reports_nothing_rather_than_guessing() {
+        // The control. Without it a reader hardwired to 900 would satisfy the table
+        // above, and an unparseable body must not become a number either — the proxy
+        // reporting a figure it did not receive is worse than reporting none.
+        for body in [
+            r#"{"id":"msg_1","content":[{"type":"text","text":"ok"}]}"#,
+            "not json at all",
+            "",
+        ] {
+            for path in ["/v1/messages", "/v1/chat/completions", "/v1/responses"] {
+                assert_eq!(
+                    Observer::for_path(path).cache_tokens_in_body(body.as_bytes()),
+                    (0, 0),
+                    "{path} invented cache usage from {body:?}"
+                );
+            }
+        }
     }
 }

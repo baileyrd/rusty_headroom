@@ -6,6 +6,38 @@ the crate starts publishing releases.
 
 ---
 
+## Cache accounting was blank for every non-streaming response
+**2026-08-04** · found by the harness written to measure the proxy against a live provider
+
+- Usage was read only from SSE frames. Against one stand-in returning **identical usage
+  both ways** — same provider, same numbers, same proxy, only the framing differing:
+
+  | response | `cache_read_tokens_total` | `cache_creation_tokens_total` |
+  | --- | --- | --- |
+  | streaming | 900 | 100 |
+  | non-streaming | **0** | **0** |
+
+- So `headroom_cache_hit_rate` read as *no data* for batch jobs, evaluation harnesses, and
+  any SDK call without `stream=True`. Same symptom as the OpenAI cache gap, different
+  cause: that was the wrong dialects, this is the wrong framing.
+- Non-streaming replies now accumulate a **bounded** copy and are read from it; streams are
+  still never buffered, because that rule is about not stalling a generation and a
+  non-streaming body is one the client buffers anyway.
+- Framing comes from the provider's `content-type`, not the request's `stream` flag — the
+  provider decides how it replies.
+- Each dialect's usage reader is now shared by its SSE classifier and its body reader: one
+  copy per dialect, not one per framing.
+- **The fixtures were not modelling a provider.** `fake_provider` returns a bare `&str`,
+  which axum serves as `text/plain`; no fixture had ever set `text/event-stream`. Every SSE
+  test was exercising a provider that does not exist — unnoticed until the relay started
+  reading the header, at which point two streaming tests failed. They were right to.
+- Also adds `scripts/live-cache-measurement.py`: two arms, control and proxied, over a
+  growing agent conversation, reporting a **billable-equivalent** rather than a hit rate,
+  with distinct per-arm nonces so the arms cannot read each other's cache and a guard that
+  refuses to compare anything if the control never cached.
+
+---
+
 ## `headroom wrap` refused `--settings` for the one agent that needs it
 **2026-08-04** · sweeping the CLI, MCP, Python and simulator crates
 
