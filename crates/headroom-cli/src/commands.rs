@@ -1171,20 +1171,36 @@ pub fn wrap(agent: &str, proxy: &str, settings: Option<&std::path::Path>) -> any
         );
     };
 
-    if !agent.env_configurable() {
-        anyhow::bail!(
-            "{agent} is not configured through environment variables; \
-             set its base URL to {proxy} in its own settings instead"
-        );
-    }
-    let exports = agent.env(proxy);
-
+    // The settings file first, and before any question about environment variables.
+    //
+    // This used to bail on `!env_configurable()` *before* reaching here, which refused
+    // the one agent that has no environment variables — cursor — while telling its user
+    // to "set its base URL in its own settings instead". That is exactly what `--settings`
+    // automates, so the message named the fix and the code declined to perform it. Worse,
+    // `unwrap` never had the check, so `unwrap cursor --settings` worked against a backup
+    // `wrap cursor --settings` would not create.
     if let Some(path) = settings {
         let written = crate::wrap::wrap_settings_file(path, proxy)?;
         eprintln!("rewrote {}", written.display());
         eprintln!("original saved alongside it; `headroom unwrap` restores it exactly");
     }
 
+    // `env_configurable`, not a second `exports.is_empty()` that means the same thing.
+    // One predicate, one place — the duplication this repository keeps paying for.
+    if !agent.env_configurable() {
+        // Nothing to print, so say why — and only complain when there was also no file
+        // to rewrite, because in that case nothing happened at all.
+        if settings.is_none() {
+            anyhow::bail!(
+                "{agent} reads no environment variables; point it at {proxy} with \
+                 `headroom wrap {agent} --settings <file>`, which backs the file up so \
+                 `headroom unwrap` can restore it exactly"
+            );
+        }
+        return Ok(());
+    }
+
+    let exports = agent.env(proxy);
     let mut stdout = std::io::stdout().lock();
     for (name, value) in &exports {
         writeln!(stdout, "export {name}={value}")?;
@@ -1419,6 +1435,64 @@ mod command_tests {
         for marker in ["sk-", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "x-api-key"] {
             assert!(!rendered.contains(marker), "{marker} appeared: {rendered}");
         }
+    }
+
+    #[test]
+    fn every_agent_can_be_pointed_at_the_proxy_through_a_settings_file() {
+        // `wrap.rs` tests the file functions thoroughly and they were all correct. The
+        // defect was one layer up: `commands::wrap` bailed on `!env_configurable()`
+        // *before* reaching them, so cursor — the one agent with no environment
+        // variables, and therefore the only one for which `--settings` is the only way
+        // to wrap — was refused, and told to do by hand what the flag automates.
+        //
+        // A table over every agent rather than a case for cursor, because the next agent
+        // with no environment variables should fail here rather than in a user's hands.
+        let dir = std::env::temp_dir().join("headroom-wrap-command-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("could not create the test directory");
+
+        let original = "{\n\t\"zeta\": 1,\n  \"base_url\":   \"https://api.anthropic.com\"\n}\n";
+
+        for agent in crate::wrap::Agent::ALL {
+            let path = dir.join(format!("{agent}.json"));
+            std::fs::write(&path, original).expect("write");
+
+            wrap(agent.as_str(), "http://127.0.0.1:8787", Some(&path))
+                .unwrap_or_else(|err| panic!("{agent} refused a settings file: {err}"));
+
+            let backup = std::fs::read_to_string(
+                path.with_file_name(format!("{agent}.json{}", crate::wrap::BACKUP_SUFFIX)),
+            )
+            .unwrap_or_else(|err| panic!("{agent} left no backup: {err}"));
+
+            // Both halves matter. Without the first, an agent that silently did nothing
+            // would pass; without the second, one that "backed up" the rewritten file
+            // would — which is the failure the double-wrap guard exists for.
+            assert_ne!(
+                std::fs::read_to_string(&path).expect("read"),
+                original,
+                "{agent} left the settings file untouched"
+            );
+            assert_eq!(backup, original, "{agent} backed up the wrong bytes");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_agent_with_no_environment_variables_and_no_file_names_the_flag() {
+        // Still an error — nothing happened — but the message has to point at the thing
+        // that would work. The old one said "set its base URL in its own settings
+        // instead", which is advice to do manually what `--settings` does, without the
+        // backup that makes it undoable.
+        let err = wrap("cursor", "http://127.0.0.1:8787", None)
+            .expect_err("an agent with no environment variables reported success");
+        let message = err.to_string();
+
+        assert!(
+            message.contains("--settings"),
+            "the error does not name the flag that would work: {message}"
+        );
     }
 }
 

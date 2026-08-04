@@ -298,8 +298,23 @@ fn respond(reply: Reply) -> axum::response::Response {
 
 /// Builds a router that answers a specific path and 404s the rest.
 ///
-/// For tests that need to prove the proxy routed to the *right* path, where a
-/// catch-all fallback would hide a wrong one.
+/// For tests that need to prove the proxy routed to the *right* path, where a catch-all
+/// fallback would hide a wrong one.
+///
+/// # Nothing calls this
+///
+/// Measured: no caller outside this crate, and none inside it either. The need is real —
+/// a `fake_provider` registering only `/v1/messages` once made a `/v1/chat/completions`
+/// test fail against the *upstream's* 404 and read as a proxy bug — but the proxy's route
+/// tests solve it a different way, capturing the path a catch-all received and asserting
+/// it, which catches a wrong path just as surely.
+///
+/// Kept rather than deleted, and said out loud rather than left to a reader to discover:
+/// it is a public surface, and the day a test needs a *server* that refuses the wrong path
+/// rather than an assertion that notices afterwards, this is that server. Those tests also
+/// build their own routers because they wire in `AppState`, which this cannot do from
+/// here — closing that gap is what would make this worth using rather than worth
+/// documenting.
 pub fn strict_router(path: &'static str, reply: Reply, recorder: Recorder) -> Router {
     Router::new().route(
         path,

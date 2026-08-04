@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 
 /// Suffix appended to a wrapped file to hold its original bytes.
-const BACKUP_SUFFIX: &str = ".headroom-backup";
+pub(crate) const BACKUP_SUFFIX: &str = ".headroom-backup";
 
 /// An agent that can be pointed at the proxy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
