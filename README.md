@@ -45,6 +45,13 @@ not cached. Everything before it is forwarded as the exact bytes that arrived.
 | source code | `CodeCompressor` — heuristic skeletonization |
 | prose | `TextSummarizer` — **tool output only**, never what a person typed |
 
+The proxy knows which is which from the conversation. Nothing else does, so every other
+surface takes it from the caller and defaults to tool output: `headroom compress
+--kind tool-output|text`, a `kind` property on the `headroom_compress` MCP tool, and
+`headroom.compress(content, kind=...)` in Python. Passing `text` declines prose
+compression — worth doing for anything a person wrote, because the CLI and the Python
+module discard their CCR store when the call ends, so a summary there cannot be redeemed.
+
 Anything lossy is stored first under a content hash, and the compressed block carries a
 `<<ccr:HASH>>` marker the model can redeem through the `headroom_retrieve` MCP tool. So
 compression is a bet that the detail will not be needed, and a bet that can be unwound.
