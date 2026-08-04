@@ -66,10 +66,19 @@ impl Message {
 
     /// Mutable access to the content blocks.
     ///
-    /// Returns a slice rather than the `Vec`, so blocks can be modified in place but
-    /// not appended, removed, or reordered. That is invariant I6 expressed as a
-    /// return type: a compressor holding a `&mut Vec<Block>` could `push`, `remove`,
-    /// or `swap`, and none of those are things compression is allowed to do.
+    /// A slice rather than the `Vec`, so blocks can be modified in place but not appended
+    /// or removed — `push` and `remove` are `Vec` methods and are genuinely out of reach
+    /// here.
+    ///
+    /// **Reordering is not.** This used to claim the slice also prevented `swap`, and
+    /// name it as "invariant I6 expressed as a return type". `swap` is a method on
+    /// slices, along with `reverse`, `rotate_left` and `sort_by`; measured, three of them
+    /// reorder a conversation through nothing but this accessor. The type carries the
+    /// no-add-no-remove half of I6 and not the ordering half.
+    ///
+    /// What holds the ordering half: the compression path addresses edits by
+    /// `(message, block)` index and writes content in place, never moving anything, and
+    /// `i6_surviving_content_keeps_its_position` checks that end to end through the relay.
     pub fn blocks_mut(&mut self) -> &mut [Block] {
         &mut self.blocks
     }
@@ -112,9 +121,11 @@ impl Conversation {
 
     /// Mutable access to the message history.
     ///
-    /// A slice, not the `Vec`: messages can be modified but never added, removed, or
-    /// reordered. Invariant I3 is append-only, and appending is the proxy's job, not
-    /// a compressor's.
+    /// A slice, not the `Vec`: messages can be modified but not added or removed.
+    /// Invariant I3 is append-only, and appending is the proxy's job, not a compressor's.
+    ///
+    /// Reordering is *not* prevented by the type — see [`Message::blocks_mut`], which
+    /// carried the same overclaim about the same guarantee.
     pub fn messages_mut(&mut self) -> &mut [Message] {
         &mut self.messages
     }
