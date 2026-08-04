@@ -1308,3 +1308,51 @@ removed, a build where metrics record nothing **passes**; verified by mutation.
 
 **Would change if:** a `trybuild` dependency becomes worth it, at which point "this does not
 compile" could be asserted rather than described.
+
+---
+
+## D40 — `wrap` handles the settings file before it asks about the environment
+
+**Decision:** move `--settings` handling ahead of the `env_configurable` check in
+`commands::wrap`, and reword the remaining error to name the flag.
+
+`wrap` bailed on `!env_configurable()` before reaching the settings branch, so the branch
+was unreachable for any agent without environment variables. Measured across all eight:
+
+| agent | `--settings` |
+| --- | --- |
+| claude, codex, aider, cline, continue, goose, openhands | honoured |
+| **cursor** | **refused** |
+
+Cursor is the only agent with no environment variables, which makes `--settings` the only
+way to point it at the proxy — and the only case that did not work. The error even named
+the fix: *"set its base URL to {proxy} in its own settings instead"*, which is what the flag
+does, with a backup.
+
+**The asymmetry is the sharp part.** `unwrap` never had the check, so
+`unwrap cursor --settings X` worked against a backup `wrap cursor --settings X` refused to
+create. This module opens by saying *"Unwrap is the feature"* and treats byte-exact
+restoration as the thing that must be right; this was the half that stopped it being
+available. A cursor user following the message edits by hand, gets no backup, and is told
+*"was not wrapped; nothing to restore"* when they try to undo it.
+
+**Why the tests missed it.** `wrap.rs` covers the file functions thoroughly — double-wrap
+refusal, byte-exact restore, backup removal, non-JSON refusal — and every one passes. The
+defect is one layer up, in the command that never calls them for this agent. A tested unit
+with an untested caller, which is this repository's oldest failure and its first audit
+check.
+
+The replacement test is a table over `Agent::ALL` rather than a case for cursor, so the next
+agent with no environment variables fails here rather than in someone's hands. Both halves
+are asserted — the file changed *and* the backup holds the original bytes — because a
+version checking only the first would pass on a build that backed up the rewritten file,
+which is precisely what the double-wrap guard exists to prevent.
+
+**The predicate is reused, not restated.** The first version of this fix wrote
+`exports.is_empty()`, which is what `env_configurable` already computes; clippy caught it as
+dead code and it would have been a second copy of one decision — the duplication this
+repository keeps paying for.
+
+**Would change if:** an agent appears that needs both a settings file and environment
+variables, in which case the early return after wrapping the file is wrong and both paths
+have to run.

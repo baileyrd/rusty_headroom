@@ -6,6 +6,45 @@ the crate starts publishing releases.
 
 ---
 
+## `headroom wrap` refused `--settings` for the one agent that needs it
+**2026-08-04** · sweeping the CLI, MCP, Python and simulator crates
+
+- `commands::wrap` bailed on `!env_configurable()` *before* reaching the settings branch,
+  making that branch unreachable for any agent with no environment variables. Measured
+  across all eight:
+
+  | agent | `--settings` |
+  | --- | --- |
+  | claude, codex, aider, cline, continue, goose, openhands | honoured |
+  | **cursor** | **refused** |
+
+- Cursor is the only agent with no environment variables, so `--settings` is the only way
+  to point it at the proxy. The error even named the fix — *"set its base URL in its own
+  settings instead"* — which is what the flag does, with a backup.
+- **`unwrap` never had the check**, so `unwrap cursor --settings` worked against a backup
+  `wrap cursor --settings` refused to create. The module opens with *"Unwrap is the
+  feature"*; this was the half that stopped it being available.
+- `wrap.rs` tests the file functions thoroughly and all of them passed — the defect was one
+  layer up, in the command that never called them. The new test is a table over
+  `Agent::ALL`, asserting both that the file changed and that the backup holds the
+  *original* bytes.
+- Verified by mutation against the original ordering, and on the release binary: cursor now
+  wraps, refuses a second wrap, and restores byte-identically — tabs, key order and
+  `9007199254740993` intact.
+
+### Clean negatives across the same crates
+
+- `headroom-simulators`: `Reply::stalling` is reached (`invariants.rs`, a 1500 ms pause) and
+  `fixtures::ALL` is used twice in `properties.rs`. **`strict_router` is reached by
+  nothing** — documented in place rather than deleted, with the measured reason: the proxy's
+  route tests catch a wrong path by asserting it afterwards instead, and build their own
+  routers because they wire in `AppState`.
+- `headroom-mcp`: exactly the three claimed methods, `MethodNotFound` otherwise, tested.
+- `headroom-py`: `tokens_saved` cannot be negative — `usize` plus `saturating_sub`, with I5
+  covering the substantive half.
+
+---
+
 ## Docs brought in line with the sweep, and one more type-level overclaim found
 **2026-08-04** · ARCHITECTURE, README, CONTRIBUTING and the gap analysis
 
