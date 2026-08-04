@@ -48,18 +48,43 @@ pub struct ObservingStream<S> {
     observer: Observer,
     metrics: Arc<Metrics>,
     recorded: bool,
+    /// Accumulated body, for a reply that is not an event stream.
+    ///
+    /// `None` for a stream, which must never be held. A non-streaming reply is a single
+    /// object the client will buffer anyway, so accumulating a bounded copy costs nothing
+    /// it was not already going to pay — and it is the only way to read usage that
+    /// arrives in a body rather than a frame.
+    buffered: Option<Vec<u8>>,
 }
+
+/// Most a non-streaming reply may accumulate before its usage is given up on.
+///
+/// A provider reply is kilobytes. This is a backstop against a body that is not what it
+/// claimed to be, not a limit anything real should meet: past it the bytes still pass
+/// through untouched and only the telemetry is lost.
+const MAX_BUFFERED_BODY: usize = 4 * 1024 * 1024;
 
 impl<S> ObservingStream<S> {
     /// Wraps `inner`, reporting into `metrics`, reading the stream as `path`'s
     /// vocabulary.
     pub fn new(inner: S, metrics: Arc<Metrics>, path: &str) -> Self {
+        Self::with_framing(inner, metrics, path, true)
+    }
+
+    /// The same, told whether the reply is an event stream.
+    ///
+    /// `event_stream` false makes this accumulate the body so usage can be read from it.
+    /// Nothing did that, so every non-streaming client reported no cache data at all —
+    /// the metric this proxy exists to move, blank for batch work, evaluation harnesses,
+    /// and any SDK call without `stream=True`.
+    pub fn with_framing(inner: S, metrics: Arc<Metrics>, path: &str, event_stream: bool) -> Self {
         Self {
             inner: Box::pin(inner),
             parser: SseParser::new(),
             observer: Observer::for_path(path),
             metrics,
             recorded: false,
+            buffered: (!event_stream).then(Vec::new),
         }
     }
 
@@ -70,7 +95,12 @@ impl<S> ObservingStream<S> {
         }
         self.recorded = true;
 
-        let (read, creation) = self.observer.cache_tokens();
+        // A stream reports through its frames; a body reports through itself. Whichever
+        // this reply was, the numbers land in the same counters.
+        let (read, creation) = match &self.buffered {
+            Some(body) => self.observer.cache_tokens_in_body(body),
+            None => self.observer.cache_tokens(),
+        };
         self.metrics.record_cache_usage(read, creation);
 
         // A stream that ended in a provider error did not succeed however many events
@@ -107,8 +137,18 @@ where
                 // Observation happens on a clone of the handle, not on the bytes. The
                 // chunk yielded below is the one that arrived — this function has no
                 // path that can alter it.
-                for event in this.parser.feed(&bytes) {
-                    this.observer.observe(&event);
+                match &mut this.buffered {
+                    // Bounded. Past the cap the bytes still pass through untouched and
+                    // only this reply's telemetry is given up on.
+                    Some(body) if body.len() + bytes.len() <= MAX_BUFFERED_BODY => {
+                        body.extend_from_slice(&bytes);
+                    }
+                    Some(_) => {}
+                    None => {
+                        for event in this.parser.feed(&bytes) {
+                            this.observer.observe(&event);
+                        }
+                    }
                 }
                 Poll::Ready(Some(Ok(bytes)))
             }

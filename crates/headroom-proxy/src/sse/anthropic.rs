@@ -115,6 +115,36 @@ impl DeltaKind {
     }
 }
 
+/// Reads the cache pair out of an Anthropic `usage` object.
+///
+/// Shared by the stream classifier and by [`cache_tokens_in_body`], because a
+/// non-streaming reply carries the same `usage` shape at its top level that
+/// `message_start` nests under `message`. Two readers spelling these field names
+/// separately is how one of them ends up reading a field the provider stopped sending.
+fn cache_from_usage(usage: Option<&Value>) -> (Option<u64>, Option<u64>) {
+    (
+        usage
+            .and_then(|u| u.get("cache_read_input_tokens"))
+            .and_then(Value::as_u64),
+        usage
+            .and_then(|u| u.get("cache_creation_input_tokens"))
+            .and_then(Value::as_u64),
+    )
+}
+
+/// Cache tokens reported by a **non-streaming** Anthropic reply.
+///
+/// The usage of a whole response sits at the top level rather than inside a frame. A
+/// proxy that only reads SSE reports zero for every client that does not stream — which
+/// is batch work, evaluation harnesses, and any SDK call without `stream=True`.
+pub fn cache_tokens_in_body(body: &[u8]) -> (u64, u64) {
+    let Ok(payload) = serde_json::from_slice::<Value>(body) else {
+        return (0, 0);
+    };
+    let (read, creation) = cache_from_usage(payload.get("usage"));
+    (read.unwrap_or(0), creation.unwrap_or(0))
+}
+
 /// Classifies a raw SSE event.
 ///
 /// Never fails. An event that cannot be parsed classifies as
@@ -154,13 +184,10 @@ pub fn classify(event: &Event) -> AnthropicEvent {
             // a permanently empty cache metric, which reads as "no traffic" rather
             // than as a bug.
             let usage = payload.get("message").and_then(|m| m.get("usage"));
+            let (cache_read_tokens, cache_creation_tokens) = cache_from_usage(usage);
             AnthropicEvent::MessageStart {
-                cache_read_tokens: usage
-                    .and_then(|u| u.get("cache_read_input_tokens"))
-                    .and_then(Value::as_u64),
-                cache_creation_tokens: usage
-                    .and_then(|u| u.get("cache_creation_input_tokens"))
-                    .and_then(Value::as_u64),
+                cache_read_tokens,
+                cache_creation_tokens,
             }
         }
         Some("content_block_start") => AnthropicEvent::ContentBlockStart {

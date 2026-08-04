@@ -325,7 +325,21 @@ pub(crate) async fn relay(
     // The path picks the stream vocabulary. An OpenAI response read with the Anthropic
     // classifier does not fail — it reports a healthy stream as unfinished and every
     // ordinary frame as unrecognized, which is telemetry that is confidently wrong.
-    let observed = ObservingStream::new(relayed.into_stream(), state.metrics.clone(), path);
+    // Read from the provider's own `content-type` rather than from the request's
+    // `"stream"` flag: what matters is how the reply is framed, and the provider is the
+    // one that decided. A non-streaming reply carries its usage in the body, which the
+    // frame parser never sees.
+    let event_stream = relayed
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/event-stream"));
+    let observed = ObservingStream::with_framing(
+        relayed.into_stream(),
+        state.metrics.clone(),
+        path,
+        event_stream,
+    );
 
     response
         .body(Body::from_stream(observed))
@@ -465,7 +479,7 @@ mod tests {
                     if let Ok(mut slot) = seen.lock() {
                         *slot = Some(body.to_vec());
                     }
-                    (status, reply)
+                    (status, [("content-type", content_type_of(reply))], reply)
                 }
             }),
         );
@@ -479,6 +493,21 @@ mod tests {
         });
 
         (format!("http://{addr}"), captured)
+    }
+
+    /// The `content-type` a real provider would set for `reply`.
+    ///
+    /// These fakes returned a bare `&str`, which axum serves as `text/plain`. No fixture
+    /// ever carried `text/event-stream`, so every SSE test was exercising a provider that
+    /// does not exist — and it went unnoticed until the relay started reading the header
+    /// to tell a stream from a body. A fixture that models the transport wrongly asserts
+    /// something about a system nobody runs.
+    fn content_type_of(reply: &str) -> &'static str {
+        if reply.starts_with("event:") || reply.starts_with("data:") {
+            "text/event-stream"
+        } else {
+            "application/json"
+        }
     }
 
     /// A request with a bulky live tool result, the shape compression exists for.
@@ -702,6 +731,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_non_streaming_response_feeds_the_cache_metrics_too() {
+        // The framing must not decide whether the headline metric exists. Usage arrives
+        // in a body rather than a frame here, and nothing was reading it — so batch work,
+        // evaluation harnesses and any SDK call without `stream=True` reported no cache
+        // data at all.
+        const BODY: &str = concat!(
+            r#"{"id":"msg_1","type":"message","role":"assistant","#,
+            r#""content":[{"type":"text","text":"ok"}],"#,
+            r#""usage":{"input_tokens":10,"cache_read_input_tokens":900,"#,
+            r#""cache_creation_input_tokens":100}}"#,
+        );
+        let (base, _) = fake_provider(StatusCode::OK, BODY).await;
+        let state = AppState::new(&base);
+
+        let response = post_messages(
+            router_with(state.clone()),
+            r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#.to_owned(),
+            "sk-ant-api03-x",
+        )
+        .await;
+
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        // I9 still: accumulating a copy to read it must not change what the client gets.
+        assert_eq!(bytes.as_ref(), BODY.as_bytes(), "the body was altered");
+
+        assert_eq!(state.metrics().cache_hit_rate(), Some(0.9));
+    }
+
+    #[tokio::test]
     async fn a_streaming_response_feeds_the_cache_metrics_end_to_end() {
         // The number that says whether this proxy is helping. It arrives in the very
         // first SSE frame of the response, so nothing short of the full path — relay,
@@ -795,7 +855,8 @@ mod tests {
 
     /// Starts a fake provider that answers any path with `body`.
     async fn fake_any_path_answering(body: &'static str) -> String {
-        let app = Router::new().fallback(move || async move { body });
+        let app = Router::new()
+            .fallback(move || async move { ([("content-type", content_type_of(body))], body) });
 
         let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await

@@ -1356,3 +1356,54 @@ repository keeps paying for.
 **Would change if:** an agent appears that needs both a settings file and environment
 variables, in which case the early return after wrapping the file is wrong and both paths
 have to run.
+
+---
+
+## D41 — usage is read from the reply's body when the reply is not a stream
+
+**Decision:** `ObservingStream` accumulates a bounded copy of a non-streaming reply and
+reads cache usage from it; framing comes from the provider's `content-type`. Streams are
+still never buffered.
+
+Cache accounting was parsed only from SSE frames. Measured against one stand-in returning
+identical usage both ways — same provider, same numbers, same proxy:
+
+| response | `cache_read_tokens_total` | `cache_creation_tokens_total` |
+| --- | --- | --- |
+| streaming | 900 | 100 |
+| non-streaming | **0** | **0** |
+
+So `headroom_cache_hit_rate` read as *no data* for every client that does not stream. Same
+symptom as D30 and a different cause: that was the wrong dialects, this is the wrong
+framing.
+
+**Found by the measurement harness, on the proxy.** `scripts/live-cache-measurement.py`
+sends non-streaming requests; the provider reported 4,700 cache reads across a run and the
+proxy reported none. The tool written to measure whether the proxy helps caught the proxy
+failing to notice that it had.
+
+**Buffering, which this module says never to do.** The rule is about *streams* — holding a
+generation back turns a readable answer into a stall. A non-streaming reply is a single
+object the client buffers anyway, so a bounded copy costs nothing that was not already
+being paid. The cap is a backstop against a body that is not what it claimed to be: past it
+the bytes still pass through untouched and only the telemetry is given up.
+
+**Framing from `content-type`, not from the request's `stream` flag.** What matters is how
+the reply came back, and the provider is the one that decided. A client asking for a stream
+and getting an error object is exactly the case where the two disagree.
+
+**One reader per dialect, not one per framing.** Each dialect's `cache_from_usage` is now
+shared by its SSE classifier and its body reader. Two readers spelling `cache_read_input_tokens`
+separately is how one of them ends up reading a field the provider stopped sending — the
+duplication this repository keeps paying for.
+
+**The fixtures were not modelling a provider.** `fake_provider` returns a bare `&str`, which
+axum serves as `text/plain`; **no fixture had ever set `text/event-stream`**. Every SSE test
+was exercising a provider that does not exist, and it went unnoticed until the relay started
+reading the header — at which point two existing streaming tests failed. They were right to
+fail. A fixture that models the transport wrongly asserts something about a system nobody
+runs.
+
+**Would change if:** a provider streams without declaring it. Detection would have to fall
+back to sniffing the first bytes, which is worth doing only when a real provider does it —
+guessing now would mean buffering streams on a mistake.
