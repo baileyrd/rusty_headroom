@@ -6,6 +6,32 @@ the crate starts publishing releases.
 
 ---
 
+## The file CCR store leaked three kinds of entry that purge could never collect
+**2026-08-04** · each one is what an unclean shutdown leaves behind
+
+- Measured over three purge rounds — nothing removed, nothing counted:
+
+  | state | why it leaked | size |
+  | --- | --- | --- |
+  | body with no `.exp` sidecar | `expiry_of` returns `None` and the loop skipped it | full content |
+  | abandoned `.tmp` | the loop skipped `.tmp` names | full content |
+  | `.exp` with no body | the loop skipped `.exp` names | tiny |
+
+- **The first is routine.** `put` renames the body into place and *then* writes the
+  sidecar, so a crash, power loss or ENOSPC between those two lines produces it. A proxy
+  with `HEADROOM_CCR_DIR` then grows without bound while `purge_expired` reports `0`.
+- `get` still fails **open** on an unreadable expiry — an unknown expiry must not discard
+  content a model was promised. Verified across a deleted, corrupt and empty sidecar. The
+  fix keeps the entry and makes it *datable* rather than deciding it expired.
+- Purge now re-stamps undatable bodies, and collects abandoned `.tmp` files (judged by
+  modification time, so an in-flight write is never deleted) and orphaned sidecars. The
+  return value still counts expired entries only.
+- Verified by mutation three ways: restoring the skip, deleting `.tmp` regardless of age,
+  and dropping orphan collection. The `.tmp` test asserts a *fresh* one survives — without
+  that half it would pass on a build that deleted every one it saw.
+
+---
+
 ## The CLI and MCP server had the same block-kind bug as the binding
 **2026-08-03** · found by asking the question the previous fix raised
 
