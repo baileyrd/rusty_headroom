@@ -6,6 +6,33 @@ the crate starts publishing releases.
 
 ---
 
+## Docs brought in line with the sweep, and one more type-level overclaim found
+**2026-08-04** · ARCHITECTURE, README, CONTRIBUTING and the gap analysis
+
+- **ARCHITECTURE's `Telemetry` row was the same bug as `blocks_mut`.** It read *"every
+  method returns `()` — observation cannot influence a decision (I9)"*. Three methods
+  return values — `cache_hit_rate`, `tokens_saved`, `render` — and `Compressors` holds the
+  `Arc<Metrics>`, so nothing in the type stops a compressor branching on them. Corrected to
+  name the test that does establish I9.
+- Also updated there: the `CcrStore` row (built ≠ configured, and interrupted-write
+  recovery), the routing-table section (sharing a table is not asking it the same question
+  — three adapters called `transform_for` and skipped the block-kind gate), data-flow step 7
+  (all three dialects report cache usage, in different frames), and the audit description
+  (thirteen checks, and what the later ones guard).
+- **README** now says how each surface expresses the tool-output-only rule: `headroom
+  compress --kind`, the MCP tool's `kind` property, `headroom.compress(kind=…)` — and why
+  passing `text` matters most on the CLI and in Python, whose CCR stores die with the call.
+- **CONTRIBUTING** gains a fifth lesson: *"the type prevents it" is a claim like any other,
+  and it is usually half true.* Two instances, both half right in the half that mattered.
+  The method is to write the code the doc says will not compile.
+- **gap-analysis** rows R3 and X11 updated — the file store's recovery, and the OpenAI
+  usage chunk that carries `choices: []` and so was invisible to a choice-first reader.
+- The new lesson's code sample was wrong on first writing — it claimed `swap(0, 2)` gave
+  `["second","third","first"]`; it gives `["third","second","first"]`. Checked before
+  committing, which is the practice the lesson is about.
+
+---
+
 ## Two invariant claims corrected: what the type prevents, and what observation means
 **2026-08-04** · both properties hold; both accounts of why were wrong
 

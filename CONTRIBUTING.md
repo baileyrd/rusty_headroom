@@ -149,6 +149,34 @@ typed and then asking a question that ignores it. Each one had tests, and none o
 compared its answer against the proxy's for the same bytes. `headroom compress` and
 `headroom inspect` disagreed *inside one binary*.
 
+### "The type prevents it" is a claim like any other, and it is usually half true
+
+Two places said a signature made something impossible. Both were half right, and the half
+they got wrong was the half that mattered:
+
+| claim | true | false |
+| --- | --- | --- |
+| `blocks_mut` returns a slice, so blocks cannot be "appended, removed, or reordered" — "invariant I6 expressed as a return type" | `push` and `remove` are `Vec` methods, genuinely out of reach | `swap` is a **slice** method, and the sentence named it. So are `reverse`, `rotate_left`, `sort_by` |
+| `Telemetry`: "every method returns `()` — observation cannot influence a decision (I9)" | the recording methods do | `cache_hit_rate` and `tokens_saved` return values, and `Compressors` holds the `Arc<Metrics>` |
+
+Neither property was actually broken. What was broken is that a reader had been told to
+stop checking — which is worse than saying nothing, because the next person inherits a
+guarantee nobody is testing and a sentence explaining why they need not.
+
+Both were found by writing the code the doc said would not compile. It compiles in seconds
+and settles it:
+
+```rust
+c.messages_mut().swap(0, 2);   // ["first","second","third"] -> ["third","second","first"]
+```
+
+So: if a doc says a type forbids something, write it. If it compiles, the type does not
+forbid it — say what does. Here that is `i6_surviving_content_keeps_its_position` and
+`observing_a_request_does_not_change_what_is_forwarded`, both of which vary the thing their
+invariant is about. The second had to be *written*: the existing I9 test sent one request
+through two proxies that both had metrics attached, so it compared observed against
+observed and established determinism instead.
+
 ## Review & merge
 - Every change lands through a PR — no direct pushes to the default branch.
 - CI must be green before merge.

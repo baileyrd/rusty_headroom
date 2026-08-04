@@ -29,15 +29,23 @@ The proxy, the CLI, the MCP server and the Python module are adapters over it.
 | Port | Adapter(s) | Notes |
 | --- | --- | --- |
 | `Transform` | `SmartCrusher`, `LogCompressor`, `SearchCompressor`, `DiffCompressor`, `CodeCompressor`, `TextSummarizer`, `Reformatter` | Split into `LossyTransform` and `LosslessTransform` so I10 can gate them separately |
-| `CcrStore` | `InMemoryCcrStore`, `FileCcrStore`, `RedisCcrStore` (feature-gated) | Chosen by configuration; Redis exists for multi-worker retrieval (D22) |
+| `CcrStore` | `InMemoryCcrStore`, `FileCcrStore`, `RedisCcrStore` (feature-gated) | Chosen by configuration; Redis exists for multi-worker retrieval (D22). The store that was *built* is not always the one configured — a directory that will not open falls back to memory, so `/health` reports both the kind and whether it survives a restart (D33). `FileCcrStore` writes the body then its expiry sidecar, and recovers what a crash between the two leaves behind (D38) |
 | `Tokenizer` | `HeuristicEstimator`, `TiktokenCounter` | Resolved per model by `tokenizer::Registry`. The heuristic over-counts on realistic content, pinned by a differential test against `gpt-4o`; it under-counts random alphanumeric strings, which no character-class heuristic can fix (D29) |
-| `Telemetry` | the proxy's `Metrics` | Every method returns `()` — observation cannot influence a decision (I9) |
+| `Telemetry` | the proxy's `Metrics` | Every *recording* method returns `()`. That is a convention, not a proof: `cache_hit_rate` and `tokens_saved` return values, and `Compressors` holds the `Arc<Metrics>`, so nothing in the type stops a compressor branching on them. I9 is established by `observing_a_request_does_not_change_what_is_forwarded`, which compresses the same body with and without a metrics sink (D39) |
 
 **One routing table.** `pipeline::Orchestrator` owns the decision of what compresses what.
 The proxy, the CLI, the MCP server and the Python binding all route through it. They each
 carried a copy once, and the copies drifted: the core's table had no arm for source code,
 so the proxy forwarded every file whole while `headroom compress` reported a saving for
 the same content (D23).
+
+Sharing the table is not the same as asking it the same question. `transform_for` answers
+about *content*; `transform_for_block` also applies the gate that keeps the prose
+summarizer on tool output. Three of the four adapters built a `BlockKind::Text` block and
+then called the first one — declaring the content was typed and then asking something that
+ignores it — so `headroom compress` and `headroom inspect` disagreed inside one binary
+(D36, D37). Every adapter now takes the content's kind from its caller and routes through
+`transform_for_block`.
 
 ## Data flow
 
@@ -61,7 +69,10 @@ A request through `POST /v1/messages`:
 7. **Relay, and observe the response stream** with the classifier matching that surface.
    Anthropic, OpenAI chat and Responses frame their events differently, and reading one
    with another's vocabulary produces confidently wrong numbers rather than an error
-   (D18).
+   (D18). Picking the right classifier is not sufficient: all three report cache usage, in
+   three vocabularies and in different frames — Anthropic in the *first*, OpenAI in a final
+   chunk with no `choices` — and for a long time only the Anthropic one was parsed, so the
+   metric the proxy exists to move read as no-data for every OpenAI conversation (D30).
 
 ## Structure
 
@@ -96,8 +107,17 @@ maintained — prefer `DECISIONS.md`.
   refactor that upholds every module contract and breaks the system property still fails.
 - `crates/headroom-proxy/tests/properties.rs` — I5 and I10, which are claims about *many*
   inputs and cannot be established by one fixture.
-- `scripts/reachability-audit.sh` — is every capability actually reached? Five were once
-  shipped, tested, documented as done, and called by nothing. Its check 7 closes the loop
-  on the two files above: each invariant must still have a test naming it, in the file
-  this document says gates it, so deleting one fails the build rather than quietly
-  turning these two lines into fiction.
+- `scripts/reachability-audit.sh` — thirteen checks, each one motivated by something this
+  repository actually shipped; the script's header records which. Five capabilities were
+  once shipped, tested, documented as done, and called by nothing, and check 7 closes the
+  loop on the two files above: each invariant must still have a test naming it, in the file
+  this document says gates it, so deleting one fails the build rather than quietly turning
+  these two lines into fiction.
+
+  The later checks guard a second failure — a capability built for one surface and written
+  up as covering all of them. Check 10 requires every dialect handler that compresses to
+  also scan for cache-busting content, check 11 requires the cache-accounting test to have
+  a row per stream dialect, and check 13 pins the two environment variables the proxy and
+  the MCP server must agree on for a `<<ccr:HASH>>` marker to be redeemable across
+  processes. Check 12 is the odd one: it compares a *doc's* list of unreached exports
+  against reality, in both directions.
