@@ -26,6 +26,31 @@ use crate::error::{Error, Result};
 /// Suffix for the sidecar recording an entry's expiry.
 const EXPIRY_SUFFIX: &str = ".exp";
 
+/// Suffix for a body being written, before it is renamed into place.
+const TEMP_SUFFIX: &str = ".tmp";
+
+/// The expiry given to a body whose sidecar is missing or unreadable.
+///
+/// [`FileCcrStore::get`] fails *open* when it cannot read an expiry — an unknown expiry
+/// must not discard content a model was promised it could retrieve. The cost of that,
+/// before this existed, was that such an entry became immortal: `purge_expired` skipped
+/// anything it could not date, so it was never collected and never counted. A crash
+/// between the body's rename and the sidecar's write is enough to produce one, which
+/// makes it the ordinary consequence of an unclean shutdown rather than an exotic case.
+///
+/// Re-stamping keeps the fail-open read and makes the entry collectable again. Long
+/// enough that a re-stamp never shortens the life of something whose real expiry was
+/// further out than a day, because the original is unknowable by then.
+const RECOVERY_TTL: Duration = Duration::from_secs(24 * 3600);
+
+/// How old a `.tmp` must be before it is treated as an abandoned write.
+///
+/// A live `put` renames its temporary file into place within milliseconds, so an hour is
+/// far beyond any in-flight write while still bounding what one crash can strand. Judged
+/// by modification time rather than by presence, so this can never delete a file another
+/// process is in the middle of writing.
+const ABANDONED_AFTER: Duration = Duration::from_secs(3600);
+
 /// A CCR store backed by a directory.
 #[derive(Debug, Clone)]
 pub struct FileCcrStore {
@@ -50,6 +75,18 @@ impl FileCcrStore {
 
     fn expiry_path(&self, hash: ContentHash) -> PathBuf {
         self.root.join(format!("{}{EXPIRY_SUFFIX}", hash.to_hex()))
+    }
+
+    /// Whether `path` was last modified more than `age` ago.
+    ///
+    /// A file whose modification time cannot be read is treated as *not* old enough, so
+    /// an unreadable timestamp never causes a deletion.
+    fn older_than(path: &Path, age: Duration, now: SystemTime) -> bool {
+        fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|elapsed| elapsed > age)
     }
 
     /// Reads an entry's expiry, if it has one.
@@ -126,21 +163,51 @@ impl CcrStore for FileCcrStore {
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
-            if name.ends_with(EXPIRY_SUFFIX) || name.ends_with(".tmp") {
+
+            // An abandoned write. Its body was never renamed into place, so nothing can
+            // ever read it, and it is a full copy of the content it failed to store.
+            if name.ends_with(TEMP_SUFFIX) {
+                if Self::older_than(&path, ABANDONED_AFTER, now) {
+                    let _ = fs::remove_file(&path);
+                }
                 continue;
             }
+
+            // A sidecar whose body is gone — the mirror of the case below, left by a
+            // purge or a deletion that removed one of the pair.
+            if let Some(stem) = name.strip_suffix(EXPIRY_SUFFIX) {
+                if ContentHash::from_hex(stem).is_ok_and(|hash| !self.content_path(hash).exists()) {
+                    let _ = fs::remove_file(&path);
+                }
+                continue;
+            }
+
             let Ok(hash) = ContentHash::from_hex(name) else {
                 continue;
             };
-            if let Some(expiry) = Self::expiry_of(&self.expiry_path(hash)) {
-                if expiry <= now {
+
+            match Self::expiry_of(&self.expiry_path(hash)) {
+                Some(expiry) if expiry <= now => {
                     let _ = fs::remove_file(&path);
                     let _ = fs::remove_file(self.expiry_path(hash));
                     removed += 1;
                 }
+                Some(_) => {}
+                // Undatable. Kept — `get` fails open for the same reason — but given an
+                // expiry so it stops being immortal. See [`RECOVERY_TTL`].
+                None => {
+                    let recovered = now.checked_add(RECOVERY_TTL).unwrap_or(now);
+                    let _ = fs::write(
+                        self.expiry_path(hash),
+                        Self::epoch_secs(recovered).to_string(),
+                    );
+                }
             }
         }
 
+        // Deliberately counts expired *entries* only, not the strays cleaned above. The
+        // number is what a caller reports as "collected", and folding recovery work into
+        // it would make a store healing itself look like a store expiring content.
         removed
     }
 
@@ -252,6 +319,109 @@ mod tests {
         store.put(hash, content, Duration::ZERO).unwrap();
         assert_eq!(store.get(hash).unwrap(), None);
         assert_eq!(store.len(), 0);
+    }
+
+    #[test]
+    fn a_body_whose_sidecar_is_gone_is_kept_but_stops_being_immortal() {
+        // What an unclean shutdown leaves. `put` renames the body into place and *then*
+        // writes the sidecar, so a crash between the two produces exactly this — and
+        // before the recovery below, `purge_expired` skipped anything it could not date,
+        // forever. Measured: three purge rounds removed nothing and the body stayed.
+        let scratch = Scratch::new("sidecar-gone");
+        let dir = &scratch.0;
+        let store = FileCcrStore::open(dir).expect("open");
+        let hash = ContentHash::of(b"payload");
+        store
+            .put(hash, b"payload", Duration::from_secs(3600))
+            .expect("put");
+        fs::remove_file(dir.join(format!("{}{EXPIRY_SUFFIX}", hash.to_hex()))).expect("rm");
+
+        // Fail open on the read: an unknown expiry must not discard content a model was
+        // promised. That is the property the recovery must not break.
+        assert!(
+            store.get(hash).expect("get").is_some(),
+            "an undatable entry was discarded rather than kept"
+        );
+
+        assert_eq!(store.purge_expired(), 0, "nothing had expired");
+        assert!(
+            store.get(hash).expect("get").is_some(),
+            "the recovery deleted the content instead of dating it"
+        );
+
+        // It now has an expiry, so it is collectable. Backdate it and confirm the whole
+        // cycle completes rather than stopping at "has a sidecar again".
+        let expiry = dir.join(format!("{}{EXPIRY_SUFFIX}", hash.to_hex()));
+        assert!(
+            expiry.exists(),
+            "no expiry was written, so it is still immortal"
+        );
+        let past = SystemTime::now() - Duration::from_secs(60);
+        fs::write(&expiry, FileCcrStore::epoch_secs(past).to_string()).expect("backdate");
+
+        assert!(store.get(hash).expect("get").is_none());
+        assert_eq!(
+            store.purge_expired(),
+            1,
+            "the recovered entry never collected"
+        );
+        assert!(!dir.join(hash.to_hex()).exists());
+    }
+
+    #[test]
+    fn an_abandoned_temporary_write_is_collected_and_an_in_flight_one_is_not() {
+        // A `.tmp` is a full copy of the content it failed to store, and nothing can ever
+        // read it — its body was never renamed into place. Judged by modification time,
+        // so this can never delete a file another process is mid-write on: that is what
+        // the second half asserts, and without it this test would pass on a build that
+        // deleted every `.tmp` it saw.
+        let scratch = Scratch::new("abandoned-tmp");
+        let dir = &scratch.0;
+        let store = FileCcrStore::open(dir).expect("open");
+
+        let stale = dir.join(format!(
+            "{}{TEMP_SUFFIX}",
+            ContentHash::of(b"stale").to_hex()
+        ));
+        fs::write(&stale, b"interrupted").expect("write");
+        let backdated = SystemTime::now() - (ABANDONED_AFTER + Duration::from_secs(60));
+        fs::File::options()
+            .write(true)
+            .open(&stale)
+            .expect("open")
+            .set_modified(backdated)
+            .expect("backdate");
+
+        let fresh = dir.join(format!(
+            "{}{TEMP_SUFFIX}",
+            ContentHash::of(b"fresh").to_hex()
+        ));
+        fs::write(&fresh, b"in flight").expect("write");
+
+        store.purge_expired();
+
+        assert!(!stale.exists(), "an abandoned write was left behind");
+        assert!(
+            fresh.exists(),
+            "a write in progress was deleted out from under it"
+        );
+    }
+
+    #[test]
+    fn a_sidecar_whose_body_is_gone_is_collected() {
+        let scratch = Scratch::new("orphan-sidecar");
+        let dir = &scratch.0;
+        let store = FileCcrStore::open(dir).expect("open");
+        let hash = ContentHash::of(b"payload");
+        store
+            .put(hash, b"payload", Duration::from_secs(3600))
+            .expect("put");
+        fs::remove_file(dir.join(hash.to_hex())).expect("rm body");
+
+        let orphan = dir.join(format!("{}{EXPIRY_SUFFIX}", hash.to_hex()));
+        assert!(orphan.exists(), "the fixture did not leave an orphan");
+        store.purge_expired();
+        assert!(!orphan.exists(), "an orphaned sidecar was left behind");
     }
 
     #[test]

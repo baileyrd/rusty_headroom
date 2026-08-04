@@ -1218,3 +1218,47 @@ times. CONTRIBUTING's fourth lesson carries the instance instead.
 **Would change if:** a second compressor becomes tool-output-only, or a third block kind
 appears. Either turns the boolean gate into a table, which is worth checking mechanically
 in a way this is not.
+
+---
+
+## D38 — the file store heals what an interrupted write leaves, rather than skipping it
+
+**Decision:** `purge_expired` re-stamps a body whose expiry it cannot read, and collects
+abandoned `.tmp` files and orphaned `.exp` sidecars. `get` still fails open, unchanged.
+
+Three states were uncollectable, and each is what an unclean shutdown leaves. Measured over
+three purge rounds, nothing removed and nothing counted:
+
+| state | why it leaked | size |
+| --- | --- | --- |
+| body with no sidecar | `expiry_of` returns `None` and the loop skipped it | full content |
+| abandoned `.tmp` | the loop skipped `.tmp` names | full content |
+| `.exp` with no body | the loop skipped `.exp` names | tiny |
+
+**The first is not exotic.** `put` renames the body into place and *then* writes the
+sidecar, so a crash, power loss, or ENOSPC between those two lines produces it. For a proxy
+configured with `HEADROOM_CCR_DIR`, an unclean restart is the ordinary case, and the
+directory then grows without bound while `purge_expired` reports `0` forever.
+
+**What could not change.** `get` fails open when it cannot read an expiry — an unknown
+expiry must not discard content a model was promised it could retrieve. Verified across a
+deleted, corrupt, and empty sidecar: all three still return the content. So the fix had to
+keep the entry and make it *datable*, not decide it had expired. Re-stamping does exactly
+that, and the recovery TTL is deliberately long: the original expiry is unknowable by then,
+so a re-stamp must never shorten the life of something that would have lived longer.
+
+**Judged by modification time, not by presence.** A live `put` renames its temporary file
+within milliseconds, so an hour is far beyond any in-flight write. Deleting `.tmp` files on
+sight would race a concurrent writer, which is why the test asserts a *fresh* `.tmp`
+survives — without that half it would pass on a build that deleted every one it saw.
+
+**The count still means expired entries.** Folding recovery work into the return value
+would make a store healing itself look like a store expiring content, and an existing test
+asserts that number.
+
+Verified by mutation three ways — restoring the skip, deleting `.tmp` regardless of age, and
+dropping orphan collection — each turning its own test red.
+
+**Would change if:** the sidecar moves into the body file as a header. That removes the
+window entirely rather than recovering from it, at the cost of rewriting the whole entry to
+change an expiry.
