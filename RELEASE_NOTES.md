@@ -6,6 +6,37 @@ the crate starts publishing releases.
 
 ---
 
+## The relay dropped every query string
+**2026-08-04** · found while checking whether `claude -p` could drive the live measurement
+
+- Every relaying handler passed its **route literal** to `relay`, and the one that had a
+  `Uri` called `.path()` on it. Measured against a capture server: Claude Code sends
+  `/v1/messages?beta=true`, the provider received `/v1/messages`.
+- Nothing failed. The request simply stopped being the one the client sent — the shape of
+  defect I1 prevents on the body, unchecked on the target. Whether `?beta=true` changes the
+  provider's behaviour is not the proxy's call to make.
+- Fixed on all four relaying routes, with a table test over them. Verified by mutation:
+  putting one route back to its literal fails with *"/v1/chat/completions dropped its query
+  string"*.
+- **The fixture had the same bug.** `fake_any_path` recorded `uri.path()`, so the double
+  built to prove the proxy relays to the right target could not see half of it. The new
+  test failed against the fixture before it failed against the code — the second time in
+  two changes that a test double turned out not to model the transport.
+
+### Why `claude -p` cannot be the live measurement
+
+- Claude Code authenticates with `Bearer sk-ant-oat…`, which `classify_auth_mode` reads as
+  **OAuth**. Under I10 that is lossless transforms only — no lossy compression, by design,
+  because a modification could exceed the granted scope.
+- So a two-arm comparison through Claude Code would show ≈no difference and confirm a
+  policy readable in the source, at roughly **$0.22 a call** (39 tools, a 151 KB body every
+  turn). The credential was classified inside the capture server, so the token itself was
+  never recorded.
+- The synthetic harness stays the right tool: it controls the credential class, the
+  conversation shape, and the compressible content.
+
+---
+
 ## Cache accounting was blank for every non-streaming response
 **2026-08-04** · found by the harness written to measure the proxy against a live provider
 

@@ -202,6 +202,7 @@ async fn metrics_endpoint(State(state): State<AppState>) -> impl IntoResponse {
 /// a stream and this handler passes it straight through.
 async fn messages(
     State(state): State<AppState>,
+    uri: axum::http::Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, RelayError> {
@@ -264,7 +265,7 @@ async fn messages(
     relay(
         &state,
         Method::POST,
-        "/v1/messages",
+        forwarded_target(&uri, "/v1/messages").as_str(),
         &upstream_headers,
         outgoing.into_owned(),
     )
@@ -280,6 +281,19 @@ async fn messages(
 /// # Errors
 ///
 /// Returns [`RelayError`] if no upstream client exists or the request fails.
+/// The path and query to forward, falling back to `route` when the URI carries neither.
+///
+/// Handlers passed their route literal, which drops everything after the `?`. Measured
+/// against a capture server: Claude Code calls `/v1/messages?beta=true` and the provider
+/// received `/v1/messages`. Nothing failed — the request simply stopped being the one the
+/// client sent, which is the shape of defect I1 exists to prevent on the body and nothing
+/// was checking on the target.
+pub(crate) fn forwarded_target(uri: &axum::http::Uri, route: &str) -> String {
+    uri.path_and_query()
+        .map(|target| target.as_str().to_owned())
+        .unwrap_or_else(|| route.to_owned())
+}
+
 pub(crate) async fn relay(
     state: &AppState,
     method: Method,
@@ -836,7 +850,15 @@ mod tests {
             let seen = seen.clone();
             async move {
                 if let Ok(mut slot) = seen.lock() {
-                    *slot = Some((uri.path().to_owned(), body.to_vec()));
+                    // Path *and query*. This recorded only the path, so a fixture built
+                    // to prove the proxy relays to the right target could not see half
+                    // of it — the same defect the handlers had, in the double meant to
+                    // catch it.
+                    let target = uri
+                        .path_and_query()
+                        .map(|target| target.as_str().to_owned())
+                        .unwrap_or_else(|| uri.path().to_owned());
+                    *slot = Some((target, body.to_vec()));
                 }
                 "{}"
             }
@@ -1082,6 +1104,34 @@ mod tests {
         let (path, sent) = captured.lock().unwrap().clone().expect("nothing forwarded");
         assert_eq!(path, "/v1/conversations");
         assert_eq!(sent, source.as_bytes(), "a passthrough route was modified");
+    }
+
+    #[tokio::test]
+    async fn every_relaying_route_forwards_its_query_string() {
+        // Handlers passed their route literal, which drops everything after the `?`.
+        // Found by pointing Claude Code at a capture server: it calls
+        // `/v1/messages?beta=true` and the provider received `/v1/messages`. Nothing
+        // failed — the request simply stopped being the one the client sent.
+        //
+        // A table over the routes, because the literal was per-handler and so was the
+        // defect; `/v1/conversations` had a `Uri` and still called `.path()` on it.
+        for (route, sent) in [
+            ("/v1/messages", "/v1/messages?beta=true"),
+            ("/v1/chat/completions", "/v1/chat/completions?beta=true"),
+            ("/v1/responses", "/v1/responses?beta=true"),
+            ("/v1/conversations", "/v1/conversations?limit=5"),
+        ] {
+            let (base, captured) = fake_any_path().await;
+            post_to(
+                router_with(AppState::new(&base)),
+                sent,
+                r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#.to_owned(),
+            )
+            .await;
+
+            let (arrived, _) = captured.lock().unwrap().clone().expect("nothing forwarded");
+            assert_eq!(arrived, sent, "{route} dropped its query string");
+        }
     }
 
     #[tokio::test]

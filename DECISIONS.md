@@ -1407,3 +1407,40 @@ runs.
 **Would change if:** a provider streams without declaring it. Detection would have to fall
 back to sniffing the first bytes, which is worth doing only when a real provider does it —
 guessing now would mean buffering streams on a mistake.
+
+---
+
+## D42 — the relay forwards the query string, and `claude -p` is not a measurement
+
+**Decision:** every relaying handler forwards the incoming path *and query*, not its route
+literal. Also records why running the live measurement through `claude -p` would not have
+measured anything.
+
+**The credential decides the answer before the measurement starts.** Claude Code
+authenticates with `Authorization: Bearer sk-ant-oat…`, which `classify_auth_mode` reads as
+`AuthMode::OAuth` — captured locally, classified in the capture server so the token itself
+was never recorded. Under I10, OAuth gets lossless transforms only: no lossy compression at
+all, deliberately, because a modification could exceed the granted scope. So routing Claude
+Code through this proxy does almost nothing *by design*, and a two-arm comparison would
+have shown ≈no difference and confirmed a policy readable in the source. At roughly $0.22 a
+call — Claude Code sends 39 tools and a 151 KB body every turn — that is a expensive way to
+re-read `auth_mode.rs`.
+
+**What the attempt did find.** Pointing Claude Code at a capture server showed
+`/v1/messages?beta=true` going out and `/v1/messages` arriving. Every handler passed its
+route literal to `relay`, and the one that had a `Uri` called `.path()` on it, so the query
+was dropped on all four relaying routes. Nothing failed; the request simply stopped being
+the one the client sent. That is the shape of defect I1 exists to prevent on the body, and
+nothing was checking it on the target.
+
+Whether `?beta=true` changes Anthropic's behaviour is not the point — the proxy does not
+get to decide that. Its job is to relay what the client sent.
+
+**The fixture had the same bug.** `fake_any_path` recorded `uri.path()`, so the double
+built to prove the proxy relays to the right target could not see half of the target. The
+new test failed against the fixture before it failed against the code, which is the second
+time this session that a test double turned out not to model the transport
+(`fake_provider` never set `text/event-stream`, D41).
+
+**Would change if:** a provider requires a query parameter the proxy must add or strip. It
+would belong in one place with a reason, rather than arriving as the accident of a literal.
