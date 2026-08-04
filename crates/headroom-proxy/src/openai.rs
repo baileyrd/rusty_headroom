@@ -39,6 +39,7 @@ use headroom_core::tokenizer::{HeuristicEstimator, Tokenizer};
 /// Returns [`RelayError`] if the request cannot be relayed to the provider.
 pub async fn chat_completions(
     State(state): State<AppState>,
+    uri: Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, RelayError> {
@@ -84,7 +85,14 @@ pub async fn chat_completions(
     let stabilized = crate::stabilization::stabilize(Dialect::OpenAi, &compressed, policy);
     let outgoing = shape_openai(&stabilized, policy);
 
-    relay_to(&state, &headers, "/v1/chat/completions", outgoing, policy).await
+    relay_to(
+        &state,
+        &headers,
+        crate::server::forwarded_target(&uri, "/v1/chat/completions").as_str(),
+        outgoing,
+        policy,
+    )
+    .await
 }
 
 /// Adds `prompt_cache_key` and `reasoning_effort` where policy permits.
@@ -191,6 +199,7 @@ fn effort_for(body: &[u8]) -> Option<Effort> {
 /// Returns [`RelayError`] if the request cannot be relayed to the provider.
 pub async fn responses(
     State(state): State<AppState>,
+    uri: Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, RelayError> {
@@ -222,7 +231,14 @@ pub async fn responses(
     let stabilized = crate::stabilization::stabilize(Dialect::OpenAiResponses, &compressed, policy);
     let outgoing = shape_openai(&stabilized, policy);
 
-    relay_to(&state, &headers, "/v1/responses", outgoing, policy).await
+    relay_to(
+        &state,
+        &headers,
+        crate::server::forwarded_target(&uri, "/v1/responses").as_str(),
+        outgoing,
+        policy,
+    )
+    .await
 }
 
 /// Relays a request that must never be compressed.
@@ -246,7 +262,7 @@ pub async fn passthrough(
     // The path is taken from the request rather than hard-coded, so
     // `/v1/conversations/{id}/items` reaches the provider at the path the client used
     // instead of being collapsed to its prefix.
-    let path = uri.path().to_owned();
+    let path = crate::server::forwarded_target(&uri, uri.path());
     relay_to(&state, &headers, &path, body.to_vec(), policy).await
 }
 
