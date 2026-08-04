@@ -1262,3 +1262,49 @@ dropping orphan collection — each turning its own test red.
 **Would change if:** the sidecar moves into the body file as a header. That removes the
 window entirely rather than recovering from it, at the cost of rewriting the whole entry to
 change an expiry.
+
+---
+
+## D39 — two invariant claims corrected: what the type prevents, and what observation means
+
+**Decision:** correct `Message::blocks_mut` and `Conversation::messages_mut`'s docs, and add
+an I9 test that varies the thing I9 is about.
+
+**The type does not express I6.** `blocks_mut` claimed a slice meant blocks "can be modified
+in place but not appended, removed, or reordered", and called that "invariant I6 expressed
+as a return type: a compressor holding a `&mut Vec<Block>` could `push`, `remove`, or
+`swap`, and none of those are things compression is allowed to do."
+
+`push` and `remove` are `Vec` methods and genuinely out of reach. `swap` is a **slice**
+method. So is `reverse`, `rotate_left`, `sort_by`. Measured — three of them reorder a
+conversation through nothing but the public accessor:
+
+```
+before: ["first", "second", "third"]
+after:  ["second", "third", "first"]
+```
+
+The type carries the no-add-no-remove half of I6 and not the ordering half. The sentence
+named the one operation it did not prevent.
+
+**The property still holds**, which is why this is a doc fix and not a behaviour fix: the
+compression path addresses edits by `(message, block)` index and writes in place, and
+`i6_surviving_content_keeps_its_position` checks message count, role-by-index and
+block-type-by-index end to end through the relay, with a vacuity guard. Since roles
+alternate in the fixture, a swap fails it. What was wrong was the account of *why* — a
+reader was told the compiler had this covered.
+
+**I9's test did not vary observation.** `i9_telemetry_records_without_altering_the_request`
+sends the same request through two proxies and SHA-compares. But `AppState::new` always
+attaches metrics, so it compares observed against observed — determinism, which is I4.
+`observing_a_request_does_not_change_what_is_forwarded` runs `compress_dialect` with and
+without a metrics sink, which is the difference the invariant is about. Bytes identical,
+13 KB down to 470.
+
+Both of its guards are load-bearing, and both were earned. The first version used a fixture
+whose newest message is typed prose, so the block-kind gate declined it and 245 bytes came
+back as 245 — identical, and proving nothing. And with the "something was recorded" guard
+removed, a build where metrics record nothing **passes**; verified by mutation.
+
+**Would change if:** a `trybuild` dependency becomes worth it, at which point "this does not
+compile" could be asserted rather than described.

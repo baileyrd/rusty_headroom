@@ -6,6 +6,28 @@ the crate starts publishing releases.
 
 ---
 
+## Two invariant claims corrected: what the type prevents, and what observation means
+**2026-08-04** · both properties hold; both accounts of why were wrong
+
+- `Message::blocks_mut` claimed a slice meant blocks could not be "appended, removed, or
+  reordered", calling it *"invariant I6 expressed as a return type"* and naming `swap` as
+  something a `&mut Vec` could do and a slice could not. **`swap` is a slice method** — so
+  are `reverse`, `rotate_left` and `sort_by`. Measured, reordering a conversation through
+  nothing but the public accessor: `["first","second","third"]` → `["second","third","first"]`.
+- The type carries the no-add-no-remove half of I6, not the ordering half. The property
+  itself holds — edits are addressed by `(message, block)` index and written in place, and
+  `i6_surviving_content_keeps_its_position` checks it end to end — so this is a doc fix.
+  What was wrong was telling a reader the compiler had it covered.
+- `i9_telemetry_records_without_altering_the_request` sends one request through two proxies
+  and SHA-compares them — but `AppState::new` always attaches metrics, so it compares
+  observed against observed. That is determinism (I4), not "telemetry never alters".
+- New test runs `compress_dialect` **with and without** a metrics sink. Identical bytes,
+  13 KB down to 470. Both guards earned: the first version used a fixture the block-kind
+  gate declines, so 245 bytes came back as 245 and proved nothing — and with the
+  "something was recorded" guard removed, a build where metrics record nothing passes.
+
+---
+
 ## The file CCR store leaked three kinds of entry that purge could never collect
 **2026-08-04** · each one is what an unclean shutdown leaves behind
 

@@ -1514,4 +1514,57 @@ mod tests {
         assert_eq!(block["type"], "tool_result");
         assert_eq!(block["tool_use_id"], "t_new");
     }
+
+    #[test]
+    fn observing_a_request_does_not_change_what_is_forwarded() {
+        // Invariant I9, asked the way the invariant is worded: does *observation* alter
+        // the bytes? `invariants.rs` sends the same request through two proxies and
+        // SHA-compares them, but `AppState::new` always attaches metrics — so that
+        // compares observed against observed, which is determinism (I4) rather than this.
+        // Here the only difference between the two runs is whether anything is watching.
+        let records: Vec<String> = (0..200)
+            .map(|i| format!(r#"{{\"id\":{i},\"path\":\"src/m{i}.rs\",\"status\":\"ok\"}}"#))
+            .collect();
+        let source = format!(
+            r#"{{"model":"claude-opus-4","messages":[{{"role":"user","content":"list"}},{{"role":"assistant","content":"ok"}},{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"t1","content":"[{}]"}}]}}]}}"#,
+            records.join(",")
+        );
+
+        let unobserved = compress_dialect(
+            Dialect::Anthropic,
+            source.as_bytes(),
+            &compressors(),
+            true,
+            payg(),
+            Verbosity::Default,
+        );
+
+        let metrics = std::sync::Arc::new(crate::metrics::Metrics::new());
+        let observed = compress_dialect(
+            Dialect::Anthropic,
+            source.as_bytes(),
+            &compressors().with_metrics(metrics.clone()),
+            true,
+            payg(),
+            Verbosity::Default,
+        );
+
+        // Both guards are load-bearing. A passthrough is trivially identical, and a
+        // metrics sink that recorded nothing would make the comparison meaningless — the
+        // first version of this test used a fixture whose newest message is typed prose,
+        // so the block-kind gate declined it and 245 bytes came back as 245.
+        assert!(
+            unobserved.len() < source.len(),
+            "nothing was compressed, so identical bytes prove nothing"
+        );
+        let rendered = metrics.render();
+        assert!(
+            rendered
+                .lines()
+                .any(|line| line.contains("routing_total{") && !line.ends_with(" 0")),
+            "no routing reason was recorded, so nothing was observed:\n{rendered}"
+        );
+
+        assert_eq!(unobserved, observed, "observation changed the bytes");
+    }
 }
