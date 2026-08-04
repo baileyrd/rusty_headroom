@@ -159,18 +159,23 @@ they got wrong was the half that mattered:
 | `blocks_mut` returns a slice, so blocks cannot be "appended, removed, or reordered" — "invariant I6 expressed as a return type" | `push` and `remove` are `Vec` methods, genuinely out of reach | `swap` is a **slice** method, and the sentence named it. So are `reverse`, `rotate_left`, `sort_by` |
 | `Telemetry`: "every method returns `()` — observation cannot influence a decision (I9)" | the recording methods do | `cache_hit_rate` and `tokens_saved` return values, and `Compressors` holds the `Arc<Metrics>` |
 
-Neither property was actually broken. What was broken is that a reader had been told to
-stop checking — which is worse than saying nothing, because the next person inherits a
-guarantee nobody is testing and a sentence explaining why they need not.
+Neither property was actually broken, and both are tested. What was broken is the reason
+given: a reader told the compiler has this covered has no cause to keep the test alive, or
+to notice the day a new code path makes the claim matter. A guarantee resting on a test
+that nobody knows is load-bearing is one refactor from resting on nothing.
 
-Both were found by writing the code the doc said would not compile. It compiles in seconds
-and settles it:
+The first was found by writing the code the doc said would not compile — which takes
+seconds and settles it outright:
 
 ```rust
 c.messages_mut().swap(0, 2);   // ["first","second","third"] -> ["third","second","first"]
 ```
 
-So: if a doc says a type forbids something, write it. If it compiles, the type does not
+The second was duller: reading the method list. `grep 'pub fn'` was enough, and no
+compiler was involved — so the habit is not only "write the code" but "check the claim
+against the surface it is about", whichever is cheaper.
+
+So: if a doc says a type forbids something, try it. If it compiles, the type does not
 forbid it — say what does. Here that is `i6_surviving_content_keeps_its_position` and
 `observing_a_request_does_not_change_what_is_forwarded`, both of which vary the thing their
 invariant is about. The second had to be *written*: the existing I9 test sent one request
