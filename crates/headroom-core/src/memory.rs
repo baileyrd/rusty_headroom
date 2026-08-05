@@ -318,6 +318,30 @@ pub fn inject_block_for_query(
     Some(out)
 }
 
+/// Renders already-ranked content as an injectable block, most-relevant first.
+///
+/// For a caller whose candidates were ranked somewhere else — a linked semantic
+/// search fusing keyword and vector scores, say — and must reach the model in that
+/// order. [`MemoryStore::recall_for_query`] cannot be reused for this: it re-ranks by
+/// its own corroboration/BM25 rule, which would discard a fused order it knows
+/// nothing about. No corroboration marker, either — that concept belongs to
+/// [`MemoryStore`]'s repeated-observation model, which a one-shot search result set
+/// does not have.
+pub fn inject_block_ranked(contents: &[String]) -> Option<String> {
+    if contents.is_empty() {
+        return None;
+    }
+
+    let mut out = String::from("\n\n<memory>\n");
+    for content in contents {
+        out.push_str("- ");
+        out.push_str(content.trim());
+        out.push('\n');
+    }
+    out.push_str("</memory>");
+    Some(out)
+}
+
 impl MemoryStore {
     /// Builds a store from JSON-lines, skipping anything unreadable.
     ///
@@ -445,7 +469,50 @@ pub fn inject_append(
     query: Option<&str>,
 ) -> Option<(usize, usize, String)> {
     let block_text = inject_block_for_query(store, limit, query)?;
+    splice_into_tail(conversation, frozen, &block_text)
+}
 
+/// Same as [`inject_append`], for already-ranked content — see
+/// [`inject_block_ranked`] for why the two cannot share a ranking step.
+pub fn inject_append_ranked(
+    conversation: &Conversation,
+    contents: &[String],
+    frozen: usize,
+) -> Option<(usize, usize, String)> {
+    let block_text = inject_block_ranked(contents)?;
+    splice_into_tail(conversation, frozen, &block_text)
+}
+
+/// Appends `block_text` to the newest user message's last text block.
+///
+/// Returns the index of the message and block that changed, so a caller rewriting raw
+/// JSON knows exactly what to touch — the same contract as
+/// [`output_shaping::verbosity_append`], and for the same reason: this function must not
+/// need to know how the request was serialized.
+///
+/// Returns `None` when nothing should change: no user message, no text block to append
+/// to, or a block that already carries the memories.
+///
+/// # Why the newest user message and nothing else
+///
+/// The block *must* land in the live zone. The system prompt is the hot cache zone and
+/// is never modified (**I2**); an earlier message is part of the frozen prefix, and
+/// editing one would rewrite bytes a provider has already cached (**I3**). The newest
+/// user message is the one part of the request that was never sent before, so appending
+/// there costs nothing that was already paid for.
+///
+/// # Why re-injection is guarded against
+///
+/// An agent loop calls this every turn. Without the check a long session accumulates the
+/// same facts a dozen times over — wasted tokens, and a genuinely worse prompt, since
+/// repetition reads as emphasis.
+///
+/// [`output_shaping::verbosity_append`]: crate::output_shaping::verbosity_append
+fn splice_into_tail(
+    conversation: &Conversation,
+    frozen: usize,
+    block_text: &str,
+) -> Option<(usize, usize, String)> {
     let (message_index, message) = conversation
         .messages()
         .iter()
@@ -629,6 +696,58 @@ mod tests {
         assert_eq!(block, 0);
         assert!(content.starts_with("turn 2"), "the original text was lost");
         assert!(content.contains("<memory>"), "no memory block was appended");
+    }
+
+    // ---- ranked injection: a caller's own order must survive ----
+
+    #[test]
+    fn ranked_injection_preserves_the_caller_s_order_rather_than_re_ranking() {
+        // The whole reason this path exists rather than reusing `MemoryStore`: a fused
+        // ranking computed elsewhere (BM25 + semantic, say) must reach the model in that
+        // order. Every candidate here would tie under `MemoryStore`'s own corroboration
+        // rule (one source, one occurrence each), so re-ranking through it would fall
+        // back to content-hash order — silently discarding the fusion this path is for.
+        let contents = vec![
+            "third by content hash, first by relevance".to_string(),
+            "second".to_string(),
+            "first by content hash, last by relevance".to_string(),
+        ];
+
+        let block = inject_block_ranked(&contents).expect("nothing was injected");
+        let first = block.find("third by content hash").unwrap();
+        let second = block.find("second").unwrap();
+        let third = block.find("first by content hash").unwrap();
+        assert!(
+            first < second && second < third,
+            "ranked order was not preserved: {block}"
+        );
+        assert!(
+            !block.contains("(corroborated)"),
+            "a one-shot search result has no corroboration concept to report"
+        );
+    }
+
+    #[test]
+    fn ranked_injection_with_nothing_to_inject_yields_none() {
+        assert!(inject_block_ranked(&[]).is_none());
+        let conversation = conversation_of(3);
+        assert!(inject_append_ranked(&conversation, &[], 0).is_none());
+    }
+
+    #[test]
+    fn ranked_injection_respects_the_same_frozen_floor() {
+        // The splice logic is shared with `inject_append`; this only needs to confirm the
+        // ranked entry point actually calls it rather than bypassing the guard.
+        let conversation = conversation_of(3);
+        let contents = vec!["a fact".to_string()];
+
+        assert!(inject_append_ranked(&conversation, &contents, 3).is_none());
+
+        let (message, block, content) =
+            inject_append_ranked(&conversation, &contents, 2).expect("nothing was injected");
+        assert_eq!(message, 2);
+        assert_eq!(block, 0);
+        assert!(content.contains("<memory>\n- a fact\n</memory>"));
     }
 
     #[test]

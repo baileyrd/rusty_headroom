@@ -141,6 +141,8 @@ running proxy will not pick up — the authoritative list is `config::STARTUP_ON
 | `HEADROOM_SAVINGS` | yes | file for the durable savings ledger; without it savings reset on restart and `headroom savings` reads a `/metrics` scrape from stdin |
 | `HEADROOM_RECOMMENDATIONS` | yes | file from `headroom learn` |
 | `HEADROOM_MEMORY` / `HEADROOM_MEMORY_LIMIT` | yes | JSON-lines memories to inject into the live-zone tail — one object per line with a `content` string; 8 at a time by default, selected by relevance to the request |
+| `HEADROOM_LINKED_MEMORY_DB` | yes | path to a `rusty_remind_me` SQLite store to query in-process instead of `HEADROOM_MEMORY` (needs `--features linked-memory`); opened read-only, once |
+| `HEADROOM_LINKED_MEMORY_MODEL` / `HEADROOM_LINKED_MEMORY_TOKENIZER` | yes | local `.rten` model and matching tokenizer JSON for the linked backend's semantic tier; both required together, and the tier is keyword-only if either is unset or fails to load |
 | `HEADROOM_RATE_LIMIT` | yes | requests/minute before the proxy answers 429 (default 600); `0` is refused rather than honored |
 | `HEADROOM_COMPRESSION` | no | `0` forwards everything untouched |
 | `HEADROOM_MAX_BYTES` / `HEADROOM_MAX_LINES` | no | safety bounds on what the compressor will attempt; an unparseable value keeps the compiled default rather than removing the guard |
@@ -229,6 +231,21 @@ export drops straight in, and its entity-graph records are skipped for having no
 Records marked `sensitive`, and any carrying a non-null `superseded_by`, are never loaded:
 the first is flagged do-not-surface and the exporter does not filter on it, and the second
 is a fact its own source knows to be stale.
+
+`--features linked-memory` replaces that file-based path with a live, in-process query
+against a [`rusty_remind_me`](https://github.com/baileyrd/rusty_remind_me) SQLite store —
+FTS5 BM25 over a real index, RRF-fused with an optional local semantic tier, instead of
+scoring every memory in a `Vec` per request. `HEADROOM_LINKED_MEMORY_DB` takes precedence
+over `HEADROOM_MEMORY` when both are set. The database is opened read-only and the optional
+embedder (`HEADROOM_LINKED_MEMORY_MODEL` / `_TOKENIZER`) is a pinned local model file, not
+the daemon-probed backend `remind_me_core` offers on its own — see DECISIONS D44 for why an
+optional, probed embedding tier is an I4 hazard on a compression path and a pinned local one
+is not. A model that will not load, or whose vectors do not match what the database already
+stores, takes the semantic tier offline **for the process**, logged once at startup; the
+keyword tier over the linked database still answers. Off by default: `remind_me_core` adds
+`tokio` with `full` and `rusqlite` with `bundled` among its own dependencies, plus `rten` and
+`tokenizers` for the embedder — measured at roughly +74s (+76%) on a clean release build of
+`headroom-proxy` in this repository's CI environment.
 
 `crates/headroom-parity` runs in CI and asserts the claim above: each content type
 reaches the compressor named for it, through the same orchestrator call the proxy makes,

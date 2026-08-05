@@ -1582,3 +1582,113 @@ that pass every unit test they have and are called by nothing.
 
 **Not done here, deliberately.** A reload path (it needs its own I4 argument and does not
 come free with this), extraction from traffic, and the vector tier.
+
+## D44 — the linked memory backend, and why D43's three objections do not survive an in-process embedder
+
+**Closes #215.** D43 evaluated `rusty_remind_me`'s `remind_me_core` as a request-time
+backend and filed the question separately rather than deciding it, on three objections: the
+vitality filter reads the wall clock, the database is live and un-pins the memory set
+`HEADROOM_MEMORY`'s `STARTUP_ONLY` contract exists to pin, and the semantic tier that would
+justify the dependency dials out over HTTP to an optionally-present daemon. #215's own
+comment thread corrected the third: `remind_me_core`'s Ollama backend is loopback-only, not
+a cloud dependency — but loopback does not fix the objection, because it is availability,
+not locality, that breaks I4. `available_embedder` probes the daemon and caches the
+verdict; a failed probe silently degrades the ranking to keyword-only. The same request
+compresses differently depending on whether a ping answered, on loopback exactly as over
+the network.
+
+**The shape that survives is option 4 from that thread: a linked query, with an in-process,
+startup-pinned embedder standing in for the daemon-probed one.** Two design moves close all
+three of D43's objections at once, and both were already available elsewhere in this
+codebase before this issue:
+
+**The vitality clock: closed by argument, not discipline.** D43 flagged that
+`include_dormant: true, min_vitality: 0.0` avoids the wall-clock read only if the caller
+remembers to pass it — "I4 enforced by there being nothing to get wrong" was the standard
+being given up. `linked_memory::LinkedMemory::search` (`crates/headroom-proxy/src/linked_memory.rs`)
+hardcodes both on every call; there is exactly one call site and it cannot be reached with
+different values. `dormant_memories_still_surface` proves the predicate is actually never
+emitted, not merely that the code compiles as if it were: it manufactures a memory decayed
+far below `VITALITY_FLOOR`, confirms `remind_me_core`'s own default search excludes it (so
+the memory is genuinely dormant, not just old), then confirms `LinkedMemory::search` returns
+it anyway. Reverting the two literals to their defaults was confirmed to make this test fail
+— #71's failure class is a change that passes every test written before it existed.
+
+**The live database: pinned exactly like `HEADROOM_MEMORY` already is.** The connection is
+opened once, read-only, in `LinkedMemory::resolve` — called once from `AppState::new`
+(`crates/headroom-proxy/src/server.rs`) and stored in `Compressors`, the same place and the
+same lifetime `Config::memories()` already occupies for the JSONL path. `HEADROOM_LINKED_MEMORY_DB`
+is `STARTUP_ONLY`, alongside the two paths for the embedder. A write to the underlying file
+after the process starts is invisible to it for the rest of the process's life — the same
+staleness `HEADROOM_MEMORY` already accepts, not a new one.
+
+**The semantic tier: `headroom-embed`, not `remind_me_core::embedder`.** `crates/headroom-embed`
+(added by the PR that carried #215's exploratory work, before this decision) is `rten` +
+`tokenizers` behind an off-by-default `local` feature — a model file and a tokenizer file,
+both required, both loaded once by `LocalEmbedder::load`, which fails closed: an error
+result at startup rather than a degraded embedder that could later become undegraded. It
+deliberately does not depend on `remind_me_core` (SQLite and tokio, which an inference crate
+needs neither of), so `linked_memory::enabled::EmbedderAdapter` — the few lines mapping
+`headroom_embed::{EmbedRole, Identity}` onto `remind_me_core::embedder::{EmbedRole,
+EmbeddingIdentity}` — lives in `headroom-proxy`, the crate that already carries the
+`remind_me_core` dependency. If the model will not load, `LinkedMemory::resolve` logs and
+proceeds with `embedder: None`: the keyword tier over the linked database still answers, for
+the life of the process, never re-attempted per request.
+
+**A fourth hazard, not named in #215 or D43, surfaced during implementation and is closed
+the same way.** The vectors already stored under `HEADROOM_LINKED_MEMORY_DB` may have been
+written by a different embedder than the one just loaded — `remind_me_core`'s own Ollama
+backend, most likely, since that is the only backend its own tooling can index with today.
+Comparing a query vector from one embedding space against corpus vectors from another is not
+degraded retrieval; per `EmbeddingIdentity`'s own doc, it is "a number with no meaning."
+`remind_me_core::vectors::embedding_mismatch_info` — a read-only check the reference calls
+`_reconcile_embedding_meta`, already present for exactly this versioning problem — is
+consulted once at startup. A mismatch disables the semantic tier for the process the same
+way a load failure does; correcting it would mean writing (clearing the stale vectors), and
+the connection is deliberately read-only. `a_mismatched_embedder_identity_falls_back_to_keyword_only`
+covers both branches directly against `accept_if_compatible`, the function `resolve_embedder`
+delegates the policy to.
+
+**Ranking order is preserved, not re-derived.** `headroom_core::memory::MemoryStore` exists
+to rank by corroboration and, since D43, by BM25 against the query — neither of which
+applies to a search result that already carries a fused BM25-plus-semantic rank from
+`remind_me_core`'s own `rank_rrf`. Routing linked results back through `recall_for_query`
+would have re-ranked every candidate to a content-hash tiebreak (each result has exactly one
+source and one occurrence, so every tier above the tiebreak ties) — silently discarding the
+retrieval quality this decision exists to gain. `headroom_core::memory::inject_block_ranked`
+/ `inject_append_ranked` render an already-ordered list directly, sharing the live-zone
+splice logic (`splice_into_tail`) with the unranked path rather than duplicating it. The
+static `HEADROOM_MEMORY` path is untouched: it still renders through `inject_block_for_query`,
+corroboration marker included, since that is a property the static store can actually
+observe and a one-shot search result cannot honestly report. `Compressors::inject_memory_append`
+/ `inject_memory_block` (`crates/headroom-proxy/src/compression.rs`) select between the two
+render paths on whether a linked backend is configured, and
+`a_configured_linked_backend_is_used_instead_of_the_static_store` proves the call site
+actually reaches the linked path when both a static store and a linked backend are
+configured — confirmed to fail (silently serving the static store) with the branch removed.
+
+**Feature-gated, off by default, cost measured rather than estimated.** `linked-memory` on
+`headroom-proxy` adds `dep:remind_me_core` (`rusqlite` with `bundled` — SQLite compiled from
+source — and `tokio` with `full`, neither optional in `remind_me_core`'s own manifest),
+`dep:headroom-embed`, and `headroom-embed/local` (`rten` + `tokenizers`). A clean
+`cargo build -p headroom-proxy --release`: 97s with default features, 171s with
+`--features linked-memory` — +74s, +76%, on this repository's CI runners. `remind_me_core`
+is pinned by commit (`rev = "69014cc91aaa83605c8696dbe90c588efce28ef9"`, the tip of
+`baileyrd/rusty_remind_me#188`, "Let a caller supply the embedder to search_memories" — the
+PR that gave this crate a seam to inject `headroom-embed`'s embedder into at all, since
+`search_memories` previously reached for `remind_me_core::embedder::available_embedder()`
+itself). Re-pin to `main` once that PR merges, per this repository's "merge with merge
+commits" convention.
+
+**`remind_me_core::db::queries::search_memories_with_embedder` is not exercised by CI, and is
+not claimed to be.** `rten`'s forward pass ships unexercised in this environment for the same
+reason `headroom-embed` itself shipped that way: there is no `.rten` model file here and no
+way to fetch one. `LinkedMemory`'s own tests use a deterministic bag-of-characters double —
+the same pattern `rusty_remind_me`'s `injectable_embedder_test.rs` uses for the identical
+reason — to prove the wiring, not the model.
+
+**Not done here, deliberately.** A reload path for the linked database (the same argument
+D43 deferred for `HEADROOM_MEMORY`, and it does not come free with this either); merging the
+static and linked sources rather than one replacing the other, since nobody configures both
+meaning "use only one, some of the time"; and a CI job with a real `.rten` model, since none
+is available to check in.
