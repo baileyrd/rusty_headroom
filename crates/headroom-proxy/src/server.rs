@@ -60,20 +60,15 @@ pub struct AppState {
     ccr_store: Arc<dyn CcrStore>,
 }
 
-/// Requests permitted per [`RATE_WINDOW`].
-///
-/// Set well above any human or agent workload. This is a backstop against a retry loop
-/// somewhere upstream of the proxy relaying thousands of requests with the customer's
-/// credential attached — not a quota, and it should never be the thing a real user
-/// meets.
 /// How long an upstream reachability answer is reused before probing again.
 ///
 /// See [`AppState::upstream_reachable`].
 const UPSTREAM_PROBE_CACHE: Duration = Duration::from_secs(5);
 
-const RATE_CAPACITY: u32 = 600;
-
 /// The rate-limit window.
+///
+/// The capacity that goes with it is [`crate::config::rate_limit`], which reads it from
+/// configuration — the window stays fixed because "per minute" is what the number means.
 const RATE_WINDOW: Duration = Duration::from_secs(60);
 
 impl AppState {
@@ -133,7 +128,7 @@ impl AppState {
             ),
             metrics,
             upstream,
-            limiter: Arc::new(RateLimiter::new(RATE_CAPACITY, RATE_WINDOW)),
+            limiter: Arc::new(RateLimiter::new(crate::config::rate_limit(), RATE_WINDOW)),
             upstream_health: Arc::new(std::sync::Mutex::new(None)),
             aggregator,
             // Opened once, like the CCR store. Loading here rather than starting empty is

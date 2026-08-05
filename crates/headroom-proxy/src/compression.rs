@@ -81,7 +81,7 @@ impl Compressors {
     /// Builds the set, sharing one CCR store between every compressor.
     pub fn new(store: Arc<dyn CcrStore>) -> Self {
         Self {
-            orchestrator: Orchestrator::new(store),
+            orchestrator: Orchestrator::new(store).with_limits(crate::config::safety_limits()),
             memories: Default::default(),
             memory_limit: crate::config::DEFAULT_MEMORY_LIMIT,
             metrics: None,
@@ -95,7 +95,9 @@ impl Compressors {
         recommendations: headroom_core::telemetry::Recommendations,
     ) -> Self {
         Self {
-            orchestrator: Orchestrator::new(store).with_recommendations(recommendations),
+            orchestrator: Orchestrator::new(store)
+                .with_limits(crate::config::safety_limits())
+                .with_recommendations(recommendations),
             memories: Default::default(),
             memory_limit: crate::config::DEFAULT_MEMORY_LIMIT,
             metrics: None,

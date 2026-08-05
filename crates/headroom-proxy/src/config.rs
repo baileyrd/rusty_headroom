@@ -44,6 +44,12 @@ pub mod vars {
     pub const REDIS_URL: &str = "HEADROOM_REDIS_URL";
     /// File for the durable savings ledger. Unset means savings are not persisted.
     pub const SAVINGS: &str = "HEADROOM_SAVINGS";
+    /// Largest payload the compressor will attempt, in bytes.
+    pub const MAX_BYTES: &str = "HEADROOM_MAX_BYTES";
+    /// Most lines the compressor will attempt.
+    pub const MAX_LINES: &str = "HEADROOM_MAX_LINES";
+    /// Requests per minute before the proxy answers 429.
+    pub const RATE_LIMIT: &str = "HEADROOM_RATE_LIMIT";
 }
 
 /// Every `HEADROOM_*` name that some code in this crate actually reads.
@@ -61,7 +67,7 @@ pub mod vars {
 /// Kept beside [`vars`] so a new setting is wired to both in the same edit, rather than
 /// readable from `Config` but unreachable through the admin endpoint, or reachable
 /// through the admin endpoint but read by nothing.
-pub const KNOWN: [&str; 12] = [
+pub const KNOWN: [&str; 15] = [
     vars::HOST,
     vars::PORT,
     vars::UPSTREAM,
@@ -74,6 +80,9 @@ pub const KNOWN: [&str; 12] = [
     vars::CCR_DIR,
     vars::REDIS_URL,
     vars::SAVINGS,
+    vars::MAX_BYTES,
+    vars::MAX_LINES,
+    vars::RATE_LIMIT,
 ];
 
 /// Settings that are read once at startup and ignored thereafter.
@@ -93,7 +102,7 @@ pub const KNOWN: [&str; 12] = [
 ///
 /// Kept beside the variables themselves so a new startup-only setting is added here in the
 /// same edit rather than discovered later by someone whose change silently did nothing.
-pub const STARTUP_ONLY: [&str; 9] = [
+pub const STARTUP_ONLY: [&str; 10] = [
     vars::HOST,
     vars::PORT,
     // The one that mattered most, and the one this list was missing.
@@ -116,7 +125,57 @@ pub const STARTUP_ONLY: [&str; 9] = [
     // Opened once at startup, like the CCR store beside it. A new path landing in the
     // override map would leave every subsequent write going to the old file.
     vars::SAVINGS,
+    // The limiter is constructed once with its capacity baked in, the same as the relay
+    // client beside it. A new value landing in the override map would change nothing
+    // while the endpoint reported success.
+    vars::RATE_LIMIT,
 ];
+
+/// The safety limits the compressor runs under.
+///
+/// # Why these are configurable and a *deadline* is not
+///
+/// The reference exposes `HEADROOM_COMPRESSION_DEADLINE_MS` — a wall-clock budget after
+/// which compression stops. That cannot exist here: invariant I4 requires the same bytes
+/// to compress identically on every run, and a time-based cutoff makes the output depend
+/// on how busy the machine was. The same request would compress differently on a loaded
+/// host than on an idle one, and `tests/properties.rs` asserts otherwise.
+///
+/// These bound the same risk **deterministically**. A payload that would cost unbounded
+/// time is refused on a property of the payload — its size, depth, line length, line
+/// count — rather than on how long it has already taken. Same protection, and the answer
+/// never depends on the clock.
+pub fn safety_limits() -> headroom_core::pipeline::safety::Limits {
+    let mut limits = headroom_core::pipeline::safety::Limits::default();
+
+    if let Some(bytes) = setting(vars::MAX_BYTES).and_then(|v| v.trim().parse().ok()) {
+        limits.max_bytes = bytes;
+    }
+    if let Some(lines) = setting(vars::MAX_LINES).and_then(|v| v.trim().parse().ok()) {
+        limits.max_lines = lines;
+    }
+
+    limits
+}
+
+/// The default request-per-minute backstop.
+///
+/// Set well above any human or agent workload. This is a backstop against a retry loop
+/// somewhere upstream of the proxy relaying thousands of requests with the customer's
+/// credential attached — not a quota, and it should never be the thing a real user meets.
+pub const DEFAULT_RATE_LIMIT: u32 = 600;
+
+/// Requests per minute before the proxy answers 429.
+///
+/// A backstop against a loop, not a quota. Zero is rejected rather than honored: a limiter
+/// that refuses everything is indistinguishable from an outage, and somebody typing `0`
+/// meaning "no limit" would take their own proxy down.
+pub fn rate_limit() -> u32 {
+    setting(vars::RATE_LIMIT)
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|capacity| *capacity > 0)
+        .unwrap_or(DEFAULT_RATE_LIMIT)
+}
 
 /// Where the durable savings ledger lives, if one is configured.
 ///
@@ -636,7 +695,108 @@ fn connect_redis(_url: &str) -> Result<std::sync::Arc<dyn headroom_core::ccr::Cc
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
+
+    /// Takes the shared settings lock from a synchronous test.
+    ///
+    /// `blocking_lock` rather than `lock().await` because these are `#[test]`, not
+    /// `#[tokio::test]` — and it is the *same* lock `admin`'s tests take, which is the
+    /// point: two separate mutexes would not have serialized these against each other,
+    /// and the override map is process-wide.
+    fn env_lock() -> tokio::sync::MutexGuard<'static, ()> {
+        crate::settings_test_lock().blocking_lock()
+    }
+
+    // ---- limits an operator can now turn (#196) ----
+
+    #[test]
+    fn safety_limits_default_to_the_compiled_values() {
+        // Unset means unchanged. Every deployment that has not set these behaves exactly
+        // as it did before they existed.
+        let _guard = env_lock();
+        clear_overrides();
+        std::env::remove_var(vars::MAX_BYTES);
+        std::env::remove_var(vars::MAX_LINES);
+
+        assert_eq!(
+            safety_limits(),
+            headroom_core::pipeline::safety::Limits::default()
+        );
+    }
+
+    #[test]
+    fn safety_limits_honor_an_override() {
+        let _guard = env_lock();
+        clear_overrides();
+        set_overrides(std::collections::BTreeMap::from([
+            (vars::MAX_BYTES.to_owned(), "4096".to_owned()),
+            (vars::MAX_LINES.to_owned(), "500".to_owned()),
+        ]));
+
+        let limits = safety_limits();
+        assert_eq!(limits.max_bytes, 4096);
+        assert_eq!(limits.max_lines, 500);
+        // Untouched fields keep their compiled values rather than resetting.
+        assert_eq!(
+            limits.max_depth,
+            headroom_core::pipeline::safety::Limits::default().max_depth
+        );
+
+        clear_overrides();
+    }
+
+    #[test]
+    fn an_unparseable_limit_keeps_the_default_rather_than_disabling_the_guard() {
+        // A typo must not silently remove a safety bound. Falling back to the compiled
+        // value is the safe direction; parsing `"lots"` as zero would turn the guard off.
+        let _guard = env_lock();
+        clear_overrides();
+        set_overrides(std::collections::BTreeMap::from([(
+            vars::MAX_BYTES.to_owned(),
+            "lots".to_owned(),
+        )]));
+
+        assert_eq!(
+            safety_limits().max_bytes,
+            headroom_core::pipeline::safety::Limits::default().max_bytes
+        );
+
+        clear_overrides();
+    }
+
+    #[test]
+    fn a_zero_rate_limit_is_refused_rather_than_honored() {
+        // A limiter with zero capacity refuses every request, which is indistinguishable
+        // from an outage. Somebody typing `0` meaning "no limit" would take their own
+        // proxy down with a setting that read as permissive.
+        let _guard = env_lock();
+        clear_overrides();
+        set_overrides(std::collections::BTreeMap::from([(
+            vars::RATE_LIMIT.to_owned(),
+            "0".to_owned(),
+        )]));
+
+        assert_eq!(rate_limit(), DEFAULT_RATE_LIMIT);
+
+        set_overrides(std::collections::BTreeMap::from([(
+            vars::RATE_LIMIT.to_owned(),
+            "50".to_owned(),
+        )]));
+        assert_eq!(rate_limit(), 50);
+
+        clear_overrides();
+    }
+
+    #[test]
+    fn every_new_setting_is_reachable_through_the_admin_endpoint() {
+        // `KNOWN` is what `set_overrides` accepts. A setting readable from `Config` and
+        // absent here is one an operator cannot retune, and the endpoint would report
+        // their attempt as ignored.
+        for name in [vars::MAX_BYTES, vars::MAX_LINES, vars::RATE_LIMIT] {
+            assert!(KNOWN.contains(&name), "{name} is unreachable from /admin");
+        }
+    }
 
     #[test]
     fn defaults_are_conservative() {

@@ -6,6 +6,38 @@ the crate starts publishing releases.
 
 ---
 
+## Three hardcoded limits an operator could not turn
+**2026-08-05** · closes #196 · and one the reference exposes that this project cannot
+
+- The reference carries ~318 `HEADROOM_*` settings against our 12. Most of that gap is
+  knobs on features deliberately out of scope, so #196 was filed as an audit for the real
+  subset: **behavior we already implement, hardcoded, that an operator has a legitimate
+  reason to change.** The audit found three.
+- `HEADROOM_MAX_BYTES` and `HEADROOM_MAX_LINES` expose `safety::Limits`, which
+  `Orchestrator::with_limits` already accepted and nothing ever called with anything but
+  the default. `HEADROOM_RATE_LIMIT` replaces the hardcoded 600/min backstop.
+- **The compression deadline is the interesting finding, and it is a refusal.** The
+  reference exposes `HEADROOM_COMPRESSION_DEADLINE_MS` — stop compressing after N
+  milliseconds. That cannot exist here: I4 requires the same bytes to compress identically
+  on every run, and a wall-clock cutoff makes the output depend on how loaded the machine
+  was. The same request would compress differently on a busy host than an idle one, and
+  `tests/properties.rs` asserts otherwise. The safety limits bound the same risk
+  **deterministically** — on properties of the payload rather than on elapsed time — which
+  is why exposing them is the right version of this change. Recorded at the accessor so
+  nobody adds the deadline later on the reasoning that the reference has one.
+- Two safe-direction decisions, both tested. An **unparseable limit keeps the compiled
+  default** rather than disabling the guard — parsing `"lots"` as zero would silently
+  remove a safety bound. And a **zero rate limit is refused**, because a limiter with zero
+  capacity refuses everything, which is indistinguishable from an outage; somebody typing
+  `0` meaning "no limit" would take their own proxy down with a setting that reads as
+  permissive.
+- Found while fixing this: `config`'s and `admin`'s tests each held their **own** mutex
+  over the process-wide override map, so they serialized against themselves and raced each
+  other. `admin`'s upstream-divergence test began reading a `config` test's overrides.
+  Consolidated to one lock in `crate::settings_test_lock`.
+- Caught by the reachability audit, again: check 9 failed because `HEADROOM_RATE_LIMIT` is
+  startup-only and was missing from the README's configuration table.
+
 ## Six more agents audited, three of them wrappable
 **2026-08-05** · closes #195 · the audit mattered more than the additions
 

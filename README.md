@@ -115,6 +115,12 @@ end in `crates/headroom-proxy/tests/invariants.rs`; I5 and I10 are gated by
 | I9 | Telemetry observes and never alters |
 | I10 | The auth mode gates what compression is permitted |
 
+**On I4 and timeouts:** the reference exposes a wall-clock compression deadline. That
+cannot exist here — I4 requires the same bytes to compress identically on every run, and a
+time-based cutoff makes output depend on how loaded the machine was. `HEADROOM_MAX_BYTES`
+and `HEADROOM_MAX_LINES` bound the same risk deterministically, on properties of the
+payload rather than on elapsed time.
+
 **I10 in practice:** a direct API key gets full compression. An OAuth token gets
 lossless transforms only, because a modification could exceed the granted scope. A
 subscription session token gets nothing — reflowing bytes makes traffic distinguishable
@@ -135,7 +141,9 @@ running proxy will not pick up — the authoritative list is `config::STARTUP_ON
 | `HEADROOM_SAVINGS` | yes | file for the durable savings ledger; without it savings reset on restart and `headroom savings` reads a `/metrics` scrape from stdin |
 | `HEADROOM_RECOMMENDATIONS` | yes | file from `headroom learn` |
 | `HEADROOM_MEMORY` / `HEADROOM_MEMORY_LIMIT` | yes | JSON-lines memories to inject into the live-zone tail — one object per line with a `content` string; 8 at a time by default |
+| `HEADROOM_RATE_LIMIT` | yes | requests/minute before the proxy answers 429 (default 600); `0` is refused rather than honored |
 | `HEADROOM_COMPRESSION` | no | `0` forwards everything untouched |
+| `HEADROOM_MAX_BYTES` / `HEADROOM_MAX_LINES` | no | safety bounds on what the compressor will attempt; an unparseable value keeps the compiled default rather than removing the guard |
 | `HEADROOM_STABILIZE` | no | `1` normalizes tools and places cache breakpoints — **off by default**, it modifies the zone I2 protects |
 | `HEADROOM_OUTPUT_SHAPER` | no | `terse` or `full`; off unless set |
 | `HEADROOM_LOG` | yes | log filter (default `warn`; logs go to stderr); not settable via `/admin/runtime-env` at all — it isn't part of `config::vars`, and `main` reads it once through `tracing_subscriber::EnvFilter` before the global subscriber is installed |
