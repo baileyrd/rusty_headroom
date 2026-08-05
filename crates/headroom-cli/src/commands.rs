@@ -456,6 +456,112 @@ pub fn env(proxy: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
 
+    // ---- `headroom audit` (#188) ----
+
+    fn export_of(entries: &[(&str, u64, u64, u64, u64)]) -> String {
+        let observations: serde_json::Map<String, serde_json::Value> = entries
+            .iter()
+            .map(|(key, samples, declines, before, after)| {
+                (
+                    (*key).to_owned(),
+                    serde_json::json!({
+                        "samples": samples,
+                        "declines": declines,
+                        "tokens_before": before,
+                        "tokens_after": after,
+                    }),
+                )
+            })
+            .collect();
+        serde_json::json!({ "observations": observations }).to_string()
+    }
+
+    #[test]
+    fn the_audit_ranks_by_declines_rather_than_by_rate() {
+        // The lever is volume. A shape declining 900 times matters more than one
+        // declining twice, whatever their rates — ranking by rate would put a
+        // twice-seen shape at the top and send the operator after noise.
+        let export = export_of(&[
+            ("payg-claude-aaa", 1000, 900, 1000, 400),
+            ("payg-claude-bbb", 10, 10, 0, 0),
+        ]);
+
+        let report = super::audit_report(&export, 5);
+        let first = report.find("payg-claude-aaa").expect("aaa reported");
+        let second = report.find("payg-claude-bbb").expect("bbb reported");
+
+        assert!(
+            first < second,
+            "ranked by rate rather than by volume: {report}"
+        );
+    }
+
+    #[test]
+    fn a_shape_that_never_compressed_says_so_rather_than_reporting_zero() {
+        // "never compressed" and "compressed and saved nothing" are different findings:
+        // one says do not try, the other says it sometimes works. Reporting 0% for both
+        // would collapse them.
+        let report = super::audit_report(&export_of(&[("payg-claude-aaa", 20, 20, 0, 0)]), 5);
+        assert!(report.contains("never compressed"), "report was: {report}");
+
+        let sometimes =
+            super::audit_report(&export_of(&[("payg-claude-bbb", 20, 10, 1000, 300)]), 5);
+        assert!(
+            sometimes.contains("70% when it does"),
+            "report was: {sometimes}"
+        );
+    }
+
+    #[test]
+    fn shapes_below_the_sample_floor_are_not_reported() {
+        // A shape seen twice says nothing, and ranking it beside one seen ten thousand
+        // times invites acting on noise.
+        let export = export_of(&[("payg-claude-aaa", 2, 2, 0, 0)]);
+
+        assert!(super::audit_report(&export, 5).contains("no shape declined"));
+        assert!(super::audit_report(&export, 1).contains("payg-claude-aaa"));
+    }
+
+    #[test]
+    fn a_shape_that_always_compresses_is_not_an_opportunity() {
+        // The report is about what is going wrong. A shape with no declines is working.
+        let report = super::audit_report(&export_of(&[("payg-claude-aaa", 100, 0, 1000, 200)]), 5);
+        assert!(report.contains("no shape declined"), "report was: {report}");
+    }
+
+    #[test]
+    fn the_audit_never_reports_content() {
+        // The privacy constraint the issue was filed with. The aggregate carries
+        // structure hashes and counts; an audit tool that surfaced prompt content would
+        // be a larger liability than the reporting gap it closed.
+        let report = super::audit_report(&export_of(&[("payg-claude-aaa", 20, 20, 0, 0)]), 5);
+        assert!(
+            report.contains("content is never recorded"),
+            "report was: {report}"
+        );
+    }
+
+    #[test]
+    fn an_empty_or_unreadable_aggregate_explains_itself() {
+        // An empty report reads as a broken command.
+        assert!(super::audit_report(r#"{"observations":{}}"#, 5).contains("nothing observed"));
+        assert!(super::audit_report("not json", 5).contains("could not read"));
+        assert!(super::audit_report(r#"{"wrong":"shape"}"#, 5).contains("could not read"));
+    }
+
+    #[test]
+    fn the_audit_is_deterministic() {
+        // Ties break on the key, so two runs over the same aggregate agree.
+        let export = export_of(&[
+            ("payg-claude-bbb", 100, 50, 0, 0),
+            ("payg-claude-aaa", 100, 50, 0, 0),
+        ]);
+        let first = super::audit_report(&export, 5);
+        for _ in 0..5 {
+            assert_eq!(first, super::audit_report(&export, 5));
+        }
+    }
+
     // ---- the durable ledger (#187) ----
 
     #[test]
@@ -1473,6 +1579,126 @@ pub fn unwrap(agent: &str, settings: Option<&std::path::Path>) -> anyhow::Result
 /// # Errors
 ///
 /// Returns an error if the metrics text cannot be read from stdin.
+/// Reports what real traffic declined to compress.
+///
+/// # How this differs from `learn`
+///
+/// `learn` mines a corpus somebody hands it and publishes recommendations. This reads
+/// what *actually flowed* through a proxy and ranks the shapes that keep declining. The
+/// operator's question is "my traffic is not shrinking — where is it going wrong", and
+/// neither `/metrics` nor `headroom_stats` answers it: they carry totals, not per-shape
+/// outcomes.
+///
+/// # What it deliberately cannot tell you
+///
+/// The aggregate carries structure *hashes*, never content. So this reports that a shape
+/// declines and how often, not what was in it. That is the privacy constraint #188 was
+/// filed with, and it is why the report names a hash rather than a payload: an audit tool
+/// that persisted prompt content would be a far larger liability than the reporting gap it
+/// closed.
+pub fn audit(from: Option<&std::path::Path>, min_samples: u64) -> anyhow::Result<()> {
+    let raw = match from {
+        Some(path) => {
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?
+        }
+        None => read_stdin()?,
+    };
+
+    let report = audit_report(&raw, min_samples);
+
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{report}")?;
+    stdout.flush()?;
+    Ok(())
+}
+
+/// Builds the audit report from a TOIN export.
+///
+/// Separated from I/O so the ranking is testable without a running proxy.
+fn audit_report(export: &str, min_samples: u64) -> String {
+    // Read through `serde_json::Value` rather than a derive, so this crate does not take
+    // a direct `serde` dependency for one struct it parses once.
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(export) else {
+        return "could not read the aggregate; expected the JSON from GET /v1/telemetry/export"
+            .to_owned();
+    };
+
+    let Some(observations) = parsed.get("observations").and_then(|v| v.as_object()) else {
+        return "could not read the aggregate; expected the JSON from GET /v1/telemetry/export"
+            .to_owned();
+    };
+
+    if observations.is_empty() {
+        // Said plainly. An empty report reads as a broken command.
+        return "nothing observed yet — the proxy records shapes as it compresses them".to_owned();
+    }
+
+    /// One shape's counts, read positionally so a missing field reads as zero rather than
+    /// failing the whole report.
+    fn counts(entry: &serde_json::Value) -> (u64, u64, u64, u64) {
+        let read = |name: &str| {
+            entry
+                .get(name)
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+        };
+        (
+            read("samples"),
+            read("declines"),
+            read("tokens_before"),
+            read("tokens_after"),
+        )
+    }
+
+    let mut rows: Vec<(String, (u64, u64, u64, u64))> = observations
+        .iter()
+        .map(|(key, entry)| (key.clone(), counts(entry)))
+        .filter(|(_, (samples, declines, _, _))| *samples >= min_samples && *declines > 0)
+        .collect();
+
+    if rows.is_empty() {
+        return format!(
+            "no shape declined more than it compressed, at or above {min_samples} samples"
+        );
+    }
+
+    // Ranked by declines, because that is the lever: a shape declining ten thousand times
+    // is worth more attention than one declining twice, whatever their rates. Ties break
+    // on the key so two runs of the same data agree.
+    rows.sort_by(
+        |(left_key, (_, left_declines, _, _)), (right_key, (_, right_declines, _, _))| {
+            right_declines
+                .cmp(left_declines)
+                .then(left_key.cmp(right_key))
+        },
+    );
+
+    let mut out = String::from("shapes declining to compress, most-declined first\n");
+    out.push_str("(key is auth_mode-model_family-structure_hash; content is never recorded)\n\n");
+
+    for (key, (samples, declines, before, after)) in &rows {
+        let rate = (*declines as f64 / *samples as f64) * 100.0;
+        // "never compressed" is distinct from "compressed and saved nothing" — the
+        // difference between "not worth trying" and "sometimes works", and an operator
+        // acts differently on each. `tokens_before == 0` means the shape has never been
+        // through a compressor at all, which is not the same as a zero ratio.
+        let ratio = if *before > 0 {
+            format!(
+                "{:.0}% when it does",
+                (1.0 - (*after as f64 / *before as f64)) * 100.0
+            )
+        } else {
+            "never compressed".to_owned()
+        };
+
+        out.push_str(&format!(
+            "{key}\n  {samples} samples, {declines} declined ({rate:.0}%), {ratio}\n"
+        ));
+    }
+
+    out
+}
+
 /// Finds — and optionally restores — agent settings a killed `wrap` left behind.
 ///
 /// # Why this is dry by default

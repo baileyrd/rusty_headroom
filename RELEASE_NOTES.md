@@ -6,6 +6,30 @@ the crate starts publishing releases.
 
 ---
 
+## Nothing reported why real traffic declined to compress
+**2026-08-05** · closes #188 · `learn` mines a corpus; this reads what actually flowed
+
+- An operator whose traffic is not shrinking had no way to ask why. `headroom learn` mines
+  a corpus somebody hands it. `/metrics` and `headroom_stats` carry totals, and
+  `headroom_routing_total{reason=...}` says how many blocks declined but not *which
+  shapes* — so "which of my tool results are being forwarded whole" had no answer.
+- Added `headroom audit`, reading the TOIN aggregate #185 started collecting
+  (`curl localhost:8787/v1/telemetry/export | headroom audit`, or `--from FILE`). It ranks
+  the shapes that keep declining, with the measured ratio for the times they did compress.
+- **Ranked by declines, not by rate.** The lever is volume: a shape declining 900 times
+  deserves attention a shape declining twice does not, whatever their percentages. Ranking
+  by rate would put a twice-seen shape at the top and send the operator after noise.
+  `--min-samples` defaults to 5 for the same reason.
+- **"Never compressed" is reported distinctly from "compressed and saved nothing."** One
+  says do not try this shape; the other says it sometimes works. Collapsing both to 0%
+  would merge two findings an operator acts on differently.
+- **It reports no content, and cannot.** The aggregate carries structure hashes and counts
+  — never payloads — which is the privacy constraint the issue was filed with. An audit
+  tool that persisted prompt content would be a larger liability than the reporting gap it
+  closed. The report says so in its own header, and a test asserts it.
+- Parsed through `serde_json::Value` rather than a derive, so `headroom-cli` does not take
+  a direct `serde` dependency for one struct it reads once.
+
 ## A killed `wrap` left agent settings with no path back
 **2026-08-05** · closes #190 · `unwrap` is byte-exact, when it gets to run
 
