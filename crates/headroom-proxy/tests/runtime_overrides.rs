@@ -50,9 +50,20 @@ fn a_value_that_changes(name: &str) -> &'static str {
         config::vars::OUTPUT_SHAPER => "terse",
         config::vars::STABILIZE => "1",
         config::vars::MEMORY_LIMIT => "3",
-        _ => "/proc/self/mem/not-a-directory",
+        _ => &UNUSABLE_DIRECTORY,
     }
 }
+
+/// A directory path that can never become usable on any platform: the parent
+/// component is an ordinary file, not a directory, so any attempt to create or open
+/// something inside it fails rather than silently succeeding. `/proc/self/mem` served
+/// this purpose on Linux only — on Windows it is an ordinary, creatable path, which
+/// defeated the point of using an "unusable" `HEADROOM_CCR_DIR` here.
+static UNUSABLE_DIRECTORY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    let blocker = std::env::temp_dir().join("headroom-runtime-overrides-unusable-blocker");
+    std::fs::write(&blocker, b"blocker").expect("could not create the blocker file");
+    blocker.join("not-a-directory").display().to_string()
+});
 
 #[test]
 fn an_empty_value_returns_any_setting_to_its_default() {

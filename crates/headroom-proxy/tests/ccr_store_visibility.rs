@@ -53,6 +53,22 @@ fn store_for(dir: &str) -> CcrStoreKind {
     Config::ccr_store_with_kind().1
 }
 
+/// A directory path that can never become usable on any platform: the parent
+/// component is an ordinary file, not a directory, so any attempt to create or open
+/// something inside it fails with `ENOTDIR` (or the Windows equivalent) rather than
+/// silently succeeding.
+///
+/// `/proc/self/mem/not-a-directory` served this purpose on Linux only. On Windows it
+/// is an ordinary, creatable path under the current drive root, so
+/// `FileCcrStore::open`'s directory-creation logic happily built real nested
+/// directories there — which both left junk at `C:\proc` and made the "did not
+/// actually fall back" assertion below fail, since the store was not unusable at all.
+fn unusable_directory() -> String {
+    let blocker = std::env::temp_dir().join("headroom-ccr-visibility-unusable-blocker");
+    std::fs::write(&blocker, b"blocker").expect("could not create the blocker file");
+    blocker.join("not-a-directory").display().to_string()
+}
+
 /// Whether a value written to the configured store is still there after a rebuild.
 fn survives_a_rebuild() -> bool {
     let hash = ContentHash::of(b"probe payload");
@@ -69,7 +85,7 @@ fn survives_a_rebuild() -> bool {
 fn a_ccr_directory_that_cannot_be_opened_is_reported_rather_than_only_logged() {
     let _guard = exclusive();
     // A path that is not a directory and cannot become one.
-    let unusable = store_for("/proc/self/mem/not-a-directory");
+    let unusable = store_for(&unusable_directory());
 
     // The behaviour first, so what follows is about a real fallback rather than about a
     // label. Without this the assertions below would pass against a store that worked.
