@@ -140,7 +140,7 @@ running proxy will not pick up — the authoritative list is `config::STARTUP_ON
 | `HEADROOM_REDIS_URL` | yes | shared store for multi-worker deployments (needs `--features redis`) |
 | `HEADROOM_SAVINGS` | yes | file for the durable savings ledger; without it savings reset on restart and `headroom savings` reads a `/metrics` scrape from stdin |
 | `HEADROOM_RECOMMENDATIONS` | yes | file from `headroom learn` |
-| `HEADROOM_MEMORY` / `HEADROOM_MEMORY_LIMIT` | yes | JSON-lines memories to inject into the live-zone tail — one object per line with a `content` string; 8 at a time by default |
+| `HEADROOM_MEMORY` / `HEADROOM_MEMORY_LIMIT` | yes | JSON-lines memories to inject into the live-zone tail — one object per line with a `content` string; 8 at a time by default, selected by relevance to the request |
 | `HEADROOM_RATE_LIMIT` | yes | requests/minute before the proxy answers 429 (default 600); `0` is refused rather than honored |
 | `HEADROOM_COMPRESSION` | no | `0` forwards everything untouched |
 | `HEADROOM_MAX_BYTES` / `HEADROOM_MAX_LINES` | no | safety bounds on what the compressor will attempt; an unparseable value keeps the compiled default rather than removing the guard |
@@ -215,6 +215,20 @@ take it back; `{}` changes nothing. It used to replace, which meant an operator 
 compression off during an incident had it silently turned back on by their next retune of
 anything else — with `applied: ["HEADROOM_STABILIZE"]`, or whatever they had just set, as
 the only report.
+
+`HEADROOM_MEMORY` is startup-only, and the injected set is now chosen by relevance to the
+request rather than by corroboration alone: the same query the compressors already use to
+decide which records to keep also decides which memories are worth the budget. Scoring is
+BM25 — deterministic and in-process, which a call out to a memory service could not be
+without making the same request compress differently depending on when it arrived (I4).
+A request carrying no usable query gets exactly the block it got before, so nothing about
+the queryless case changed. The reader takes `source` and `category` as fallbacks for
+`agent` and `context`, which is what a `remind_me` /
+[`rusty_remind_me`](https://github.com/baileyrd/rusty_remind_me) export carries — that
+export drops straight in, and its entity-graph records are skipped for having no `content`.
+Records marked `sensitive`, and any carrying a non-null `superseded_by`, are never loaded:
+the first is flagged do-not-surface and the exporter does not filter on it, and the second
+is a fact its own source knows to be stale.
 
 `crates/headroom-parity` runs in CI and asserts the claim above: each content type
 reaches the compressor named for it, through the same orchestrator call the proxy makes,

@@ -258,7 +258,7 @@ pub fn compress_dialect<'a>(
 
     let frozen = dialect.frozen_floor(body, faithful.message_count());
 
-    let Some((conversation, shapes)) = read_conversation(&faithful, dialect) else {
+    let Some((conversation, shapes, query)) = read_conversation(&faithful, dialect) else {
         return Cow::Borrowed(body);
     };
 
@@ -350,6 +350,7 @@ pub fn compress_dialect<'a>(
             &compressors.memories,
             compressors.memory_limit,
             frozen,
+            query.as_deref(),
         ) {
             match edits
                 .iter_mut()
@@ -359,9 +360,10 @@ pub fn compress_dialect<'a>(
                 // to the original, or the compression would be discarded.
                 Some((_, _, content)) => {
                     if !content.contains("<memory>") {
-                        if let Some(memories) = headroom_core::memory::inject_block(
+                        if let Some(memories) = headroom_core::memory::inject_block_for_query(
                             &compressors.memories,
                             compressors.memory_limit,
+                            query.as_deref(),
                         ) {
                             content.push_str(&memories);
                         }
@@ -471,10 +473,15 @@ enum ContentShape {
 /// The conversation is only ever used to *decide*. Edits are applied back to the raw
 /// JSON, so a message this view models imperfectly is still forwarded byte-exact
 /// unless something explicitly changed it.
+///
+/// Returns the conversation query alongside, rather than only stamping it onto blocks.
+/// Memory selection needs it too, and it is a property of the whole conversation — a
+/// second derivation at the injection site would be the same walk over the same
+/// messages, free to drift from this one.
 fn read_conversation(
     faithful: &FaithfulBody<'_>,
     dialect: Dialect,
-) -> Option<(Conversation, Vec<ContentShape>)> {
+) -> Option<(Conversation, Vec<ContentShape>, Option<String>)> {
     let mut messages = Vec::with_capacity(faithful.message_count());
     let mut shapes = Vec::with_capacity(faithful.message_count());
 
@@ -546,7 +553,7 @@ fn read_conversation(
         shapes.push(shape);
     }
 
-    Some((Conversation::new(None, Vec::new(), messages), shapes))
+    Some((Conversation::new(None, Vec::new(), messages), shapes, query))
 }
 
 /// The block kind for a Responses-API item, if it is one this code compresses.
@@ -1285,6 +1292,56 @@ mod tests {
         assert!(
             newest.contains("uses tokens"),
             "the memory block is missing: {newest}"
+        );
+    }
+
+    #[test]
+    fn the_conversation_query_decides_which_memory_is_injected() {
+        // Reachability, not scoring. `recall_for_query` is unit-tested in
+        // `headroom_core::memory`; what this asserts is that the query derived from the
+        // request actually arrives there. Selection that nothing calls is the failure
+        // class #71 was filed for, and it passes every unit test it has.
+        //
+        // The two decoys carry two distinct sources each and the relevant memory carries
+        // one, so the corroboration ranking prefers a decoy outright. With `limit` at 1,
+        // an unwired query cannot produce the asserted answer by luck.
+        use headroom_core::memory::{MemoryStore, Provenance};
+
+        let mut store = MemoryStore::new();
+        for source in ["reader", "planner"] {
+            store.remember(
+                "Tests live under crates/*/tests.",
+                Provenance::new(source, "s1"),
+            );
+            store.remember(
+                "Releases are cut from main on Fridays.",
+                Provenance::new(source, "s1"),
+            );
+        }
+        store.remember(
+            "This function normalizes whitespace before hashing.",
+            Provenance::new("reader", "s1"),
+        );
+
+        let source = prose_request(); // newest user text: "what does this function do?"
+        let out = compress_dialect(
+            Dialect::Anthropic,
+            source.as_bytes(),
+            &compressors().with_memories(store, 1),
+            true,
+            payg(),
+            Verbosity::Default,
+        );
+        let parsed: Value = serde_json::from_slice(&out).unwrap();
+        let newest = parsed["messages"][2]["content"].as_str().unwrap();
+
+        assert!(
+            newest.contains("normalizes whitespace"),
+            "the query did not reach memory selection: {newest}"
+        );
+        assert!(
+            !newest.contains("Fridays"),
+            "an unrelated memory spent the budget: {newest}"
         );
     }
 
