@@ -56,6 +56,13 @@ Anything lossy is stored first under a content hash, and the compressed block ca
 `<<ccr:HASH>>` marker the model can redeem through the `headroom_retrieve` MCP tool. So
 compression is a bet that the detail will not be needed, and a bet that can be unwound.
 
+Retrieval checks the hash and nothing else — no session, credential, or requester
+identity. That is what lets the MCP server redeem a marker the proxy wrote in a
+different process; it also means `HEADROOM_CCR_DIR`/`HEADROOM_REDIS_URL` must point at
+a store scoped to one customer's traffic. A store (especially a shared Redis instance)
+serving more than one customer's proxy lets any of them retrieve any other's compressed
+originals by presenting a hash they obtained or guessed.
+
 ## The invariants
 
 These are acceptance criteria on every change, not aspirations. Eight are gated end to
