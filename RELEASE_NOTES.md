@@ -6,6 +6,36 @@ the crate starts publishing releases.
 
 ---
 
+## The proxy 404'd every path it did not explicitly route
+**2026-08-05** · closes #175 · the route list was treated as the boundary
+
+- `headroom wrap` and `headroom env` point an agent's **base URL** at this proxy, which
+  sends it that agent's entire API surface. The router registered eleven routes and
+  stopped, so axum answered 404 for everything else — `GET /v1/models` (called on
+  startup by several clients), `POST /v1/messages/count_tokens`, `/v1/messages/batches`,
+  `/v1/embeddings`, and every provider endpoint shipped after those routes were written.
+  From the client's side that is indistinguishable from the provider having removed the
+  endpoint. Round 2 of the gap analysis found it: the reference proxy ends its router
+  with a catch-all and compresses Anthropic traffic *inside* that forwarder, which is why
+  its Rust crate needs no `/v1/messages` route at all.
+- Added a `fallback` handler that forwards any unmatched request upstream with its method,
+  path and query intact, and streams the provider's answer back. It parses nothing and
+  re-serializes nothing, so the bytes that arrive are the bytes that leave (I1) — a
+  regression test sends a body with non-ASCII text, a float that survives only under
+  `arbitrary_precision`, and out-of-order keys, and asserts byte equality at the provider.
+  Header hygiene (X3) and the rate limiter (X20) still apply; a WebSocket upgrade arriving
+  on an unregistered path is relayed as a socket rather than forwarded as HTTP.
+- Two tests asserted the old behavior and were rewritten rather than deleted.
+  `an_unknown_route_is_404_rather_than_a_panic` was pointed at `router()`, which resolves
+  its upstream from the environment — so it had been making a real outbound call and
+  reading the *provider's* 404 as if it were the proxy's. It now runs against a
+  path-agnostic fake and asserts the 404 body arrives from upstream.
+  `an_unregistered_path_is_still_a_404` existed to stop
+  `every_declared_route_is_actually_reachable` from passing vacuously; with a catch-all it
+  could no longer tell a registered route from the fallback, so it now discriminates on the
+  observable that still separates them — a dialect route compresses, the fallback forwards
+  untouched — and fails if `/v1/messages` ever starts being served by the catch-all.
+
 ## Round 2 gap analysis — reassessed against the reference's source
 **2026-08-05** · the docs described a smaller system than the one that ships
 

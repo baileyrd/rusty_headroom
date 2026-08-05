@@ -33,6 +33,20 @@ proxy, and `headroom unwrap` undoes it.
 
 ## What it does to a request
 
+It is a transparent reverse proxy first. You point an agent's **base URL** here, so this
+receives that agent's whole API surface — not just the endpoints it knows how to compress.
+Anything it does not recognize is forwarded upstream untouched and the provider's answer
+is streamed back: `GET /v1/models`, `POST /v1/messages/count_tokens`, the batch API, and
+whatever ships next. A path this proxy has no handler for is not a path that does not
+exist, and answering 404 for one would be a claim only the provider is in a position to
+make.
+
+The compressing routes are fast paths, not the boundary of what is served. Forwarding
+carries no compression by design: identifying a live zone requires knowing a dialect's
+message shape, and by construction those paths are the ones where it is unknown. Header
+hygiene, the rate limit and the request log still apply — they are properties of relaying,
+not of compressing.
+
 Compression touches the **live zone** only — the newest turn, the part the provider has
 not cached. Everything before it is forwarded as the exact bytes that arrived.
 

@@ -200,7 +200,107 @@ pub fn router_with(state: AppState) -> Router {
         // drops that client to whatever fallback it has, or breaks it.
         .route("/v1/realtime", get(crate::websocket::relay_socket))
         .route("/ws", get(crate::websocket::relay_socket))
+        // Everything else is forwarded untouched. The routes above are fast paths for
+        // the dialects this proxy compresses; they are not the boundary of what it
+        // serves. See [`forward_any`].
+        .fallback(forward_any)
         .with_state(state)
+}
+
+/// Forwards any request no route above claimed, untouched.
+///
+/// # Why a proxy needs this
+///
+/// `headroom wrap` and `headroom env` point an agent's **base URL** here. That sends us
+/// the agent's entire API surface, not the handful of endpoints this proxy knows how to
+/// compress. Without a fallback every other path answered 404 — from the client's side
+/// indistinguishable from the provider having removed the endpoint:
+///
+/// - `GET /v1/models` — SDK model listing, called on startup by several clients
+/// - `POST /v1/messages/count_tokens` — Anthropic token counting
+/// - `POST /v1/messages/batches` — the batch API
+/// - `POST /v1/embeddings` — OpenAI embeddings
+/// - every provider endpoint shipped after this was written
+///
+/// That last one is the point. Enumerating the missing paths would fix today's list and
+/// re-break on the next provider release; forwarding by default cannot go stale.
+///
+/// # Nothing here compresses
+///
+/// This path parses no bodies and re-serializes nothing — the bytes that arrive are the
+/// bytes that leave (I1). Compression requires knowing a dialect's message shape well
+/// enough to identify the live zone, and by construction this handler runs only for
+/// paths where that is unknown. Guessing would be how a request arrives at the provider
+/// subtly altered.
+///
+/// Header hygiene, the rate limiter and the request log still apply: they are properties
+/// of relaying at all, not of compressing.
+async fn forward_any(
+    State(state): State<AppState>,
+    method: Method,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+    PeerAddr(peer): PeerAddr,
+    MaybeUpgrade(upgrade): MaybeUpgrade,
+    body: Bytes,
+) -> Result<Response, RelayError> {
+    // A WebSocket upgrade on an unregistered path is still a WebSocket. Forwarding it as
+    // HTTP would relay the upgrade *handshake* as an ordinary request and hand the client
+    // the provider's rejection of it, which reads as "the provider does not support
+    // sockets" rather than "this proxy dropped the upgrade".
+    //
+    // The header is checked as well as the extractor because they can disagree: a client
+    // that sends `Upgrade: websocket` without `Sec-WebSocket-Key` gets `None` from axum.
+    // Falling through to HTTP then lets the upstream state the real problem, which is
+    // more useful than an error invented here.
+    if is_websocket_upgrade(&headers) {
+        if let Some(upgrade) = upgrade {
+            return Ok(crate::websocket::relay_socket(upgrade, State(state)).await);
+        }
+    }
+
+    let policy = CompressionPolicy::for_mode(classify_auth_mode(&headers));
+    let header_policy = HeaderPolicy {
+        forwarded_headers: policy.forwarded_headers,
+        strip_accept_encoding: policy.may_strip_accept_encoding,
+    };
+    let mut upstream_headers = sanitize(&headers, header_policy);
+    if let Some(peer) = peer {
+        apply_forwarded(&mut upstream_headers, header_policy, &peer.ip().to_string());
+    }
+
+    // Counted as passthrough because that is what it is. Leaving it uncounted would make
+    // the savings ratio a statement about a subset of traffic while reading as a
+    // statement about all of it.
+    state.metrics().record_passthrough();
+
+    // `uri.path()` is the fallback rather than a route literal: there is no route here,
+    // and the query has to survive (`/v1/models?limit=5` is not `/v1/models`).
+    let target = forwarded_target(&uri, uri.path());
+    relay(&state, method, &target, &upstream_headers, body.to_vec()).await
+}
+
+/// Whether the request headers ask for a WebSocket upgrade.
+///
+/// Both header values are case-insensitive per RFC 6455, and `Connection` is a
+/// comma-separated list — `Connection: keep-alive, Upgrade` is valid and common enough
+/// that an equality check against `"upgrade"` misses real clients.
+fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
+    let upgrade_to_websocket = headers
+        .get(axum::http::header::UPGRADE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("websocket"));
+
+    let connection_upgrades = headers
+        .get(axum::http::header::CONNECTION)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
+        });
+
+    upgrade_to_websocket && connection_upgrades
 }
 
 /// `GET /metrics` — Prometheus text exposition.
@@ -239,6 +339,31 @@ where
                 .extensions
                 .get::<ConnectInfo<SocketAddr>>()
                 .map(|info| info.0),
+        ))
+    }
+}
+
+/// A WebSocket upgrade, when the request is one.
+///
+/// Axum 0.8 implements `FromRequestParts` for `WebSocketUpgrade` but not
+/// `OptionalFromRequestParts`, so `Option<WebSocketUpgrade>` does not compile as an
+/// extractor and the bare one rejects every non-upgrade request outright — which on a
+/// *fallback* would reject all ordinary traffic. Same shape as [`PeerAddr`], and for the
+/// same reason: the handler needs to know whether the extraction succeeded, not to be
+/// short-circuited when it did not.
+pub struct MaybeUpgrade(pub Option<axum::extract::ws::WebSocketUpgrade>);
+
+impl<S> FromRequestParts<S> for MaybeUpgrade
+where
+    S: Send + Sync,
+{
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self(
+            axum::extract::ws::WebSocketUpgrade::from_request_parts(parts, state)
+                .await
+                .ok(),
         ))
     }
 }
@@ -1639,22 +1764,203 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unregistered_path_is_still_a_404() {
-        // Otherwise the test above passes because everything is reachable, including
-        // things that should not be.
-        let base = permissive_upstream().await;
+    async fn a_registered_route_is_not_merely_served_by_the_fallback() {
+        // The test above used to be kept honest by a companion asserting that an
+        // unregistered path 404s — so "reached a handler" meant something. Once every
+        // path reaches the fallback (#175) that companion could no longer tell the two
+        // apart, and the reachability test would have passed on a router whose dialect
+        // routes had all been deleted.
+        //
+        // The discriminator that survives: a dialect route *compresses*, and the
+        // fallback forwards bytes untouched by construction. Same bulky body down both
+        // paths, and what the provider receives has to differ.
+        let (base, captured) = fake_any_path().await;
+        let body = compressible_request();
+
+        post_to(
+            router_with(AppState::new(&base)),
+            "/v1/messages",
+            body.clone(),
+        )
+        .await;
+        let (_, through_route) = captured.lock().unwrap().clone().expect("route forwarded");
+
+        post_to(
+            router_with(AppState::new(&base)),
+            "/v1/definitely-not-a-route",
+            body.clone(),
+        )
+        .await;
+        let (_, through_fallback) = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("fallback forwarded");
+
+        assert!(
+            through_route.len() < body.len(),
+            "/v1/messages did not compress — it may now be served by the fallback"
+        );
+        assert_eq!(
+            through_fallback,
+            body.as_bytes(),
+            "the fallback altered a body it must forward untouched"
+        );
+    }
+
+    // ---- the catch-all fallback (#175) ----
+
+    #[tokio::test]
+    async fn an_unregistered_path_is_forwarded_rather_than_404() {
+        // The proxy is pointed at by an agent's *base URL*, so it receives that agent's
+        // whole API surface. Answering 404 for `/v1/models` is indistinguishable, from
+        // the client's side, from the provider having removed the endpoint.
+        let (base, captured) = fake_any_path().await;
+
         let response = router_with(AppState::new(&base))
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/v1/definitely-not-a-route")
+                    .uri("/v1/models")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response.status(), StatusCode::OK);
+        let (seen, _) = captured.lock().unwrap().clone().expect("forwarded nothing");
+        assert_eq!(seen, "/v1/models");
+    }
+
+    #[tokio::test]
+    async fn the_fallback_preserves_the_method_and_the_query() {
+        // A relayed request that arrives with the wrong verb, or with the query dropped,
+        // is not the request the client sent — the defect `forwarded_target` was written
+        // for, on the one path that has no route literal to fall back to.
+        for method in ["GET", "POST", "DELETE", "PATCH"] {
+            let (base, captured) = fake_any_path().await;
+
+            router_with(AppState::new(&base))
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri("/v1/models?limit=5&after=abc")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            let (seen, _) = captured
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| panic!("{method} forwarded nothing"));
+            assert_eq!(
+                seen, "/v1/models?limit=5&after=abc",
+                "{method} lost part of its target"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_fallback_forwards_the_body_byte_for_byte() {
+        // Invariant I1 on the path that has the least excuse to break it: this handler
+        // parses nothing, so anything other than byte equality means bytes were touched
+        // by a layer that had no business touching them.
+        let (base, captured) = fake_any_path().await;
+        let body = r#"{"unicode":"héllo 🎉","precision":1.0000000000000002,"order":{"b":1,"a":2}}"#;
+
+        post_to(
+            router_with(AppState::new(&base)),
+            "/v1/some/unknown/endpoint",
+            body.to_owned(),
+        )
+        .await;
+
+        let (_, seen) = captured.lock().unwrap().clone().expect("forwarded nothing");
+        assert_eq!(seen, body.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn the_fallback_still_strips_the_proxys_own_headers() {
+        // Header hygiene (X3) is a property of relaying, not of compressing. A header
+        // that leaks upstream here leaks just as far as one leaking from `/v1/messages`.
+        let (base, headers) = fake_any_path_capturing_headers().await;
+
+        router_with(AppState::new(&base))
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/models")
+                    .header("x-headroom-debug", "1")
+                    .header("x-api-key", "sk-ant-api03-x")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let seen = headers.lock().unwrap().clone().expect("forwarded nothing");
+        assert!(
+            !seen.contains_key("x-headroom-debug"),
+            "a proxy-internal header reached the provider"
+        );
+        assert!(
+            seen.contains_key("x-api-key"),
+            "the client's credential did not survive the hop"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_fallback_is_rate_limited_like_every_other_relay() {
+        // Otherwise the 600/min backstop guards the routes and leaves an unmetered hole
+        // next to them, which is the same as not having it.
+        let base = permissive_upstream().await;
+        let state = AppState::with_rate_limit(&base, 1, Duration::from_secs(60));
+
+        let first = router_with(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let second = router_with(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[test]
+    fn a_websocket_upgrade_is_recognized_in_a_header_list() {
+        // `Connection: keep-alive, Upgrade` is valid and common. An equality check
+        // against "upgrade" misses it and drops the client to HTTP forwarding, where the
+        // upgrade handshake is relayed as an ordinary request.
+        let mut headers = HeaderMap::new();
+        headers.insert("upgrade", "WebSocket".parse().unwrap());
+        headers.insert("connection", "keep-alive, Upgrade".parse().unwrap());
+        assert!(is_websocket_upgrade(&headers));
+
+        let mut plain = HeaderMap::new();
+        plain.insert("connection", "keep-alive".parse().unwrap());
+        assert!(!is_websocket_upgrade(&plain));
+
+        // `Upgrade` without `Connection: upgrade` is not a valid upgrade request.
+        let mut half = HeaderMap::new();
+        half.insert("upgrade", "websocket".parse().unwrap());
+        assert!(!is_websocket_upgrade(&half));
     }
 
     // ---- operational guards ----
@@ -1742,13 +2048,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unknown_route_is_404_rather_than_a_panic() {
-        let response = router()
+    async fn a_404_on_an_unknown_route_now_comes_from_the_provider() {
+        // This asserted a locally-produced 404 until #175 gave the router a catch-all.
+        // The status can still be 404 — but it has to be the *provider's*, because only
+        // the provider knows which of its endpoints exist. The distinction is the whole
+        // point of the change: a path we do not recognize is not a path that does not
+        // exist.
+        //
+        // Written against a fake provider rather than `router()`, which resolves its
+        // upstream from the environment and would put a real network call in a unit
+        // test — the reason the earlier version of this test read 404 for a while
+        // without anyone noticing what was answering it.
+        //
+        // The fake answers *any* path. `fake_provider` serves only `POST /v1/messages`,
+        // so it would have produced its own empty-bodied 404 here and the assertion
+        // below would have been checking axum's rejection rather than a provider reply.
+        let app = Router::new().fallback(|| async {
+            (
+                StatusCode::NOT_FOUND,
+                [("content-type", "application/json")],
+                r#"{"type":"error"}"#,
+            )
+        });
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let base = format!("http://{addr}");
+
+        let response = router_with(AppState::new(&base))
             .oneshot(Request::builder().uri("/nope").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            bytes,
+            r#"{"type":"error"}"#.as_bytes(),
+            "the client got a locally-invented 404 rather than the provider's answer"
+        );
     }
 
     #[test]
