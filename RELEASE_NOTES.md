@@ -6,6 +6,19 @@ the crate starts publishing releases.
 
 ---
 
+## The reachability audit conflated `STARTUP_ONLY` with every known setting
+**2026-08-04** · found while re-reading the audit's own README check
+
+- Check 9 (every startup-only setting marked "needs restart" in the README) grepped
+  `vars::NAME,` lines across the whole of `config.rs` and took the first twenty.
+  `config.rs` declares two such lists — `STARTUP_ONLY` and `KNOWN` (every recognized
+  setting, live or not) — in the identical shape, so the unscoped grep merged them and
+  would have flagged every live, hot-reloadable setting in `KNOWN` as one the README
+  should mark `restart: yes`, the moment `KNOWN` grew past twenty entries or
+  `STARTUP_ONLY` shrank.
+- Fixed by scoping the grep to the `STARTUP_ONLY` array specifically, via an `awk` range
+  bounded by the array's own `pub const STARTUP_ONLY` opener and `];` closer.
+
 ## The relay dropped every query string
 **2026-08-04** · found while checking whether `claude -p` could drive the live measurement
 
