@@ -6,6 +6,24 @@ the crate starts publishing releases.
 
 ---
 
+## `/admin/runtime-env` accepted a typo or an unwired setting as applied
+**2026-08-04** · the endpoint's only validation was the `HEADROOM_` prefix
+
+- `set_overrides` accepted and stored any `HEADROOM_`-prefixed name, checked
+  against nothing. A typo (`HEADROOM_COMPRESION`, missing an `s`) or a documented
+  variable this crate has never wired to `Config` (`HEADROOM_LOG`, read once by
+  `main` via `tracing_subscriber::EnvFilter`, before the global subscriber installs
+  — never by this module) was stored in the override map and echoed back in
+  `applied` with an empty `needs_restart`. An operator retuning a proxy during an
+  incident would believe the change had taken.
+- Added `config::KNOWN`, every `HEADROOM_*` name this crate actually reads, kept
+  beside `vars` so a new setting is wired to both in the same edit.
+  `set_overrides` now filters against it instead of the bare prefix. Regression test
+  sends a typo, `HEADROOM_LOG`, and a real setting in one call: only the real one
+  comes back in `applied`.
+- README.md's settings table corrected to match: `HEADROOM_LOG` marked `yes` under
+  "needs restart", since it isn't reachable through the admin endpoint at all.
+
 <<<<<<< HEAD
 ## The CCR store's expired entries were never purged
 **2026-08-04** · `purge_expired` existed; nothing in either binary called it
@@ -100,7 +118,6 @@ the crate starts publishing releases.
 - Fixed: a type with no `.` is now its own stem with an empty suffix, so a bare `error`
   is classified correctly.
 
-<<<<<<< HEAD
 ## An SSE frame with no terminator could buffer without bound
 **2026-08-04** · the streaming twin of `observe.rs`'s existing body cap
 
@@ -113,7 +130,7 @@ the crate starts publishing releases.
   holding and marks the parser overflowed; the relayed bytes are unaffected — only
   this reply's telemetry is given up on — and `observe.rs` now logs it once rather
   than on every subsequent poll.
-=======
+
 ## Every OpenAI model was token-counted with gpt-4o's vocabulary
 **2026-08-04** · the direction invariant I5 exists to forbid
 
@@ -167,7 +184,6 @@ the crate starts publishing releases.
   key (shared with the `Authorization` branch via `looks_like_pay_as_you_go_key`). Two
   regression tests cover both directions: a garbage key alone classifies as
   Subscription, and a garbage key alongside a restricted `Authorization` does too.
->>>>>>> origin/main
 
 ## The reachability audit conflated `STARTUP_ONLY` with every known setting
 **2026-08-04** · found while re-reading the audit's own README check
