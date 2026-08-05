@@ -40,7 +40,23 @@ impl Event {
 #[derive(Debug, Default)]
 pub struct SseParser {
     buffer: Vec<u8>,
+    /// Set once a frame has exceeded [`MAX_FRAME_BYTES`] without a terminator ever
+    /// showing up. See [`SseParser::is_overflowed`].
+    overflowed: bool,
 }
+
+/// Most bytes `feed` will buffer for a single frame before giving up on it.
+///
+/// # Why bounded
+///
+/// `feed` only drains the buffer once it sees a frame terminator (`\n\n` or
+/// `\r\n\r\n`), and nothing capped that until now — a hung or misbehaving upstream, a
+/// compromised/MITM'd one, or a provider bug streaming one unbounded `data:` field
+/// would grow the buffer for the entire lifetime of the connection. `observe.rs`
+/// guards the equivalent risk on the non-streaming path with `MAX_BUFFERED_BODY`,
+/// sized for a whole buffered reply; a single SSE frame realistically never needs
+/// anywhere near that much, so this bound is a quarter of it.
+const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
 impl SseParser {
     /// Creates an empty parser.
@@ -53,6 +69,13 @@ impl SseParser {
     /// Bytes that do not complete a frame are retained for the next call, so a caller
     /// may pass chunks split at any byte offset — including inside a multibyte
     /// character or midway through a field name.
+    ///
+    /// Once a frame's bytes would exceed [`MAX_FRAME_BYTES`] without a terminator ever
+    /// showing up, this stops accumulating, drops what it was holding, and marks the
+    /// parser [`overflowed`](Self::is_overflowed) — every later call is then a no-op,
+    /// since a frame this large was never going to parse into anything useful anyway.
+    /// This mirrors `observe.rs` giving up on a body past `MAX_BUFFERED_BODY`: past
+    /// the cap, only the telemetry for this frame is given up on, not the process.
     ///
     /// # Example
     ///
@@ -67,6 +90,10 @@ impl SseParser {
     /// assert_eq!(events[0].data, r#"{"a":1}"#);
     /// ```
     pub fn feed(&mut self, chunk: &[u8]) -> Vec<Event> {
+        if self.overflowed {
+            return Vec::new();
+        }
+
         self.buffer.extend_from_slice(chunk);
 
         let mut events = Vec::new();
@@ -76,6 +103,17 @@ impl SseParser {
                 events.push(event);
             }
         }
+
+        if self.buffer.len() > MAX_FRAME_BYTES {
+            // No terminator has shown up despite this many bytes: either the
+            // upstream hung mid-frame, or it is sending a field far larger than any
+            // real SSE event needs. Holding on and hoping is exactly how the buffer
+            // grows without bound, so give up on this frame instead.
+            self.overflowed = true;
+            self.buffer.clear();
+            self.buffer.shrink_to_fit();
+        }
+
         events
     }
 
@@ -95,6 +133,19 @@ impl SseParser {
     /// Whether any bytes are held pending more input.
     pub fn is_empty(&self) -> bool {
         self.buffer.is_empty()
+    }
+
+    /// Whether `feed` has given up on the current frame for exceeding
+    /// [`MAX_FRAME_BYTES`] without ever finding a terminator.
+    ///
+    /// # Why this exists
+    ///
+    /// A parser that just quietly stopped emitting events would look, to a caller,
+    /// identical to a slow stream that simply hasn't finished a frame yet. A caller
+    /// that wants to fail a hung or hostile connection rather than sit on it forever
+    /// needs a way to tell the two apart.
+    pub fn is_overflowed(&self) -> bool {
+        self.overflowed
     }
 
     /// Finds the next complete frame, returning it and how many bytes it consumed.
@@ -347,5 +398,71 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[1].name.as_deref(), Some("b"));
         assert!(parser.is_empty());
+    }
+
+    #[test]
+    fn a_frame_that_never_terminates_stops_growing_instead_of_buffering_forever() {
+        // Regression: `feed` used to `extend_from_slice` into `buffer` with no upper
+        // bound, draining only once a terminator showed up. A hung/misbehaving
+        // upstream, a compromised/MITM'd one, or a provider bug streaming one
+        // unbounded `data:` field never sends that terminator, so the buffer would
+        // grow for the entire lifetime of the stream. This is the frame-level twin
+        // of observe.rs's `MAX_BUFFERED_BODY` guard on the non-streaming path.
+        let mut parser = SseParser::new();
+
+        // Well past the bound in one chunk, still with no terminator in sight.
+        let chunk = vec![b'a'; MAX_FRAME_BYTES + 1];
+        assert!(parser.feed(&chunk).is_empty());
+
+        assert!(parser.is_overflowed());
+        // The oversized, unterminated frame is dropped rather than retained forever.
+        assert!(parser.is_empty());
+
+        // Once overflowed, further input — even a well-formed frame — is a no-op
+        // rather than a fresh attempt to buffer; the parser has given up.
+        assert!(parser.feed(b"data: too late\n\n").is_empty());
+        assert!(parser.is_empty());
+    }
+
+    #[test]
+    fn a_frame_approaching_the_bound_across_many_small_chunks_still_overflows_cleanly() {
+        // Same failure, but arriving the way a real hung stream would: many small
+        // chunks rather than one giant one, none of them ever completing a frame.
+        let mut parser = SseParser::new();
+        let chunk = [b'x'; 4096];
+        let mut total = 0;
+        let mut overflowed = false;
+
+        while total <= MAX_FRAME_BYTES {
+            let events = parser.feed(&chunk);
+            assert!(events.is_empty());
+            total += chunk.len();
+            if parser.is_overflowed() {
+                overflowed = true;
+                break;
+            }
+        }
+
+        assert!(
+            overflowed,
+            "parser never gave up despite exceeding the bound"
+        );
+        assert!(parser.is_empty());
+    }
+
+    #[test]
+    fn a_frame_right_at_the_bound_with_a_terminator_still_parses() {
+        // The cap must not misfire on a legitimately large-but-terminated frame —
+        // only an unterminated one should ever trip it.
+        let padding = "x".repeat(MAX_FRAME_BYTES - 16);
+        let payload = format!("data: {padding}\n\n");
+        assert!(payload.len() <= MAX_FRAME_BYTES);
+
+        let mut parser = SseParser::new();
+        let events = parser.feed(payload.as_bytes());
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, padding);
+        assert!(!parser.is_overflowed());
     }
 }

@@ -6,6 +6,20 @@ the crate starts publishing releases.
 
 ---
 
+<<<<<<< HEAD
+## An SSE frame with no terminator could buffer without bound
+**2026-08-04** · the streaming twin of `observe.rs`'s existing body cap
+
+- `SseParser::feed` accumulated into `buffer` until it saw `\n\n`/`\r\n\r\n`, with no
+  upper bound. A hung or misbehaving upstream, a compromised/MITM'd one, or a provider
+  bug streaming one unbounded `data:` field never sends that terminator, so the buffer
+  grew for the entire lifetime of the connection.
+- Added `MAX_FRAME_BYTES` (1 MiB, a quarter of `observe.rs`'s `MAX_BUFFERED_BODY`, sized
+  for one buffered reply rather than one frame). Past the cap, `feed` drops what it was
+  holding and marks the parser overflowed; the relayed bytes are unaffected — only
+  this reply's telemetry is given up on — and `observe.rs` now logs it once rather
+  than on every subsequent poll.
+=======
 ## Every OpenAI model was token-counted with gpt-4o's vocabulary
 **2026-08-04** · the direction invariant I5 exists to forbid
 
@@ -59,6 +73,7 @@ the crate starts publishing releases.
   key (shared with the `Authorization` branch via `looks_like_pay_as_you_go_key`). Two
   regression tests cover both directions: a garbage key alone classifies as
   Subscription, and a garbage key alongside a restricted `Authorization` does too.
+>>>>>>> origin/main
 
 ## The reachability audit conflated `STARTUP_ONLY` with every known setting
 **2026-08-04** · found while re-reading the audit's own README check
