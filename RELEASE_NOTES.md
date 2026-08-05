@@ -6,6 +6,21 @@ the crate starts publishing releases.
 
 ---
 
+## A throwaway `x-api-key` header could override a restricted `Authorization`
+**2026-08-04** · the direction that matters: escalating to the most permissive policy
+
+- `classify_auth_mode` granted PayAsYouGo on `headers.contains_key("x-api-key")` alone
+  — presence, not shape. Every other branch in the function validates the token's
+  shape before trusting it; this one didn't. A request authenticating with a
+  legitimately restricted `Authorization` (a subscription session token, OAuth) could
+  add a throwaway, garbage `x-api-key` to the same request and flip the proxy's local
+  classification to the most permissive `CompressionPolicy`, before the provider ever
+  saw the bogus key to reject it.
+- Fixed: `x-api-key` now only grants PayAsYouGo when its value has the shape of a real
+  key (shared with the `Authorization` branch via `looks_like_pay_as_you_go_key`). Two
+  regression tests cover both directions: a garbage key alone classifies as
+  Subscription, and a garbage key alongside a restricted `Authorization` does too.
+
 ## The reachability audit conflated `STARTUP_ONLY` with every known setting
 **2026-08-04** · found while re-reading the audit's own README check
 
