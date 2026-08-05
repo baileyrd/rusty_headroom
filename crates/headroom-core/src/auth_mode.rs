@@ -57,9 +57,19 @@ impl AuthMode {
 /// assert_eq!(classify_auth_mode(&HeaderMap::new()), AuthMode::Subscription);
 /// ```
 pub fn classify_auth_mode(headers: &HeaderMap) -> AuthMode {
-    // A direct API key is the unambiguous pay-as-you-go signal.
-    if headers.contains_key("x-api-key") {
-        return AuthMode::PayAsYouGo;
+    // A direct API key is the unambiguous pay-as-you-go signal — but only once its
+    // value actually has that shape. A presence-only check let a request carrying a
+    // legitimately-restricted `Authorization` (e.g. a subscription session token) add
+    // a throwaway `x-api-key` header to the same request and override the
+    // classification to the most permissive mode; every other branch in this function
+    // validates shape specifically to avoid that, and this one now does too.
+    if let Some(value) = headers
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+    {
+        if looks_like_pay_as_you_go_key(value.trim()) {
+            return AuthMode::PayAsYouGo;
+        }
     }
 
     let Some(authorization) = headers
@@ -82,13 +92,21 @@ pub fn classify_auth_mode(headers: &HeaderMap) -> AuthMode {
     // matters.
     if token.starts_with("sk-ant-oat") || token.starts_with("ya29.") {
         AuthMode::OAuth
-    } else if token.starts_with("sk-ant-api") || token.starts_with("sk-") {
+    } else if looks_like_pay_as_you_go_key(token) {
         AuthMode::PayAsYouGo
     } else {
         // A bearer token this code does not recognize. Could be anything, including a
         // subscription session token, so it gets the restricted treatment.
         AuthMode::Subscription
     }
+}
+
+/// Whether `token` has the shape of a direct API key rather than an opaque session
+/// or OAuth token. Shared by the `x-api-key` and `Authorization` branches so a key
+/// only counts as pay-as-you-go where its *value* says so, never merely its header's
+/// presence.
+fn looks_like_pay_as_you_go_key(token: &str) -> bool {
+    token.starts_with("sk-ant-api") || token.starts_with("sk-")
 }
 
 /// What compression is permitted for a given auth mode.
@@ -250,6 +268,47 @@ mod tests {
         let oauth = classify_auth_mode(&headers(&[("authorization", "Bearer sk-ant-oat01-xxx")]));
         assert_eq!(oauth, AuthMode::OAuth);
         assert!(!CompressionPolicy::for_mode(oauth).lossy_transforms);
+    }
+
+    #[test]
+    fn a_garbage_x_api_key_value_does_not_grant_pay_as_you_go() {
+        // Regression. `contains_key` alone made any x-api-key header — including an
+        // empty or nonsense value — an unconditional pay-as-you-go signal, unlike
+        // every other branch here, which validates shape.
+        assert_eq!(
+            classify_auth_mode(&headers(&[("x-api-key", "")])),
+            AuthMode::Subscription
+        );
+        assert_eq!(
+            classify_auth_mode(&headers(&[("x-api-key", "not-a-real-key")])),
+            AuthMode::Subscription
+        );
+    }
+
+    #[test]
+    fn a_garbage_x_api_key_does_not_override_a_restricted_authorization_header() {
+        // Regression, the exploitable direction: a request authenticating with a
+        // subscription session token could add a throwaway x-api-key and flip the
+        // proxy's local classification to the most permissive mode, before the
+        // provider ever saw the bogus key to reject it.
+        assert_eq!(
+            classify_auth_mode(&headers(&[
+                ("x-api-key", "not-a-real-key"),
+                ("authorization", "Bearer some-opaque-session-token"),
+            ])),
+            AuthMode::Subscription
+        );
+    }
+
+    #[test]
+    fn a_well_formed_x_api_key_still_grants_pay_as_you_go() {
+        assert_eq!(
+            classify_auth_mode(&headers(&[
+                ("x-api-key", "sk-ant-api03-real-key"),
+                ("authorization", "Bearer some-opaque-session-token"),
+            ])),
+            AuthMode::PayAsYouGo
+        );
     }
 
     #[test]
