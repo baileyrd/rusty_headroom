@@ -14,6 +14,8 @@
 //! prompt. Compressing a request whose job is to tell the provider what the
 //! conversation contains would corrupt the provider's own record of it.
 
+use std::net::SocketAddr;
+
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, Method, Uri};
@@ -22,8 +24,8 @@ use axum::response::Response;
 use crate::body::{insert_top_level_member, FaithfulBody};
 use crate::compression::{compress_dialect, Dialect};
 use crate::config::Config;
-use crate::headers::{sanitize, HeaderPolicy};
-use crate::server::{relay, AppState};
+use crate::headers::{apply_forwarded, sanitize, HeaderPolicy};
+use crate::server::{relay, AppState, PeerAddr};
 use crate::upstream::RelayError;
 use headroom_core::auth_mode::{classify_auth_mode, CompressionPolicy};
 use headroom_core::block::{Block, BlockKind};
@@ -41,6 +43,7 @@ pub async fn chat_completions(
     State(state): State<AppState>,
     uri: Uri,
     headers: HeaderMap,
+    PeerAddr(peer): PeerAddr,
     body: Bytes,
 ) -> Result<Response, RelayError> {
     let config = Config::from_env();
@@ -91,6 +94,7 @@ pub async fn chat_completions(
         crate::server::forwarded_target(&uri, "/v1/chat/completions").as_str(),
         outgoing,
         policy,
+        peer,
     )
     .await
 }
@@ -201,6 +205,7 @@ pub async fn responses(
     State(state): State<AppState>,
     uri: Uri,
     headers: HeaderMap,
+    PeerAddr(peer): PeerAddr,
     body: Bytes,
 ) -> Result<Response, RelayError> {
     let config = Config::from_env();
@@ -237,6 +242,7 @@ pub async fn responses(
         crate::server::forwarded_target(&uri, "/v1/responses").as_str(),
         outgoing,
         policy,
+        peer,
     )
     .await
 }
@@ -254,6 +260,7 @@ pub async fn passthrough(
     State(state): State<AppState>,
     uri: Uri,
     headers: HeaderMap,
+    PeerAddr(peer): PeerAddr,
     body: Bytes,
 ) -> Result<Response, RelayError> {
     let policy = CompressionPolicy::for_mode(classify_auth_mode(&headers));
@@ -263,7 +270,7 @@ pub async fn passthrough(
     // `/v1/conversations/{id}/items` reaches the provider at the path the client used
     // instead of being collapsed to its prefix.
     let path = crate::server::forwarded_target(&uri, uri.path());
-    relay_to(&state, &headers, &path, body.to_vec(), policy).await
+    relay_to(&state, &headers, &path, body.to_vec(), policy, peer).await
 }
 
 /// Shared relay tail: sanitize headers, forward, stream the answer back.
@@ -273,14 +280,16 @@ async fn relay_to(
     path: &str,
     body: Vec<u8>,
     policy: CompressionPolicy,
+    peer: Option<SocketAddr>,
 ) -> Result<Response, RelayError> {
-    let upstream_headers = sanitize(
-        headers,
-        HeaderPolicy {
-            forwarded_headers: policy.forwarded_headers,
-            strip_accept_encoding: policy.may_strip_accept_encoding,
-        },
-    );
+    let header_policy = HeaderPolicy {
+        forwarded_headers: policy.forwarded_headers,
+        strip_accept_encoding: policy.may_strip_accept_encoding,
+    };
+    let mut upstream_headers = sanitize(headers, header_policy);
+    if let Some(peer) = peer {
+        apply_forwarded(&mut upstream_headers, header_policy, &peer.ip().to_string());
+    }
 
     relay(state, Method::POST, path, &upstream_headers, body).await
 }

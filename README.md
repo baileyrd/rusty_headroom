@@ -104,7 +104,7 @@ running proxy will not pick up — the authoritative list is `config::STARTUP_ON
 | `HEADROOM_COMPRESSION` | no | `0` forwards everything untouched |
 | `HEADROOM_STABILIZE` | no | `1` normalizes tools and places cache breakpoints — **off by default**, it modifies the zone I2 protects |
 | `HEADROOM_OUTPUT_SHAPER` | no | `terse` or `full`; off unless set |
-| `HEADROOM_LOG` | no | log filter (default `warn`; logs go to stderr) |
+| `HEADROOM_LOG` | yes | log filter (default `warn`; logs go to stderr); not settable via `/admin/runtime-env` at all — it isn't part of `config::vars`, and `main` reads it once through `tracing_subscriber::EnvFilter` before the global subscriber is installed |
 
 `HEADROOM_UPSTREAM` is on that list because the relay client is built once with its base
 URL baked in. It was *not* on it until measured: the admin endpoint answered
