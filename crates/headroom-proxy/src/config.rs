@@ -42,6 +42,8 @@ pub mod vars {
     pub const CCR_DIR: &str = "HEADROOM_CCR_DIR";
     /// Redis URL for a shared CCR store. Takes precedence over `CCR_DIR`.
     pub const REDIS_URL: &str = "HEADROOM_REDIS_URL";
+    /// File for the durable savings ledger. Unset means savings are not persisted.
+    pub const SAVINGS: &str = "HEADROOM_SAVINGS";
 }
 
 /// Every `HEADROOM_*` name that some code in this crate actually reads.
@@ -59,7 +61,7 @@ pub mod vars {
 /// Kept beside [`vars`] so a new setting is wired to both in the same edit, rather than
 /// readable from `Config` but unreachable through the admin endpoint, or reachable
 /// through the admin endpoint but read by nothing.
-pub const KNOWN: [&str; 11] = [
+pub const KNOWN: [&str; 12] = [
     vars::HOST,
     vars::PORT,
     vars::UPSTREAM,
@@ -71,6 +73,7 @@ pub const KNOWN: [&str; 11] = [
     vars::STABILIZE,
     vars::CCR_DIR,
     vars::REDIS_URL,
+    vars::SAVINGS,
 ];
 
 /// Settings that are read once at startup and ignored thereafter.
@@ -90,7 +93,7 @@ pub const KNOWN: [&str; 11] = [
 ///
 /// Kept beside the variables themselves so a new startup-only setting is added here in the
 /// same edit rather than discovered later by someone whose change silently did nothing.
-pub const STARTUP_ONLY: [&str; 8] = [
+pub const STARTUP_ONLY: [&str; 9] = [
     vars::HOST,
     vars::PORT,
     // The one that mattered most, and the one this list was missing.
@@ -110,7 +113,20 @@ pub const STARTUP_ONLY: [&str; 8] = [
     vars::MEMORY_LIMIT,
     vars::CCR_DIR,
     vars::REDIS_URL,
+    // Opened once at startup, like the CCR store beside it. A new path landing in the
+    // override map would leave every subsequent write going to the old file.
+    vars::SAVINGS,
 ];
+
+/// Where the durable savings ledger lives, if one is configured.
+///
+/// `None` means savings are not persisted and `headroom savings` falls back to reading a
+/// `/metrics` scrape — the behavior every deployment had before the ledger existed.
+pub fn savings_path() -> Option<std::path::PathBuf> {
+    setting(vars::SAVINGS)
+        .filter(|value| !value.trim().is_empty())
+        .map(std::path::PathBuf::from)
+}
 
 /// Which CCR store the proxy actually built.
 ///

@@ -47,6 +47,11 @@ pub struct AppState {
     /// Invariant I9: written after each compression decision and read only by the TOIN
     /// endpoints. Nothing on the request path consults it.
     aggregator: Arc<std::sync::Mutex<headroom_core::telemetry::Aggregator>>,
+    /// The durable savings ledger, when one is configured.
+    ///
+    /// `None` keeps the pre-ledger behavior exactly: in-process counters, and
+    /// `headroom savings` reading a `/metrics` scrape.
+    ledger: Option<Arc<crate::ledger::LedgerWriter>>,
     /// The store that was built, not the one that was configured — see
     /// [`Config::ccr_store_with_kind`].
     ccr_store_kind: crate::config::CcrStoreKind,
@@ -131,6 +136,11 @@ impl AppState {
             limiter: Arc::new(RateLimiter::new(RATE_CAPACITY, RATE_WINDOW)),
             upstream_health: Arc::new(std::sync::Mutex::new(None)),
             aggregator,
+            // Opened once, like the CCR store. Loading here rather than starting empty is
+            // the whole feature: the first act of a new process is to pick up the totals
+            // the last one left.
+            ledger: crate::config::savings_path()
+                .map(|path| Arc::new(crate::ledger::LedgerWriter::open(path))),
             ccr_store_kind,
             ccr_store: ccr_store_for_purge,
         }
@@ -175,6 +185,33 @@ impl AppState {
     /// a change that had not happened.
     pub fn upstream_base(&self) -> Option<&str> {
         self.upstream.as_ref().map(|upstream| upstream.base())
+    }
+
+    /// The durable savings ledger, when one is configured.
+    pub fn ledger(&self) -> Option<&Arc<crate::ledger::LedgerWriter>> {
+        self.ledger.as_ref()
+    }
+
+    /// Records a compression outcome in the durable ledger.
+    ///
+    /// A no-op when no ledger is configured, which is what keeps every deployment that
+    /// has not set `HEADROOM_SAVINGS` behaving exactly as it did.
+    pub fn record_savings(&self, model: &str, before: u64, after: u64) {
+        if let Some(ledger) = self.ledger.as_ref() {
+            ledger.record(
+                &headroom_core::telemetry::model_family(model),
+                "all",
+                before,
+                after,
+            );
+        }
+    }
+
+    /// Records a request forwarded without compression.
+    pub fn record_savings_passthrough(&self, model: &str) {
+        if let Some(ledger) = self.ledger.as_ref() {
+            ledger.record_passthrough(&headroom_core::telemetry::model_family(model), "all");
+        }
     }
 
     /// The TOIN aggregate this process is accumulating into.
@@ -514,12 +551,15 @@ async fn messages(
     // failing to do anything.
     if compressed.as_ref() == body.as_ref() {
         state.metrics.record_passthrough();
+        state.record_savings_passthrough(crate::compression::model_of(&body));
     } else {
         let estimator = HeuristicEstimator::new();
-        state.metrics.record_rewritten(
-            estimator.count(&String::from_utf8_lossy(&body)) as u64,
-            estimator.count(&String::from_utf8_lossy(&compressed)) as u64,
-        );
+        let before = estimator.count(&String::from_utf8_lossy(&body)) as u64;
+        let after = estimator.count(&String::from_utf8_lossy(&compressed)) as u64;
+        state.metrics.record_rewritten(before, after);
+        // The durable half, written beside the in-process counter so the two cannot
+        // describe different traffic. Buffered — see `crate::ledger`.
+        state.record_savings(crate::compression::model_of(&body), before, after);
     }
 
     // Stabilization runs after the savings measurement, deliberately. Normalizing tools
@@ -686,6 +726,13 @@ pub async fn serve(config: &Config) -> std::io::Result<()> {
     // task is present for the state's whole lifetime rather than raced in afterward.
     let state = AppState::default();
     spawn_ccr_purge_task(Arc::clone(state.ccr_store()));
+
+    // Savings are buffered in memory and reach the disk on an interval, so a request
+    // never pays for an fsync. Without this task nothing would ever be written and the
+    // ledger would be an in-process counter with extra steps.
+    if let Some(ledger) = state.ledger() {
+        crate::ledger::spawn_flush_task(Arc::clone(ledger));
+    }
 
     // `into_make_service_with_connect_info` rather than the plain service: the admin
     // endpoint's only protection is that it can tell a local caller from a remote one,

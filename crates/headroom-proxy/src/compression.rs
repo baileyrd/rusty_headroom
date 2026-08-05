@@ -820,7 +820,7 @@ fn rewrite_message(raw: &str, shape: ContentShape, edits: &[(usize, &str)]) -> O
 /// Read rather than rewritten, so the usual byte-faithfulness concern does not apply —
 /// this parse never produces output. An absent or unreadable model yields an empty
 /// string, which resolves to the heuristic.
-fn model_of(body: &[u8]) -> &str {
+pub(crate) fn model_of(body: &[u8]) -> &str {
     // A borrowed `&str` from the raw bytes rather than an owned `String`, since this is
     // called once per request and the value is used immediately.
     serde_json::from_slice::<&serde_json::value::RawValue>(body)

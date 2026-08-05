@@ -129,6 +129,7 @@ running proxy will not pick up — the authoritative list is `config::STARTUP_ON
 | `HEADROOM_HOST` / `HEADROOM_PORT` | yes | listen address (default loopback, `8787`) |
 | `HEADROOM_CCR_DIR` | yes | directory for retrievable originals; memory only if unset |
 | `HEADROOM_REDIS_URL` | yes | shared store for multi-worker deployments (needs `--features redis`) |
+| `HEADROOM_SAVINGS` | yes | file for the durable savings ledger; without it savings reset on restart and `headroom savings` reads a `/metrics` scrape from stdin |
 | `HEADROOM_RECOMMENDATIONS` | yes | file from `headroom learn` |
 | `HEADROOM_MEMORY` / `HEADROOM_MEMORY_LIMIT` | yes | JSON-lines memories to inject into the live-zone tail — one object per line with a `content` string; 8 at a time by default |
 | `HEADROOM_COMPRESSION` | no | `0` forwards everything untouched |

@@ -1444,3 +1444,55 @@ time this session that a test double turned out not to model the transport
 
 **Would change if:** a provider requires a query parameter the proxy must add or strip. It
 would belong in one place with a reason, rather than arriving as the accident of a literal.
+
+## D40 — the savings ledger buckets by hour rather than logging per request
+
+**Decision:** persist savings as hourly buckets in a JSON file, aggregated on write,
+pruned at 90 days, buffered in memory and flushed on a timer.
+
+**The problem.** `headroom savings` read a `/metrics` scrape from stdin. That reports a
+*rate* for the current process and nothing else: no total, and everything resets on
+deploy. The headline claim of the project — here is what this saved you — could not be
+answered over any period longer than one process lifetime.
+
+**Why not an append-only log.** The obvious ledger writes one record per compression.
+On a busy proxy that is an unbounded file growing at request rate, which is a
+disk-exhaustion bug wearing a feature's clothes. Worse, the thing it takes down is a proxy
+somebody is already debugging.
+
+So entries aggregate on write into buckets keyed by `(hour, model_family, content_type)`.
+Growth is bounded by retention times distinct keys rather than by traffic: a year of one
+key is 8,760 rows, and a month of a busy proxy is a few hundred kilobytes.
+
+**What that costs.** Per-request detail is gone. That is the right trade for the question
+this answers — "what did we save last month" — and per-block detail is what #188
+(`headroom audit`) is for. Recording both here would be building #188 badly inside #187.
+
+**Why a JSON file and not SQLite.** The same reasoning as D6, which substituted
+`FileCcrStore` for the reference's SQLite backend. The access pattern is: update a
+handful of counters in memory per request, write the whole thing on a timer, read all of
+it when somebody asks. A dependency-free file covers that. Adding a database to a proxy
+whose first requirement is starting reliably is a cost with no matching benefit at this
+size, and D6 already established that this project pays for storage engines only where
+the access pattern needs one.
+
+**Writes are buffered.** Persisting synchronously would put a file write, an fsync and a
+rename between the model and the user on every request — latency charged to live traffic
+to improve a report nobody is reading at that moment. Records accumulate under a
+short-lived lock and a background task flushes every 60 seconds, the same shape as the CCR
+purge task beside it. A proxy killed between flushes loses at most one interval of
+*reporting*. No request is affected, and no compressed byte depends on any of it.
+
+**The clock.** This module reads the wall clock, which I4 forbids on the compression path.
+I4 is about the bytes sent upstream; the ledger is written *after* a decision and never
+consulted for one, so nothing a request sends depends on it. Buckets are keyed by
+zero-padded hour so lexical order is chronological — unpadded, hour 9 sorts after hour 10
+and every range query silently reads the wrong set once the hour count changes digit width.
+
+**No currency figure.** L12 decided that and this does not reverse it. A token count is a
+fact; a dollar amount is a guess about somebody's pricing tier, and a guess printed beside
+facts reads as one. A test asserts the report mentions no currency.
+
+**Opt-in.** Without `HEADROOM_SAVINGS` the proxy behaves exactly as it did and
+`headroom savings` still reads a scrape from stdin. `--since-days` refuses in that mode
+rather than answering from data that cannot support it.
