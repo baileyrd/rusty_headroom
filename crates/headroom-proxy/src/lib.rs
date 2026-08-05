@@ -36,3 +36,15 @@ pub mod volatile;
 pub mod websocket;
 
 pub use config::Config;
+
+/// The lock every test that mutates the process-wide override map must hold.
+///
+/// One lock rather than one per module. `config` and `admin` both drive
+/// `set_overrides`/`clear_overrides`, and while each held its own mutex they serialized
+/// against themselves and raced each other — which surfaced as `admin`'s
+/// upstream-divergence test reading a `config` test's overrides.
+#[cfg(test)]
+pub(crate) fn settings_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    &LOCK
+}

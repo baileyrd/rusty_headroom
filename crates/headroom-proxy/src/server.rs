@@ -71,7 +71,7 @@ pub struct AppState {
 /// See [`AppState::upstream_reachable`].
 const UPSTREAM_PROBE_CACHE: Duration = Duration::from_secs(5);
 
-const RATE_CAPACITY: u32 = 600;
+const RATE_CAPACITY: u32 = crate::config::DEFAULT_RATE_LIMIT;
 
 /// The rate-limit window.
 const RATE_WINDOW: Duration = Duration::from_secs(60);
@@ -133,7 +133,7 @@ impl AppState {
             ),
             metrics,
             upstream,
-            limiter: Arc::new(RateLimiter::new(RATE_CAPACITY, RATE_WINDOW)),
+            limiter: Arc::new(RateLimiter::new(crate::config::rate_limit(), RATE_WINDOW)),
             upstream_health: Arc::new(std::sync::Mutex::new(None)),
             aggregator,
             // Opened once, like the CCR store. Loading here rather than starting empty is

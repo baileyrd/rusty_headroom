@@ -260,7 +260,7 @@ mod tests {
     // is how two guards drift apart.
     #[tokio::test]
     async fn a_preview_that_would_point_the_proxy_at_itself_is_recognized() {
-        let _guard = SERIAL.lock().await;
+        let _guard = serial().lock().await;
         // The hole this guard closes. D11 justified having no per-request loop-detection
         // header because a startup check already catches a self-referential upstream;
         // D10 then added runtime config, which can set one *after* startup. The premise
@@ -281,7 +281,7 @@ mod tests {
     // is how two guards drift apart.
     #[tokio::test]
     async fn a_preview_does_not_apply_anything() {
-        let _guard = SERIAL.lock().await;
+        let _guard = serial().lock().await;
         // Applying and rolling back would leave the bad configuration live for the
         // duration of the check, and config is read per request from a thread pool — an
         // in-flight request could pick it up in that window and start the loop.
@@ -302,7 +302,7 @@ mod tests {
     // is how two guards drift apart.
     #[tokio::test]
     async fn an_ordinary_upstream_change_previews_clean() {
-        let _guard = SERIAL.lock().await;
+        let _guard = serial().lock().await;
         // The guard must not refuse the thing this endpoint exists to do.
         let mut requested = BTreeMap::new();
         requested.insert(
@@ -334,7 +334,11 @@ mod tests {
     /// an `.await`. These are single-task tests so a blocking guard could not actually
     /// deadlock, but "it happens to be safe here" is not a property that survives
     /// someone adding a second task to one of them.
-    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    /// The shared settings lock. See `crate::settings_test_lock` for why it is shared
+    /// with `config`'s tests rather than private to this module.
+    fn serial() -> &'static tokio::sync::Mutex<()> {
+        crate::settings_test_lock()
+    }
 
     fn app() -> Router {
         Router::new().route("/admin/runtime-env", post(runtime_env))
@@ -382,7 +386,7 @@ mod tests {
         // of this handler read `AppState` out of the request extensions, where axum
         // never puts it — every local call would have hit the "state unavailable"
         // branch, and only the 403 test was passing.
-        let _guard = SERIAL.lock().await;
+        let _guard = serial().lock().await;
         let response = call_upstream(Some("127.0.0.1:5555"), "http://relay.example").await;
 
         assert_eq!(response.status(), StatusCode::OK);
@@ -396,7 +400,7 @@ mod tests {
         // The divergence this endpoint exists for. `HEADROOM_UPSTREAM` is startup-only:
         // an override lands in the map and nothing rebuilds the relay client, so
         // configuration and reality disagree while `/admin/runtime-env` reports success.
-        let _guard = SERIAL.lock().await;
+        let _guard = serial().lock().await;
         config::clear_overrides();
         config::set_overrides(BTreeMap::from([(
             "HEADROOM_UPSTREAM".to_owned(),
@@ -418,14 +422,14 @@ mod tests {
 
     #[tokio::test]
     async fn upstream_refuses_a_non_local_caller() {
-        let _guard = SERIAL.lock().await;
+        let _guard = serial().lock().await;
         let response = call_upstream(Some("203.0.113.9:5555"), "http://relay.example").await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
     async fn upstream_refuses_a_caller_it_cannot_place() {
-        let _guard = SERIAL.lock().await;
+        let _guard = serial().lock().await;
         let response = call_upstream(None, "http://relay.example").await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
@@ -439,7 +443,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_local_request_applies_the_overrides() {
-        let _guard = SERIAL.lock().await;
+        let _guard = serial().lock().await;
         config::clear_overrides();
 
         let response = call(Some("127.0.0.1:5555"), r#"{"HEADROOM_COMPRESSION":"0"}"#).await;
@@ -451,7 +455,7 @@ mod tests {
 
     #[tokio::test]
     async fn retuning_one_setting_leaves_the_others_alone() {
-        let _guard = SERIAL.lock().await;
+        let _guard = serial().lock().await;
         config::clear_overrides();
 
         // The scenario this module opens by naming: "turning compression off during an
@@ -484,7 +488,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_override_is_removed_by_sending_it_empty() {
-        let _guard = SERIAL.lock().await;
+        let _guard = serial().lock().await;
         config::clear_overrides();
 
         // The control for the test above, and the replacement for what `{}` used to do.
@@ -512,7 +516,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_change_that_would_point_the_proxy_at_itself_is_refused() {
-        let _guard = SERIAL.lock().await;
+        let _guard = serial().lock().await;
         // Through the handler, not through `preview_overrides` — the three unit tests
         // above pass with the guard deleted from the handler, because they exercise the
         // helper rather than the wiring. That is the same "is it actually called?" bug
@@ -535,7 +539,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_ordinary_upstream_change_is_still_applied() {
-        let _guard = SERIAL.lock().await;
+        let _guard = serial().lock().await;
         // The guard must not refuse the thing this endpoint exists to do.
         config::clear_overrides();
 
@@ -558,7 +562,7 @@ mod tests {
         // The endpoint used to answer `applied` for these and nothing else, which is a
         // lie an operator acts on: the value is stored, nothing ever reads it again, and
         // they believe the change took effect and move on.
-        let _guard = SERIAL.lock().await;
+        let _guard = serial().lock().await;
         config::clear_overrides();
 
         let response = call(
@@ -581,7 +585,7 @@ mod tests {
     async fn a_live_override_reports_an_empty_restart_list() {
         // The common case, and it has to be visibly different from the one above or the
         // field tells an operator nothing.
-        let _guard = SERIAL.lock().await;
+        let _guard = serial().lock().await;
         config::clear_overrides();
 
         let response = call(Some("127.0.0.1:5000"), r#"{"HEADROOM_COMPRESSION":"0"}"#).await;
@@ -614,7 +618,7 @@ mod tests {
         // echoed back in `applied` with an empty `needs_restart`, and never read
         // again. Mixed with a real setting in the same call so the fix is proven to be
         // selective rather than a blanket rejection of the whole request.
-        let _guard = SERIAL.lock().await;
+        let _guard = serial().lock().await;
         config::clear_overrides();
 
         let response = call(
@@ -638,7 +642,7 @@ mod tests {
         // This endpoint can repoint `HEADROOM_UPSTREAM`, so anyone who can reach it can
         // redirect every subsequent request — credential attached — to a server they
         // control.
-        let _guard = SERIAL.lock().await;
+        let _guard = serial().lock().await;
         config::clear_overrides();
 
         let response = call(
@@ -660,7 +664,7 @@ mod tests {
     async fn a_request_without_connection_information_is_refused() {
         // The handler cannot establish that the caller is local, and being able to is
         // this endpoint's entire protection. Failing closed is the only safe reading.
-        let _guard = SERIAL.lock().await;
+        let _guard = serial().lock().await;
         config::clear_overrides();
 
         let response = call(None, r#"{"HEADROOM_UPSTREAM":"http://evil"}"#).await;
@@ -677,7 +681,7 @@ mod tests {
     async fn names_outside_the_headroom_namespace_are_ignored() {
         // Otherwise this is a general-purpose lever on the process for anyone who can
         // reach it, rather than a way to retune the proxy.
-        let _guard = SERIAL.lock().await;
+        let _guard = serial().lock().await;
         config::clear_overrides();
 
         let response = call(
@@ -700,7 +704,7 @@ mod tests {
         // Configuration can carry an upstream URL with credentials in it, and an
         // endpoint that reflects what it was given is the easiest way for one to reach
         // a log.
-        let _guard = SERIAL.lock().await;
+        let _guard = serial().lock().await;
         config::clear_overrides();
 
         let response = call(
@@ -723,7 +727,7 @@ mod tests {
     async fn numbers_and_booleans_are_accepted_rather_than_rejected() {
         // `{"HEADROOM_PORT": 8788}` means the obvious thing, and a 400 here would be
         // pedantry during an incident.
-        let _guard = SERIAL.lock().await;
+        let _guard = serial().lock().await;
         config::clear_overrides();
 
         let response = call(
@@ -744,7 +748,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_non_object_body_is_a_400_not_a_panic() {
-        let _guard = SERIAL.lock().await;
+        let _guard = serial().lock().await;
         config::clear_overrides();
         let response = call(Some("127.0.0.1:5555"), r#"["not","an","object"]"#).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
