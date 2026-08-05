@@ -6,6 +6,34 @@ the crate starts publishing releases.
 
 ---
 
+## Round 2 gap analysis — reassessed against the reference's source
+**2026-08-05** · the docs described a smaller system than the one that ships
+
+- Round 1 assessed an empty repository against the reference's *published documentation*
+  and closed all 97 rows. This round clones and reads the reference. The headline
+  finding is structural: the reference is **Python-primary with a Rust port in
+  progress** — 1,366 `.py` files against 194 `.rs` — which splits "parity" into two
+  questions. Against its **Rust port** we are ahead in places: its Rust proxy has no
+  `/v1/messages` route, no MCP server, no CLI and no WebSocket relay. Against its
+  **product surface** the list is longer than Round 1 implied, because features the
+  docs mention in a sentence are whole subsystems in the source.
+- Three Round 1 rows were closed on a reading the source does not support, and are
+  corrected in the document: **P4** (two of the six offloads are not a second name for
+  anything we have), **C4** (the reference's planning layer is query-aware; ours is
+  purely structural), and **X5** (the reference proxy is a transparent reverse proxy
+  with a catch-all fallback — its routes are fast paths, not the boundary; ours 404s
+  everything unlisted, which breaks `/v1/models`, `/v1/messages/batches`,
+  `/v1/messages/count_tokens` and every future provider endpoint for anyone wrapped).
+- 23 gaps filed as #175–#197, tagged by which parity target they count against. Seven
+  count against both. Two are marked stop-and-ask rather than auto-implementable:
+  #193 (vector index dependency) and #197 (downloaded-binary toolchain in a
+  credential-holding request path). Round 1's scope exclusions — ONNX/Kompress,
+  dashboard, Bedrock/Vertex, framework integrations — are carried forward unchanged.
+- The reference ships a `headroom-parity` crate that replays recorded fixtures and
+  diffs outputs, reporting stubbed comparators as `Skipped` rather than silently
+  passing. Filed as #183. This document being hand-maintained is why Round 2 was
+  needed at all; the same reasoning produced `scripts/reachability-audit.sh`.
+
 ## `headroom learn` measured plain user messages as compressible prose
 **2026-08-04** · D24/D36/D37's failure mode, a fourth time
 
