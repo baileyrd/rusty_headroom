@@ -14,6 +14,7 @@
 
 mod analyzer;
 mod config;
+mod field_detect;
 mod formatter;
 mod ir;
 mod outliers;
@@ -21,6 +22,7 @@ mod planning;
 
 pub use analyzer::{analyze_record_set, classify, FieldKind, FieldStat, Pattern, RecordSetStats};
 pub use config::CrushConfig;
+pub use field_detect::{classify_field, FieldRole};
 pub use formatter::{format_plan, SmartCrusher};
 pub use ir::{Document, Shape};
 pub use outliers::{rank_outliers, Outlier, OutlierReason};

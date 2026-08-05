@@ -6,6 +6,32 @@ the crate starts publishing releases.
 
 ---
 
+## A ranked result set could elide its own best hits
+**2026-08-05** · closes #179 · the payload said which records mattered and nothing read it
+
+- SmartCrusher kept a head sample plus statistical outliers plus, since #177, whatever
+  answered the query. What it never read was the payload's **own** ranking. A search tool
+  returning 60 hits with a `relevance` field is stating outright which records matter, and
+  the planner kept records 0–2 because they came first. The best hit, at index 47, was
+  elided — and the compression ratio looked exactly as healthy as if it had been kept.
+- Added `smart_crusher::field_detect`: `classify_field` sorts a field into `Identifier`,
+  `Score` or `Ordinary` from its values, not its name. Score fields now contribute their
+  top records to the anchor set as a floor, alongside outliers and query relevance.
+- **The identifier half exists to make the score half safe.** A numeric `id` running
+  `1..200` is numeric, non-constant and evenly distributed — everything a score looks
+  like. Ranking by it pins records 195–199 and presents that as a summary of what
+  mattered. Timestamps are the same trap wearing a different name: ranking by `created_at`
+  keeps the newest rather than the best. Both are ruled out, both have tests.
+- Two ordering bugs found by the tests rather than by reasoning. **Score has to be tested
+  before identifier**: a relevance score with 60 distinct values across 60 hits *is*
+  near-unique, so asking "identifier?" first classified every well-behaved score field as
+  an id and the score half never ran. And an **identifier-name veto runs before both**,
+  because a fractional `shard_id` or `checksum` otherwise reaches the score test and can
+  pass it. Names decide nothing on their own except in that one conservative direction.
+- Detection needs at least 8 records — "90% distinct" over three values is three values —
+  and a record set with no score field plans byte-identically to before, asserted rather
+  than assumed.
+
 ## Prose nested inside a JSON payload was never reached by the prose compressor
 **2026-08-05** · closes #182 · the #82/#84 asymmetry, one level further in
 
