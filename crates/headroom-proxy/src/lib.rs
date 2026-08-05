@@ -16,6 +16,7 @@
 
 pub mod admin;
 pub mod body;
+pub mod ccr_api;
 pub mod compression;
 pub mod config;
 pub mod frozen;

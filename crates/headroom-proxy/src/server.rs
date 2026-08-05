@@ -254,6 +254,12 @@ pub fn router_with(state: AppState) -> Router {
         .route("/healthz", get(crate::health::healthz))
         .route("/healthz/upstream", get(crate::health::upstream_health))
         .route("/admin/upstream", get(crate::admin::upstream))
+        // CCR over HTTP, so a client that does not speak MCP can still redeem a marker
+        // this proxy handed it. See `crate::ccr_api`.
+        .route("/v1/compress", post(crate::ccr_api::compress))
+        .route("/v1/retrieve", post(crate::ccr_api::retrieve_batch))
+        .route("/v1/retrieve/stats", get(crate::ccr_api::retrieve_stats))
+        .route("/v1/retrieve/{hash}", get(crate::ccr_api::retrieve_one))
         // Codex uses a WebSocket transport, and a proxy that only speaks HTTP silently
         // drops that client to whatever fallback it has, or breaks it.
         .route("/v1/realtime", get(crate::websocket::relay_socket))
@@ -1698,7 +1704,11 @@ mod tests {
     /// reads the `.route(` calls out of this file and fails if one is missing here. A
     /// hand-maintained copy of a list is exactly what this project keeps getting wrong,
     /// and axum's `Router` cannot be enumerated, so the list is checked instead of shared.
-    const ROUTES: [(&str, &str); 13] = [
+    const ROUTES: [(&str, &str); 17] = [
+        ("POST", "/v1/compress"),
+        ("POST", "/v1/retrieve"),
+        ("GET", "/v1/retrieve/stats"),
+        ("GET", "/v1/retrieve/{hash}"),
         ("GET", "/health"),
         ("GET", "/healthz"),
         ("GET", "/healthz/upstream"),
@@ -1815,12 +1825,29 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert!(
-                response.status() != StatusCode::NOT_FOUND
-                    && response.status() != StatusCode::METHOD_NOT_ALLOWED,
-                "{method} {path} is registered and did not reach a handler: {}",
-                response.status()
+            assert_ne!(
+                response.status(),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "{method} {path} is registered under a different method"
             );
+
+            // 404 needs a second look rather than a flat rejection. `GET
+            // /v1/retrieve/{hash}` answers 404 for a hash the store does not hold, which
+            // is a *handler* saying "not here" — the store is empty in this fixture, so
+            // it is also the only answer it can give. Axum's own 404 for an unrouted path
+            // carries an empty body; ours carries a JSON `error`. That difference is what
+            // separates "reached a handler" from "no route", and checking it keeps this
+            // test meaningful for the one route whose success case is a miss.
+            if response.status() == StatusCode::NOT_FOUND {
+                let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                    .await
+                    .unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+                assert!(
+                    body.get("error").is_some(),
+                    "{method} {path} 404'd with no handler body, so nothing routed to it"
+                );
+            }
         }
     }
 

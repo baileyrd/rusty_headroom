@@ -80,6 +80,12 @@ Anything lossy is stored first under a content hash, and the compressed block ca
 `<<ccr:HASH>>` marker the model can redeem through the `headroom_retrieve` MCP tool. So
 compression is a bet that the detail will not be needed, and a bet that can be unwound.
 
+Markers are redeemable over HTTP as well as through MCP: `GET /v1/retrieve/{hash}` (the
+bare hex — `<` and `>` are not legal in a URI path), `POST /v1/retrieve` for a batch,
+`GET /v1/retrieve/stats`, and `POST /v1/compress` as the direct twin of the
+`headroom_compress` tool. Without those, a client that does not speak MCP could be handed
+a marker it had no way to read.
+
 Retrieval checks the hash and nothing else — no session, credential, or requester
 identity. That is what lets the MCP server redeem a marker the proxy wrote in a
 different process; it also means `HEADROOM_CCR_DIR`/`HEADROOM_REDIS_URL` must point at
