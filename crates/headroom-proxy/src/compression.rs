@@ -427,6 +427,11 @@ fn read_conversation(
     let mut messages = Vec::with_capacity(faithful.message_count());
     let mut shapes = Vec::with_capacity(faithful.message_count());
 
+    // Read once, before the loop, because it is a property of the whole conversation
+    // rather than of any one message — and because the message a tool result answers
+    // sits *earlier* in the array than the result itself.
+    let query = conversation_query(faithful, dialect);
+
     for index in 0..faithful.message_count() {
         let raw = faithful.message(index)?;
         let value: Value = serde_json::from_str(raw).ok()?;
@@ -450,7 +455,10 @@ fn read_conversation(
                     .get("output")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                messages.push(Message::new(role, vec![Block::new(kind, output)]));
+                messages.push(Message::new(
+                    role,
+                    vec![with_query(Block::new(kind, output), query.as_deref())],
+                ));
                 shapes.push(ContentShape::ResponsesOutput);
                 continue;
             }
@@ -468,11 +476,18 @@ fn read_conversation(
                 } else {
                     BlockKind::Text
                 };
-                (vec![Block::new(kind, text.clone())], ContentShape::Scalar)
+                (
+                    vec![with_query(Block::new(kind, text.clone()), query.as_deref())],
+                    ContentShape::Scalar,
+                )
             }
-            Some(Value::Array(items)) => {
-                (items.iter().map(read_block).collect(), ContentShape::Blocks)
-            }
+            Some(Value::Array(items)) => (
+                items
+                    .iter()
+                    .map(|item| with_query(read_block(item), query.as_deref()))
+                    .collect(),
+                ContentShape::Blocks,
+            ),
             _ => (Vec::new(), ContentShape::Blocks),
         };
 
@@ -494,6 +509,154 @@ fn responses_item_kind(item: &Value) -> Option<BlockKind> {
         "local_shell_call_output" => Some(BlockKind::LocalShellCallOutput),
         "apply_patch_call_output" => Some(BlockKind::ApplyPatchCallOutput),
         _ => None,
+    }
+}
+
+/// Attaches the conversation's query to a block that can use it.
+///
+/// Only tool output gets one. A `text` block is what a person or the model wrote, and
+/// "how relevant is this to the question" is not a question worth asking about the
+/// question itself — the same asymmetry D24 already applies to prose summarization.
+fn with_query(block: Block, query: Option<&str>) -> Block {
+    match query {
+        Some(query) if block.kind().is_tool_output() => block.with_query(query),
+        _ => block,
+    }
+}
+
+/// The question the live tool output is answering.
+///
+/// Two parts, joined:
+///
+/// 1. **The newest user-authored text.** What the person actually asked.
+/// 2. **The newest assistant turn's tool-call arguments.** What the model asked the
+///    tool for on their behalf — usually literal identifiers, paths and filters, which
+///    is exactly the material keyword scoring is best at matching.
+///
+/// The second part carries most of the weight in practice. A user saying "check that
+/// order" is vague; the `{"order_id":"a3f9"}` the model derived from it is not.
+///
+/// # A deliberate approximation
+///
+/// Arguments are taken from the newest assistant turn as a whole rather than matched to
+/// each tool result by call id. In the overwhelmingly common single-call turn the two
+/// are identical. In a parallel-call turn this gives every result the union of that
+/// turn's arguments, which can pin a record relevant to a *sibling* call — keeping a few
+/// extra records, never dropping a relevant one. Erring toward keeping is the right
+/// direction for a bounded pin set, and per-call matching would need `tool_use_id`
+/// threaded through the reader, which is a larger change than the accuracy justifies
+/// today.
+///
+/// Returns `None` when there is nothing to ask about, so the relevance pass is skipped
+/// entirely rather than run against an empty string.
+fn conversation_query(faithful: &FaithfulBody<'_>, dialect: Dialect) -> Option<String> {
+    let mut user_text: Option<String> = None;
+    let mut arguments: Option<String> = None;
+
+    for index in (0..faithful.message_count()).rev() {
+        let Some(raw) = faithful.message(index) else {
+            continue;
+        };
+        let Ok(value): std::result::Result<Value, _> = serde_json::from_str(raw) else {
+            continue;
+        };
+
+        if arguments.is_none() {
+            let found = tool_call_arguments(&value, dialect);
+            if !found.is_empty() {
+                arguments = Some(found.join(" "));
+            }
+        }
+
+        if user_text.is_none() && value.get("role").and_then(Value::as_str) != Some("assistant") {
+            let found = user_authored_text(&value);
+            if !found.is_empty() {
+                user_text = Some(found.join(" "));
+            }
+        }
+
+        if user_text.is_some() && arguments.is_some() {
+            break;
+        }
+    }
+
+    let combined = [user_text, arguments]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let combined = combined.trim();
+    if combined.is_empty() {
+        None
+    } else {
+        Some(combined.to_owned())
+    }
+}
+
+/// Text a person wrote in this message, ignoring tool results.
+///
+/// A tool result lives in a user-role message on the Anthropic wire, and including its
+/// body would make every record score against the very content being compressed —
+/// every item would look relevant, the pin cap would fill with the first few records,
+/// and relevance would be worse than useless.
+fn user_authored_text(message: &Value) -> Vec<String> {
+    match message.get("content") {
+        Some(Value::String(text)) => vec![text.clone()],
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter(|item| item.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|item| item.get("text").and_then(Value::as_str))
+            .map(str::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The arguments of every tool call in this message, in each dialect's shape.
+fn tool_call_arguments(message: &Value, dialect: Dialect) -> Vec<String> {
+    match dialect {
+        // `{"type":"tool_use","name":...,"input":{...}}` inside an assistant message.
+        Dialect::Anthropic => match message.get("content") {
+            Some(Value::Array(items)) => items
+                .iter()
+                .filter(|item| item.get("type").and_then(Value::as_str) == Some("tool_use"))
+                .filter_map(|item| item.get("input"))
+                .map(Value::to_string)
+                .collect(),
+            _ => Vec::new(),
+        },
+
+        // `{"tool_calls":[{"function":{"arguments":"{...}"}}]}` — arguments are a JSON
+        // *string*, not an object, so they are taken as text rather than re-parsed.
+        Dialect::OpenAi => message
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .map(|calls| {
+                calls
+                    .iter()
+                    .filter_map(|call| {
+                        call.get("function")
+                            .and_then(|f| f.get("arguments"))
+                            .and_then(Value::as_str)
+                    })
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
+
+        // A standalone `{"type":"function_call","arguments":"{...}"}` item.
+        Dialect::OpenAiResponses => {
+            if message.get("type").and_then(Value::as_str) == Some("function_call") {
+                message
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .map(|arguments| vec![arguments.to_owned()])
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        }
     }
 }
 
@@ -635,6 +798,95 @@ mod tests {
             r#"{{"model":"claude-opus-4","max_tokens":4096,"system":"You are a careful assistant.","tools":[{{"name":"read_file","input_schema":{{"type":"object","properties":{{"path":{{"type":"string"}}}}}}}}],"messages":[{{"role":"user","content":"turn one question"}},{{"role":"assistant","content":"turn one answer"}},{{"role":"user","content":"turn two question"}},{{"role":"assistant","content":"turn two answer"}},{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"t_old","content":"small older result"}}]}},{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"t_new","content":"{}"}}]}}]}}"#,
             bulky_tool_output()
         )
+    }
+
+    // ---- query relevance reaches a real request (#176/#177) ----
+
+    /// 60 structurally identical orders. Nothing about the data marks any one out.
+    fn orders_tool_output() -> String {
+        let records: Vec<String> = (0..60)
+            .map(|i| format!(r#"{{"order":"ord-{i:04}","state":"pending","items":2}}"#))
+            .collect();
+        format!("[{}]", records.join(",")).replace('"', "\\\"")
+    }
+
+    /// An Anthropic request whose newest turn is a tool result answering `arguments`.
+    fn request_asking(user_text: &str, arguments: &str) -> String {
+        format!(
+            r#"{{"model":"claude-opus-4","max_tokens":4096,"messages":[{{"role":"user","content":"{user_text}"}},{{"role":"assistant","content":[{{"type":"tool_use","id":"t_new","name":"list_orders","input":{arguments}}}]}},{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"t_new","content":"{}"}}]}}]}}"#,
+            orders_tool_output()
+        )
+    }
+
+    #[test]
+    fn the_record_the_user_asked_about_survives_a_real_request() {
+        // The end-to-end claim of #176/#177, asserted through `compress_request` rather
+        // than against the planner — a scorer reachable only from its own unit test is
+        // the exact defect that produced #71, #73, #75, #82 and #84.
+        //
+        // Record `ord-0042` is structurally identical to its 59 peers, so only the
+        // query can keep it.
+        let asked = request_asking("check that order for me", r#"{"order":"ord-0042"}"#);
+        let out = compress_request(asked.as_bytes(), &compressors(), true, payg());
+        let out = String::from_utf8(out.into_owned()).unwrap();
+
+        assert_ne!(
+            out, asked,
+            "nothing was compressed; the test proves nothing"
+        );
+        assert!(
+            out.contains("ord-0042"),
+            "the record the user asked about did not survive compression"
+        );
+    }
+
+    #[test]
+    fn the_same_body_without_a_question_elides_that_record() {
+        // The control. Without it the test above could pass because 60 records happen
+        // to fit, rather than because relevance did anything.
+        let unasked = request_asking("go ahead", r#"{"state":"pending"}"#);
+        let out = compress_request(unasked.as_bytes(), &compressors(), true, payg());
+        let out = String::from_utf8(out.into_owned()).unwrap();
+
+        assert_ne!(
+            out, unasked,
+            "nothing was compressed; the test proves nothing"
+        );
+        assert!(
+            !out.contains("ord-0042"),
+            "record 42 survived with no query naming it, so the sibling test is vacuous"
+        );
+    }
+
+    #[test]
+    fn the_tool_result_being_compressed_is_not_itself_the_query() {
+        // A tool result arrives inside a *user-role* message on the Anthropic wire. If
+        // the query were built from that message's content, every record would score
+        // against the very bytes being compressed, every record would look relevant,
+        // and the pin cap would fill with whichever happened to sort first.
+        let asked = request_asking("check that order for me", r#"{"order":"ord-0042"}"#);
+        let out = compress_request(asked.as_bytes(), &compressors(), true, payg());
+        let out = String::from_utf8(out.into_owned()).unwrap();
+
+        // Still a summary, not a near-copy.
+        assert!(
+            out.len() < asked.len() / 2,
+            "output is {} bytes against an input of {} — relevance pinned too much",
+            out.len(),
+            asked.len()
+        );
+    }
+
+    #[test]
+    fn compression_stays_deterministic_with_a_query() {
+        // I4 on the path that newly introduces float comparison and a sort.
+        let asked = request_asking("check that order", r#"{"order":"ord-0042"}"#);
+        let first = compress_request(asked.as_bytes(), &compressors(), true, payg()).into_owned();
+        for _ in 0..5 {
+            let again =
+                compress_request(asked.as_bytes(), &compressors(), true, payg()).into_owned();
+            assert_eq!(sha(&first), sha(&again));
+        }
     }
 
     // ---- the headline guarantee ----

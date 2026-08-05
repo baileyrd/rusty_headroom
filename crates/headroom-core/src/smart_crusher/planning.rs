@@ -16,6 +16,7 @@
 use serde_json::Value;
 
 use super::{CrushConfig, Document, FieldKind, Outlier, RecordSetStats};
+use crate::relevance::RelevanceScorer;
 
 /// What will be said about a field instead of repeating it per record.
 #[derive(Debug, Clone, PartialEq)]
@@ -109,6 +110,44 @@ pub fn plan(
     outliers: &[Outlier],
     config: &CrushConfig,
 ) -> Option<CrushPlan> {
+    plan_with_query(document, stats, outliers, config, None)
+}
+
+/// Decides how to compress a record set, pinning whatever answers `query`.
+///
+/// [`plan`] is this with `query = None`, and the two are byte-identical in that case
+/// — the relevance pass is skipped entirely rather than run against an empty string.
+///
+/// # Why the query changes what compression means
+///
+/// Every other decision this planner makes is **structural**: how repetitive the
+/// records are, which fields are constant, which records are statistically anomalous.
+/// Structure is a property of the data alone, so without a query a tool result
+/// compresses identically whether the user asked "how many files are there" or "show
+/// me `src/parser.rs`".
+///
+/// The consequence is not a worse ratio — it is a worse *answer*. A user asking about
+/// order `a3f9` among four hundred orders gets a compressed result in which that one
+/// record was no more likely to survive than any other, and the ratio looks exactly as
+/// healthy as it would have if the record had been kept. Nothing measures this, which
+/// is why it went unnoticed through Round 1.
+///
+/// Relevant records join the anchor set as a **floor**, the same relationship outliers
+/// already have: the sample yields to them, and they are never dropped to make room.
+///
+/// # What the query is
+///
+/// Supplied by the caller, not derived here. On the request path it is the newest user
+/// message text joined with the arguments of the tool call this output answers — see
+/// [`Block::with_query`](crate::block::Block::with_query). A caller with no
+/// conversation to draw on passes `None` and gets the previous behavior.
+pub fn plan_with_query(
+    document: &Document,
+    stats: &RecordSetStats,
+    outliers: &[Outlier],
+    config: &CrushConfig,
+    query: Option<&str>,
+) -> Option<CrushPlan> {
     let Value::Array(items) = document.value() else {
         return None;
     };
@@ -124,6 +163,12 @@ pub fn plan(
     // anomalous record is the single failure that makes compressed output actively
     // worse than no compression at all.
     let mut anchors: Vec<usize> = outliers.iter().map(|o| o.record).collect();
+
+    // Records answering the query, on the same footing as outliers. Both are floors
+    // the sample budget cannot cut into, for the same reason: the record the user
+    // asked about and the record that breaks the pattern are exactly the two a reader
+    // would notice were missing.
+    anchors.extend(relevant_records(items, query, config));
 
     // Head sample, so the model can infer the shape of what was elided. Taken from
     // the front because a truncated list's first entries are what a reader uses to
@@ -155,6 +200,65 @@ pub fn plan(
         fields,
         total_records: total,
     })
+}
+
+/// Indices of the records that answer `query`.
+///
+/// Empty when there is no query, which is what makes [`plan`] and
+/// [`plan_with_query`] byte-identical in the absent case — the scorer is never
+/// constructed and the records are never serialized for scoring.
+///
+/// # Why there is a cap
+///
+/// A query sharing a common term with every record — "file", "error", "status" —
+/// would otherwise pin the whole set and turn compression off without saying so. The
+/// cap keeps the worst case bounded: relevance can promote records past the sample,
+/// never past the point where a summary stops being a summary.
+///
+/// Selection is by score, and ties break toward the **earlier** record so the result
+/// does not depend on sort stability (I4).
+fn relevant_records(items: &[Value], query: Option<&str>, config: &CrushConfig) -> Vec<usize> {
+    let Some(query) = query else {
+        return Vec::new();
+    };
+
+    let budget = config.max_relevant_records.min(items.len());
+    if budget == 0 {
+        return Vec::new();
+    }
+
+    // Scored against each record's serialized form. That is what the model will read,
+    // so it is what "does this answer the question" has to be measured over — scoring
+    // values alone would miss a match on a field *name*, which is how a query like
+    // "error message" finds the record that has an `error` field at all.
+    let rendered: Vec<String> = items.iter().map(Value::to_string).collect();
+    let scores = config.scorer().score_all(query, &rendered);
+
+    let mut ranked: Vec<(usize, f64)> = scores
+        .iter()
+        .enumerate()
+        .filter(|(_, score)| score.clears(config.relevance_threshold))
+        .map(|(index, score)| (index, score.value()))
+        .collect();
+
+    // Descending by score; ascending by index within a tie. `sort_by` is stable, but
+    // spelling the tiebreak out means the ordering is a property of this comparator
+    // rather than of the sort implementation.
+    ranked.sort_by(|(left_index, left), (right_index, right)| {
+        right
+            .partial_cmp(left)
+            // Both values cleared a threshold, so neither is NaN — but I4 does not
+            // survive on "so it cannot happen", and an unordered pair would otherwise
+            // leave the order to the sort.
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(left_index.cmp(right_index))
+    });
+
+    ranked
+        .into_iter()
+        .take(budget)
+        .map(|(index, _)| index)
+        .collect()
 }
 
 /// Builds the per-field descriptions.
@@ -199,6 +303,117 @@ fn distinct_values(items: &[Value], field: &str) -> Vec<Value> {
         }
     }
     seen
+}
+
+#[cfg(test)]
+mod relevance_tests {
+    use super::*;
+    use crate::smart_crusher::{analyze_record_set, rank_outliers};
+
+    /// 60 orders, one of which is the one being asked about.
+    fn orders() -> String {
+        let records: Vec<String> = (0..60)
+            .map(|i| format!(r#"{{"order":"ord-{i:04}","state":"pending","items":2}}"#))
+            .collect();
+        format!("[{}]", records.join(","))
+    }
+
+    fn plan_for(source: &str, query: Option<&str>) -> CrushPlan {
+        let config = CrushConfig::default();
+        let doc = Document::parse(source, &config).expect("parses");
+        let stats = analyze_record_set(&doc, &config).expect("is a record set");
+        let outliers = rank_outliers(&doc, &stats, &config);
+        plan_with_query(&doc, &stats, &outliers, &config, query).expect("plans")
+    }
+
+    #[test]
+    fn the_record_that_was_asked_about_survives() {
+        // The defect this exists for. Record 42 is structurally identical to its 59
+        // peers, so nothing about the data itself would keep it — only the fact that
+        // it is what the user asked for.
+        let source = orders();
+
+        let without = plan_for(&source, None);
+        assert!(
+            !without.keeps(42),
+            "record 42 already survived without a query; the test proves nothing"
+        );
+
+        let with = plan_for(&source, Some("ord-0042"));
+        assert!(with.keeps(42), "the record the user asked about was elided");
+    }
+
+    #[test]
+    fn an_absent_query_plans_byte_for_byte_as_before() {
+        // The compatibility guarantee every non-proxy caller depends on: the CLI, the
+        // MCP server and the Python binding have no conversation to draw a query from.
+        let source = orders();
+        assert_eq!(plan_for(&source, None), plan_for(&source, Some("")).clone());
+    }
+
+    #[test]
+    fn a_query_matching_nothing_changes_nothing() {
+        let source = orders();
+        assert_eq!(
+            plan_for(&source, None),
+            plan_for(&source, Some("zzzz-no-such-term"))
+        );
+    }
+
+    #[test]
+    fn relevance_still_compresses_rather_than_pinning_everything() {
+        // A query sharing a common term with every record must not quietly turn
+        // compression off. Without the cap, `state` pins all 60 and `plan` returns
+        // `None` for "nothing would be elided" — compression silently disabled while
+        // the metrics report a healthy passthrough.
+        let source = orders();
+        let plan = plan_for(&source, Some("pending state"));
+
+        assert!(
+            plan.elided() > 0,
+            "a common term pinned the whole set and compression stopped"
+        );
+        assert!(
+            plan.anchors.len()
+                <= CrushConfig::default().sample_records
+                    + CrushConfig::default().max_relevant_records
+                    + 8,
+            "pinned {} records, which is not a summary",
+            plan.anchors.len()
+        );
+    }
+
+    #[test]
+    fn outliers_are_never_displaced_by_relevance() {
+        // Both are floors. Relevance joining the anchor set must not cost an outlier
+        // its place — dropping the anomalous record is the one failure that makes
+        // compressed output worse than none.
+        let config = CrushConfig::default();
+        let source = orders();
+        let doc = Document::parse(&source, &config).expect("parses");
+        let stats = analyze_record_set(&doc, &config).expect("is a record set");
+        let outliers = rank_outliers(&doc, &stats, &config);
+
+        let plan = plan_with_query(&doc, &stats, &outliers, &config, Some("ord-0042")).unwrap();
+
+        for outlier in &outliers {
+            assert!(
+                plan.keeps(outlier.record),
+                "outlier at {} was displaced by relevance",
+                outlier.record
+            );
+        }
+    }
+
+    #[test]
+    fn planning_with_a_query_is_deterministic() {
+        // I4, on the path that newly introduces float comparison and a sort.
+        let source = orders();
+        let first = plan_for(&source, Some("ord-0042 pending"));
+        for _ in 0..5 {
+            assert_eq!(first, plan_for(&source, Some("ord-0042 pending")));
+        }
+    }
 }
 
 #[cfg(test)]

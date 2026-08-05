@@ -14,7 +14,10 @@
 /// let config = CrushConfig::default();
 /// assert!(config.min_records_to_summarize >= 2);
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// `Eq` is deliberately absent: `relevance_threshold` is an `f64`, and a total
+// equality that ignored NaN would be a lie about a type that can hold one. Nothing
+// uses `CrushConfig` as a map key, and `PartialEq` is what the tests compare with.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CrushConfig {
     /// How many representative records to keep verbatim when summarizing an array.
     ///
@@ -66,6 +69,21 @@ pub struct CrushConfig {
     /// context; a summarized stack trace can cost it the entire debugging session.
     /// The asymmetry justifies the special case.
     pub preserve_error_fields: bool,
+
+    /// Lowest relevance score at which a record is pinned as answering the query.
+    ///
+    /// Only consulted when the caller supplied a query. Above zero rather than at it,
+    /// because BM25 gives a small nonzero score to an item sharing any term at all
+    /// with the query — and "mentions the word `file`" is not the same claim as
+    /// "answers the question".
+    pub relevance_threshold: f64,
+
+    /// Most records relevance may pin, however many clear the threshold.
+    ///
+    /// The bound that keeps a query sharing a common term with every record — `file`,
+    /// `error`, `status` — from pinning the whole set and turning compression off
+    /// without reporting that it did.
+    pub max_relevant_records: usize,
 }
 
 impl Default for CrushConfig {
@@ -79,6 +97,8 @@ impl Default for CrushConfig {
             wide_object_fields: 12,
             scalar_heavy_bytes: 1024,
             preserve_error_fields: true,
+            relevance_threshold: 0.5,
+            max_relevant_records: 5,
         }
     }
 }
@@ -87,5 +107,18 @@ impl CrushConfig {
     /// Configuration with the documented defaults.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The scorer used to decide which records answer a query.
+    ///
+    /// Returned by value rather than stored, because `CrushConfig` is `Copy` and a
+    /// boxed trait object would end that — every caller of this config, in five
+    /// crates, would have to start cloning it.
+    ///
+    /// Fixed to BM25. A configurable scorer is a knob nobody can currently turn: the
+    /// embedding tier needs ONNX, which is out of scope, so making this pluggable
+    /// today would add a setting with exactly one legal value.
+    pub fn scorer(&self) -> crate::relevance::Bm25Scorer {
+        crate::relevance::Bm25Scorer::new()
     }
 }

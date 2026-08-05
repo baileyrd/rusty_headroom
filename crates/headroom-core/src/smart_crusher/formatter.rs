@@ -25,7 +25,9 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use super::{analyze_record_set, plan, rank_outliers, CrushConfig, CrushPlan, Document, FieldPlan};
+use super::{
+    analyze_record_set, plan_with_query, rank_outliers, CrushConfig, CrushPlan, Document, FieldPlan,
+};
 use crate::block::Block;
 use crate::ccr::{store_and_mark, CcrStore};
 use crate::detection::{detect, AdaptiveSizer, ContentType};
@@ -143,6 +145,14 @@ impl SmartCrusher {
     /// Separated from [`Transform::apply`] so the whole decision path is testable
     /// without constructing a [`Block`].
     pub fn crush(&self, source: &str) -> Result<String> {
+        self.crush_for(source, None)
+    }
+
+    /// Compresses `source`, keeping whatever answers `query`.
+    ///
+    /// [`SmartCrusher::crush`] is this with no query, and the two produce identical
+    /// bytes in that case. See [`plan_with_query`] for why the query matters.
+    pub fn crush_for(&self, source: &str, query: Option<&str>) -> Result<String> {
         // Cheapest checks first. Detection is a pass over the bytes; parsing is more.
         let detection = detect(source.as_bytes());
         if detection.content_type != ContentType::Json {
@@ -157,7 +167,7 @@ impl SmartCrusher {
         let stats = analyze_record_set(&document, &self.config)
             .ok_or_else(|| Error::declined(Declined::WrongContentType))?;
         let outliers = rank_outliers(&document, &stats, &self.config);
-        let plan = plan(&document, &stats, &outliers, &self.config)
+        let plan = plan_with_query(&document, &stats, &outliers, &self.config, query)
             .ok_or_else(|| Error::declined(Declined::NotSmaller))?;
 
         // Store before marking, via the helper that pairs them — a marker must never
@@ -174,7 +184,11 @@ impl Transform for SmartCrusher {
     }
 
     fn apply(&self, block: &mut Block) -> Result<()> {
-        let compressed = self.crush(block.content())?;
+        // The block carries the question its content answers, when the caller had one.
+        // This is the single line that makes the relevance pass reachable from a real
+        // request rather than only from a test — the defect that produced #71, #73,
+        // #75, #82 and #84, each time by landing capability with no caller.
+        let compressed = self.crush_for(block.content(), block.query())?;
         block.replace_content(compressed);
         Ok(())
     }
