@@ -6,6 +6,41 @@ the crate starts publishing releases.
 
 ---
 
+## Savings reset on every deploy
+**2026-08-05** · closes #187 · see DECISIONS D40
+
+- `headroom savings` read a `/metrics` scrape from stdin, so it reported a **rate** for the
+  current process and never a **total**. A month of savings vanished on a restart, and the
+  headline claim of the project could not be answered over any period longer than one
+  process lifetime. L12 did what its issue asked; this is the layer underneath that was
+  never filed, because the docs describe savings reporting without mentioning it is backed
+  by a persistent ledger.
+- Added `headroom_core::savings::SavingsLedger` and a buffered writer in the proxy.
+  `HEADROOM_SAVINGS` names the file; without it every deployment behaves exactly as before.
+  `headroom savings --since-days N` reads the ledger, and refuses in stdin mode rather than
+  answering from data that cannot support the question.
+- **Buckets, not an append-only log.** One record per compression is an unbounded file
+  growing at request rate — a disk-exhaustion bug wearing a feature's clothes, taking down
+  a proxy somebody is already debugging. Entries aggregate on write into
+  `(hour, model_family, content_type)`, so growth is bounded by retention times distinct
+  keys rather than by traffic. A test asserts 1,000 compressions in one hour produce one
+  row. Per-request detail belongs to #188 (`headroom audit`), and building it here would be
+  building that issue badly.
+- **Writes are buffered.** Persisting synchronously would put a write, an fsync and a
+  rename between the model and the user on every request. Records accumulate under a
+  short-lived lock and a background task flushes every 60 seconds — the same shape as the
+  CCR purge task. A test asserts recording touches no disk. Saves go through a temporary
+  file and an atomic rename, the discipline D38 established.
+- Hours are zero-padded in the key so lexical order is chronological. Unpadded, hour 9
+  sorts after hour 10 and every range query silently reads the wrong set — a defect that
+  would only appear once a proxy had run long enough for the hour count to change digit
+  width. It has its own test.
+- Still **no currency figure**: a token count is a fact, a dollar amount is a guess about
+  somebody's pricing tier. Asserted by test rather than left to discipline.
+- Caught by the reachability audit while writing this: check 9 failed because
+  `HEADROOM_SAVINGS` is startup-only and was missing from the README's configuration
+  table. Exactly what that check exists for.
+
 ## The proxy observed nothing; TOIN existed only in the CLI
 **2026-08-05** · closes #185 · the issue understated this, and the source said why
 

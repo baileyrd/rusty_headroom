@@ -83,8 +83,17 @@ enum Command {
         #[arg(long)]
         settings: Option<std::path::PathBuf>,
     },
-    /// Summarize what the proxy has saved, reading its `/metrics` from stdin.
-    Savings,
+    /// Summarize what the proxy has saved.
+    ///
+    /// Reads the durable ledger when `HEADROOM_SAVINGS` names one, which is the only way
+    /// to answer "what did this save last month" — a `/metrics` scrape describes the
+    /// current process and nothing before it. Falls back to reading a scrape from stdin
+    /// when no ledger is configured.
+    Savings {
+        /// Only count what was recorded in the last N days.
+        #[arg(long)]
+        since_days: Option<u64>,
+    },
     /// Measure compression throughput on this machine.
     Perf {
         /// How many compressions to time.
@@ -148,7 +157,7 @@ fn main() -> std::process::ExitCode {
             settings,
         } => commands::wrap(&agent, &proxy, settings.as_deref()),
         Command::Unwrap { agent, settings } => commands::unwrap(&agent, settings.as_deref()),
-        Command::Savings => commands::savings(),
+        Command::Savings { since_days } => commands::savings(since_days),
         Command::Perf { iterations } => commands::perf(iterations),
         Command::Deploy { port, upstream } => commands::deploy(port, &upstream),
         Command::Update { check } => commands::update(check),

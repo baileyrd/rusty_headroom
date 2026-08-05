@@ -455,6 +455,101 @@ pub fn env(proxy: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    // ---- the durable ledger (#187) ----
+
+    #[test]
+    fn the_ledger_report_totals_across_restarts() {
+        // The claim `headroom savings` could not make before: a total over a period
+        // longer than one process lifetime.
+        use headroom_core::savings::SavingsLedger;
+
+        let dir = std::env::temp_dir().join(format!("headroom-cli-ledger-{}", std::process::id()));
+        let path = dir.join("savings.json");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut first = SavingsLedger::new();
+        first.record(std::time::SystemTime::now(), "claude", "json", 1000, 300);
+        first.save(&path).expect("saves");
+
+        let mut second = SavingsLedger::load(&path);
+        second.record(std::time::SystemTime::now(), "claude", "json", 1000, 300);
+        second.save(&path).expect("saves");
+
+        let report = super::ledger_report(&path, None);
+
+        assert!(report.contains("compressions  2"), "report was: {report}");
+        assert!(
+            report.contains("tokens saved  1400"),
+            "report was: {report}"
+        );
+        assert!(report.contains("(70.0%)"), "report was: {report}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_ledger_report_names_no_currency() {
+        // L12 decided this and the ledger does not reverse it: a token count is a fact,
+        // a dollar figure is a guess about somebody's pricing tier.
+        use headroom_core::savings::SavingsLedger;
+
+        let dir =
+            std::env::temp_dir().join(format!("headroom-cli-currency-{}", std::process::id()));
+        let path = dir.join("savings.json");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut ledger = SavingsLedger::new();
+        ledger.record(std::time::SystemTime::now(), "claude", "json", 1000, 300);
+        ledger.save(&path).expect("saves");
+
+        let report = super::ledger_report(&path, None);
+        for symbol in ["$", "USD", "cost", "dollar"] {
+            assert!(
+                !report.contains(symbol),
+                "report mentions {symbol}: {report}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_window_excludes_older_periods() {
+        use headroom_core::savings::SavingsLedger;
+
+        let dir = std::env::temp_dir().join(format!("headroom-cli-window-{}", std::process::id()));
+        let path = dir.join("savings.json");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let now = std::time::SystemTime::now();
+        let mut ledger = SavingsLedger::new();
+        ledger.record(
+            now - std::time::Duration::from_secs(10 * 24 * 3600),
+            "c",
+            "json",
+            900,
+            100,
+        );
+        ledger.record(now, "c", "json", 100, 40);
+        ledger.save(&path).expect("saves");
+
+        let all = super::ledger_report(&path, None);
+        let recent = super::ledger_report(&path, Some(1));
+
+        assert!(all.contains("compressions  2"), "all was: {all}");
+        assert!(recent.contains("compressions  1"), "recent was: {recent}");
+    }
+
+    #[test]
+    fn an_empty_ledger_reports_zero_rather_than_failing() {
+        let report = super::ledger_report(
+            std::path::Path::new("/nonexistent/headroom/savings.json"),
+            None,
+        );
+        assert!(report.contains("compressions  0"), "report was: {report}");
+        assert!(report.contains("(0.0%)"), "report was: {report}");
+    }
     use super::*;
 
     /// The orchestrator this command routes through, as `compress` builds it.
@@ -1378,14 +1473,71 @@ pub fn unwrap(agent: &str, settings: Option<&std::path::Path>) -> anyhow::Result
 /// # Errors
 ///
 /// Returns an error if the metrics text cannot be read from stdin.
-pub fn savings() -> anyhow::Result<()> {
-    let raw = read_stdin()?;
-    let report = savings_report(&raw);
+pub fn savings(since_days: Option<u64>) -> anyhow::Result<()> {
+    // The ledger first, because it is the only source that can answer over a period
+    // longer than one process lifetime. The stdin path is kept, not replaced: it is what
+    // every deployment without `HEADROOM_SAVINGS` still uses, and it works with no proxy
+    // state at all.
+    let report = match std::env::var("HEADROOM_SAVINGS")
+        .ok()
+        .filter(|p| !p.trim().is_empty())
+    {
+        Some(path) => ledger_report(std::path::Path::new(&path), since_days),
+        None => {
+            if since_days.is_some() {
+                anyhow::bail!(
+                    "--since-days needs a durable ledger; set HEADROOM_SAVINGS on the proxy \
+                     and on this command. A /metrics scrape describes only the current process."
+                );
+            }
+            savings_report(&read_stdin()?)
+        }
+    };
 
     let mut stdout = std::io::stdout().lock();
     writeln!(stdout, "{report}")?;
     stdout.flush()?;
     Ok(())
+}
+
+/// Renders the durable ledger.
+///
+/// No currency figure, deliberately: L12 decided that and this does not reverse it. A
+/// token count is a fact; a dollar amount is a guess about somebody's pricing tier, and a
+/// guess printed beside facts reads as one.
+fn ledger_report(path: &std::path::Path, since_days: Option<u64>) -> String {
+    let ledger = headroom_core::savings::SavingsLedger::load(path);
+    let since = since_days.and_then(|days| {
+        std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(days * 24 * 3600))
+    });
+    let total = ledger.total_since(since);
+
+    let window = match since_days {
+        Some(days) => format!("last {days} days"),
+        None => "all recorded".to_owned(),
+    };
+
+    let percent = if total.tokens_before > 0 {
+        (total.saved() as f64 / total.tokens_before as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    format!(
+        "window        {window}\n\
+         periods       {}\n\
+         compressions  {}\n\
+         passthroughs  {}\n\
+         tokens before {}\n\
+         tokens after  {}\n\
+         tokens saved  {} ({percent:.1}%)",
+        ledger.buckets().len(),
+        total.compressions,
+        total.passthroughs,
+        total.tokens_before,
+        total.tokens_after,
+        total.saved(),
+    )
 }
 
 /// Builds the savings report from Prometheus exposition text.
