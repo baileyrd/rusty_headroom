@@ -17,6 +17,85 @@ the crate starts publishing releases.
   `Close(None)` — the spec-legal abrupt close — still maps to `Close(None)`, not a
   fabricated code.
 
+## The Responses API's mid-stream `error` event was silently dropped
+**2026-08-04** · a real provider error, never recorded as a failure
+
+- `classify` split an event's type on its last `.` to get a stem and suffix — but
+  the Responses API's error event arrives as a bare `"error"`, with no `.` at all. The
+  split left an empty stem, which matched neither `("error", _)` nor
+  `("response", "error")` and fell through to `Other`.
+- Fixed: a type with no `.` is now its own stem with an empty suffix, so a bare `error`
+  is classified correctly.
+
+<<<<<<< HEAD
+## An SSE frame with no terminator could buffer without bound
+**2026-08-04** · the streaming twin of `observe.rs`'s existing body cap
+
+- `SseParser::feed` accumulated into `buffer` until it saw `\n\n`/`\r\n\r\n`, with no
+  upper bound. A hung or misbehaving upstream, a compromised/MITM'd one, or a provider
+  bug streaming one unbounded `data:` field never sends that terminator, so the buffer
+  grew for the entire lifetime of the connection.
+- Added `MAX_FRAME_BYTES` (1 MiB, a quarter of `observe.rs`'s `MAX_BUFFERED_BODY`, sized
+  for one buffered reply rather than one frame). Past the cap, `feed` drops what it was
+  holding and marks the parser overflowed; the relayed bytes are unaffected — only
+  this reply's telemetry is given up on — and `observe.rs` now logs it once rather
+  than on every subsequent poll.
+=======
+## Every OpenAI model was token-counted with gpt-4o's vocabulary
+**2026-08-04** · the direction invariant I5 exists to forbid
+
+- `Registry::with_defaults` built one `TiktokenCounter` from `"gpt-4o"` and registered
+  it for the whole `Family::OpenAi` bucket. OpenAI is the one family with more than one
+  encoding in active use — `cl100k_base` for GPT-4/GPT-3.5, `o200k_base` for GPT-4o
+  and later — so a `gpt-3.5-turbo`/`gpt-4` request was measured with `o200k_base`
+  while `is_exact_for` still reported `true`. `o200k_base` under-counts relative to a
+  model's real `cl100k_base` on content where they differ.
+- Fixed: the registry now resolves the encoding from the actual model string via
+  `TiktokenCounter::for_model`, not a fixed instance. An explicit
+  `register(Family::OpenAi, ...)` still overrides it, for a caller that wants one fixed
+  tokenizer regardless.
+
+## Grouping search matches by file was O(n²) in the number of distinct files
+**2026-08-04** · a single broad `grep -rn` could turn one request into a multi-second stall
+
+- `compress` found each match's group with a linear scan
+  (`files.iter_mut().find(...)`) over every distinct file seen so far, repeated per
+  match line. One match per file across a large codebase — the realistic worst case
+  for a broad search — made grouping quadratic in the file count.
+- Added a `HashMap<String, usize>` from path to its slot in `files`, the same
+  order-preserving-lookup pattern `log_compressor.rs` already uses, so each match
+  groups in O(1). A 900-distinct-file regression test proves correctness (right file,
+  right match count, first-appearance order preserved) at a scale where the old scan's
+  cost would have been unmistakable.
+
+## `templatize` could panic on a token made entirely of quotes
+**2026-08-04** · found reading the punctuation-stripping logic, not from a crash report
+
+- `normalize_token` stripped leading and trailing punctuation independently, and both
+  character classes include quote characters. A token made entirely of quotes — a
+  lone `"`, or a run of them — was consumed by both scans, producing
+  `lead.len() + tail.len() > token.len()` and panicking on the slice
+  `token[lead.len()..token.len() - tail.len()]`.
+- Fixed by scanning the trailing class over `remainder` (what's left after the leading
+  scan), not over the whole token, which makes the two scans structurally unable to
+  overlap.
+
+## A throwaway `x-api-key` header could override a restricted `Authorization`
+**2026-08-04** · the direction that matters: escalating to the most permissive policy
+
+- `classify_auth_mode` granted PayAsYouGo on `headers.contains_key("x-api-key")` alone
+  — presence, not shape. Every other branch in the function validates the token's
+  shape before trusting it; this one didn't. A request authenticating with a
+  legitimately restricted `Authorization` (a subscription session token, OAuth) could
+  add a throwaway, garbage `x-api-key` to the same request and flip the proxy's local
+  classification to the most permissive `CompressionPolicy`, before the provider ever
+  saw the bogus key to reject it.
+- Fixed: `x-api-key` now only grants PayAsYouGo when its value has the shape of a real
+  key (shared with the `Authorization` branch via `looks_like_pay_as_you_go_key`). Two
+  regression tests cover both directions: a garbage key alone classifies as
+  Subscription, and a garbage key alongside a restricted `Authorization` does too.
+>>>>>>> origin/main
+
 ## The reachability audit conflated `STARTUP_ONLY` with every known setting
 **2026-08-04** · found while re-reading the audit's own README check
 
