@@ -75,6 +75,22 @@ enum Command {
         #[arg(long)]
         settings: Option<std::path::PathBuf>,
     },
+    /// Report the compression opportunities real traffic declined.
+    ///
+    /// Reads a TOIN aggregate — `curl localhost:8787/v1/telemetry/export` — from stdin,
+    /// or from `--from`. `learn` mines a corpus you hand it; this reads what actually
+    /// flowed.
+    Audit {
+        /// Read the aggregate from a file instead of stdin.
+        #[arg(long)]
+        from: Option<std::path::PathBuf>,
+        /// Fewest samples before a shape is reported.
+        ///
+        /// A shape seen twice says nothing, and ranking it beside one seen ten thousand
+        /// times invites acting on noise.
+        #[arg(long, default_value_t = 5)]
+        min_samples: u64,
+    },
     /// Find and restore agent settings a killed `wrap` left behind.
     ///
     /// `unwrap` restores a wrapped file byte for byte — when it gets to run. A `wrap`
@@ -170,6 +186,7 @@ fn main() -> std::process::ExitCode {
             settings,
         } => commands::wrap(&agent, &proxy, settings.as_deref()),
         Command::Unwrap { agent, settings } => commands::unwrap(&agent, settings.as_deref()),
+        Command::Audit { from, min_samples } => commands::audit(from.as_deref(), min_samples),
         Command::Recover { path, apply } => commands::recover(&path, apply),
         Command::Savings { since_days } => commands::savings(since_days),
         Command::Perf { iterations } => commands::perf(iterations),
