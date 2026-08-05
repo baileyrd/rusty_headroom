@@ -32,8 +32,12 @@ use redis::{Client, Commands, Connection};
 use super::{CcrStore, ContentHash};
 use crate::error::{Error, Result};
 
-/// Key prefix, so a Redis shared with other users stays legible and a `SCAN` for this
-/// crate's keys cannot match somebody else's.
+/// Key prefix, so this crate's keys stay legible in a Redis instance shared with other
+/// *applications* and a `SCAN` for them cannot match somebody else's.
+///
+/// Not tenant isolation between two customers of *this* proxy — retrieval is
+/// `hash -> bytes` with no requester identity checked (see `ccr` module docs), so a
+/// Redis instance must still be scoped to one customer's traffic, prefix or not.
 const KEY_PREFIX: &str = "headroom:ccr:";
 
 /// A CCR store backed by a shared Redis.

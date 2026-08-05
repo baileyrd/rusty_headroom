@@ -6,6 +6,20 @@ the crate starts publishing releases.
 
 ---
 
+## CCR retrieval has no tenant isolation, and now says so
+**2026-08-04** · a deployment requirement the code cannot enforce from where it sits
+
+- `CcrStore::get` is `hash -> bytes` and nothing else — no session, credential, or
+  requester identity checked. Deliberate: a `<<ccr:HASH>>` marker the proxy wrote must
+  be redeemable from a different process (the MCP server), and hashes are pure content
+  digests so I4 holds. But it also means the store has no per-tenant isolation at all.
+- Documented on `CcrStore::get`, the `ccr` module, `RedisCcrStore`'s key prefix (which
+  keeps keys legible in a Redis shared with other applications, not customers apart),
+  README.md and ARCHITECTURE.md: `HEADROOM_CCR_DIR`/`HEADROOM_REDIS_URL` must point at a
+  store scoped to one customer's traffic. Pointing a shared store — especially a
+  shared Redis instance — at more than one customer's proxy lets any of them retrieve
+  any other's compressed originals by presenting a hash they obtained or guessed.
+
 ## Two proxy tests were silently no-ops on Windows
 **2026-08-04** · `/proc/self/mem` doesn't exist there
 

@@ -17,6 +17,20 @@
 //! produce the same hash and the same marker bytes, and it does — hashing never
 //! consults the clock. Expiry only governs how long the original stays retrievable,
 //! which is a storage-lifecycle concern and never changes the bytes sent upstream.
+//!
+//! # Deployment constraint: one store per customer
+//!
+//! Retrieval is `hash -> bytes` and nothing else — no session, credential, or
+//! requester identity is checked (see [`CcrStore::get`]). That is deliberate: a
+//! marker is meant to be redeemable from a *different* process than the one that
+//! wrote it (the proxy compresses, the MCP server retrieves), and hashes are pure
+//! content digests so I4 holds. It also means the store has no per-tenant isolation
+//! whatsoever. `HEADROOM_CCR_DIR`/`HEADROOM_REDIS_URL` must point at a store scoped
+//! to a single customer's traffic — pointing one shared store (especially a shared
+//! Redis instance) at more than one customer's proxy lets any of them retrieve any
+//! other's compressed originals by presenting a hash they obtained or guessed. This
+//! is an operational requirement this crate cannot enforce from where it sits; it is
+//! not automatically satisfied by anything the code checks.
 
 mod hash;
 mod in_memory;
@@ -57,6 +71,10 @@ pub trait CcrStore: Send + Sync {
     /// A miss is `Ok(None)`, not an error. Entries expire, and a model asking for
     /// something that has aged out is an ordinary occurrence the caller handles by
     /// telling it so.
+    ///
+    /// No caller identity is checked — anyone who presents `hash` gets the content.
+    /// See the module-level "Deployment constraint" section for what that requires
+    /// of how a store is deployed.
     fn get(&self, hash: ContentHash) -> Result<Option<Vec<u8>>>;
 
     /// Removes expired entries, returning how many were removed.
