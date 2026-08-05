@@ -159,6 +159,10 @@ pub fn safety_limits() -> headroom_core::pipeline::safety::Limits {
 }
 
 /// The default request-per-minute backstop.
+///
+/// Set well above any human or agent workload. This is a backstop against a retry loop
+/// somewhere upstream of the proxy relaying thousands of requests with the customer's
+/// credential attached — not a quota, and it should never be the thing a real user meets.
 pub const DEFAULT_RATE_LIMIT: u32 = 600;
 
 /// Requests per minute before the proxy answers 429.
