@@ -20,6 +20,46 @@ the crate starts publishing releases.
   `register(Family::OpenAi, ...)` still overrides it, for a caller that wants one fixed
   tokenizer regardless.
 
+## Grouping search matches by file was O(n²) in the number of distinct files
+**2026-08-04** · a single broad `grep -rn` could turn one request into a multi-second stall
+
+- `compress` found each match's group with a linear scan
+  (`files.iter_mut().find(...)`) over every distinct file seen so far, repeated per
+  match line. One match per file across a large codebase — the realistic worst case
+  for a broad search — made grouping quadratic in the file count.
+- Added a `HashMap<String, usize>` from path to its slot in `files`, the same
+  order-preserving-lookup pattern `log_compressor.rs` already uses, so each match
+  groups in O(1). A 900-distinct-file regression test proves correctness (right file,
+  right match count, first-appearance order preserved) at a scale where the old scan's
+  cost would have been unmistakable.
+
+## `templatize` could panic on a token made entirely of quotes
+**2026-08-04** · found reading the punctuation-stripping logic, not from a crash report
+
+- `normalize_token` stripped leading and trailing punctuation independently, and both
+  character classes include quote characters. A token made entirely of quotes — a
+  lone `"`, or a run of them — was consumed by both scans, producing
+  `lead.len() + tail.len() > token.len()` and panicking on the slice
+  `token[lead.len()..token.len() - tail.len()]`.
+- Fixed by scanning the trailing class over `remainder` (what's left after the leading
+  scan), not over the whole token, which makes the two scans structurally unable to
+  overlap.
+
+## A throwaway `x-api-key` header could override a restricted `Authorization`
+**2026-08-04** · the direction that matters: escalating to the most permissive policy
+
+- `classify_auth_mode` granted PayAsYouGo on `headers.contains_key("x-api-key")` alone
+  — presence, not shape. Every other branch in the function validates the token's
+  shape before trusting it; this one didn't. A request authenticating with a
+  legitimately restricted `Authorization` (a subscription session token, OAuth) could
+  add a throwaway, garbage `x-api-key` to the same request and flip the proxy's local
+  classification to the most permissive `CompressionPolicy`, before the provider ever
+  saw the bogus key to reject it.
+- Fixed: `x-api-key` now only grants PayAsYouGo when its value has the shape of a real
+  key (shared with the `Authorization` branch via `looks_like_pay_as_you_go_key`). Two
+  regression tests cover both directions: a garbage key alone classifies as
+  Subscription, and a garbage key alongside a restricted `Authorization` does too.
+
 ## The reachability audit conflated `STARTUP_ONLY` with every known setting
 **2026-08-04** · found while re-reading the audit's own README check
 
