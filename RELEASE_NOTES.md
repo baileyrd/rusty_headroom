@@ -6,6 +6,7 @@ the crate starts publishing releases.
 
 ---
 
+<<<<<<< HEAD
 ## The CCR store's expired entries were never purged
 **2026-08-04** · `purge_expired` existed; nothing in either binary called it
 
@@ -21,6 +22,21 @@ the crate starts publishing releases.
   async runtime). Both run every 5 minutes — well inside a tenth of the shortest
   `CCR_TTL` in use. `purge_ccr_once` is split out and tested directly against a
   seeded store in each binary, so the fix is proven without waiting on a real timer.
+=======
+## `X-Forwarded-For` was fully implemented and never called
+**2026-08-04** · the policy permitted it; nothing on the request path added it
+
+- `apply_forwarded` existed and was unit-tested in `headers.rs`, and
+  `CompressionPolicy::forwarded_headers` gated it — but nothing on any of the four
+  relaying routes ever called it. A PayAsYouGo request never carried the caller's
+  address upstream, silently, since the policy check itself never failed.
+- Added a `PeerAddr` extractor (`ConnectInfo<SocketAddr>` read from request
+  extensions, since `Option<ConnectInfo<SocketAddr>>` does not compile as an
+  extractor and the bare form rejects every `Router::oneshot` test) and wired it into
+  `/v1/messages`, `/v1/chat/completions` and `/v1/responses`. End-to-end tests prove a
+  PayAsYouGo request now carries `X-Forwarded-For` with the caller's IP, and a
+  Subscription request — where the policy forbids it — still doesn't.
+>>>>>>> origin/main
 
 ## CCR retrieval has no tenant isolation, and now says so
 **2026-08-04** · a deployment requirement the code cannot enforce from where it sits
