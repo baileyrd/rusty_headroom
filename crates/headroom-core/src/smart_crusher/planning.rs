@@ -15,7 +15,7 @@
 
 use serde_json::Value;
 
-use super::{CrushConfig, Document, FieldKind, Outlier, RecordSetStats};
+use super::{classify_field, CrushConfig, Document, FieldKind, FieldRole, Outlier, RecordSetStats};
 use crate::relevance::RelevanceScorer;
 
 /// What will be said about a field instead of repeating it per record.
@@ -164,6 +164,12 @@ pub fn plan_with_query(
     // worse than no compression at all.
     let mut anchors: Vec<usize> = outliers.iter().map(|o| o.record).collect();
 
+    // Records the data itself ranks highest. A score field is the payload saying which
+    // of its own records matter — a search result set's `relevance`, a ranked list's
+    // `confidence` — and eliding the top of it while keeping an arbitrary head sample
+    // inverts what the tool was asked to produce.
+    anchors.extend(top_ranked_records(items, config));
+
     // Records answering the query, on the same footing as outliers. Both are floors
     // the sample budget cannot cut into, for the same reason: the record the user
     // asked about and the record that breaks the pattern are exactly the two a reader
@@ -200,6 +206,72 @@ pub fn plan_with_query(
         fields,
         total_records: total,
     })
+}
+
+/// Indices of the highest-ranked records, when the payload carries a score field.
+///
+/// Empty when no field qualifies, which is the common case — so a record set without a
+/// ranking signal plans exactly as it did before this existed.
+///
+/// # Why the identifier check is load-bearing
+///
+/// A numeric `id` running `1..200` is numeric, non-constant and evenly distributed, which
+/// is everything a score looks like. Ranking by it would pin records 195–199 and present
+/// that as a summary of what mattered. [`classify_field`] rules those out first, and that
+/// is the reason it exists.
+///
+/// Only the *first* qualifying field is used. Two score fields ranking in different
+/// directions is a payload nobody can summarize correctly, and picking one arbitrarily is
+/// more honest than blending them into a number that means nothing.
+fn top_ranked_records(items: &[Value], config: &CrushConfig) -> Vec<usize> {
+    let budget = config.max_ranked_records.min(items.len());
+    if budget == 0 {
+        return Vec::new();
+    }
+
+    let records: Vec<&serde_json::Map<String, Value>> =
+        items.iter().filter_map(Value::as_object).collect();
+    if records.len() != items.len() {
+        return Vec::new();
+    }
+
+    // Document order, so which field wins does not depend on map iteration order (I4).
+    let mut names: Vec<&str> = Vec::new();
+    for record in &records {
+        for name in record.keys() {
+            if !names.contains(&name.as_str()) {
+                names.push(name);
+            }
+        }
+    }
+
+    let Some(field) = names
+        .into_iter()
+        .find(|name| classify_field(&records, name) == FieldRole::Score)
+    else {
+        return Vec::new();
+    };
+
+    let mut ranked: Vec<(usize, f64)> = records
+        .iter()
+        .enumerate()
+        .filter_map(|(index, record)| record.get(field)?.as_f64().map(|score| (index, score)))
+        .collect();
+
+    // Descending by score; ascending by index within a tie, so the order is a property of
+    // this comparator rather than of the sort (I4).
+    ranked.sort_by(|(left_index, left), (right_index, right)| {
+        right
+            .partial_cmp(left)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(left_index.cmp(right_index))
+    });
+
+    ranked
+        .into_iter()
+        .take(budget)
+        .map(|(index, _)| index)
+        .collect()
 }
 
 /// Indices of the records that answer `query`.
@@ -303,6 +375,124 @@ fn distinct_values(items: &[Value], field: &str) -> Vec<Value> {
         }
     }
     seen
+}
+
+#[cfg(test)]
+mod ranking_tests {
+    use super::*;
+    use crate::smart_crusher::{analyze_record_set, rank_outliers};
+
+    /// A search result set: 60 hits, descending relevance, best first is *not* the
+    /// document order.
+    fn search_hits() -> String {
+        let mut records: Vec<String> = (0..60)
+            .map(|i| format!(r#"{{"doc":"doc-{i:03}","relevance":0.100,"state":"ok"}}"#))
+            .collect();
+        // The genuinely best hit sits well past the head sample.
+        records[47] = r#"{"doc":"doc-047","relevance":0.950,"state":"ok"}"#.to_owned();
+        records[48] = r#"{"doc":"doc-048","relevance":0.910,"state":"ok"}"#.to_owned();
+        format!("[{}]", records.join(","))
+    }
+
+    fn plan_for(source: &str) -> CrushPlan {
+        let config = CrushConfig::default();
+        let doc = Document::parse(source, &config).expect("parses");
+        let stats = analyze_record_set(&doc, &config).expect("is a record set");
+        let outliers = rank_outliers(&doc, &stats, &config);
+        plan_with_query(&doc, &stats, &outliers, &config, None).expect("plans")
+    }
+
+    #[test]
+    fn the_highest_scoring_records_survive() {
+        // A search result set is the payload saying which of its own records matter.
+        // Eliding the top of it while keeping an arbitrary head sample inverts what the
+        // tool was asked to produce.
+        let plan = plan_for(&search_hits());
+
+        assert!(plan.keeps(47), "the best-scoring record was elided");
+        assert!(plan.keeps(48), "the second-best record was elided");
+    }
+
+    #[test]
+    fn a_numeric_id_does_not_rank_anything() {
+        // The reason `classify_field` exists. `seq` running 0..60 is numeric,
+        // non-constant and evenly spread — everything a score looks like. Ranking by it
+        // would pin the highest-numbered records and call that a summary of what
+        // mattered.
+        let records: Vec<String> = (0..60)
+            .map(|i| format!(r#"{{"seq":{i},"state":"ok"}}"#))
+            .collect();
+        let plan = plan_for(&format!("[{}]", records.join(",")));
+
+        for tail in 55..60 {
+            assert!(
+                !plan.keeps(tail),
+                "record {tail} was pinned by its sequence number"
+            );
+        }
+    }
+
+    #[test]
+    fn a_timestamp_does_not_rank_anything() {
+        // Same shape, different disguise: ranking by `created_at` keeps the newest
+        // records rather than the ones that matter.
+        let records: Vec<String> = (0..60)
+            .map(|i| {
+                format!(
+                    r#"{{"created_at":{},"state":"ok"}}"#,
+                    1_700_000_000u64 + i * 3600
+                )
+            })
+            .collect();
+        let plan = plan_for(&format!("[{}]", records.join(",")));
+
+        for tail in 55..60 {
+            assert!(
+                !plan.keeps(tail),
+                "record {tail} was pinned by its timestamp"
+            );
+        }
+    }
+
+    #[test]
+    fn a_record_set_without_a_score_plans_exactly_as_before() {
+        let records: Vec<String> = (0..60)
+            .map(|i| format!(r#"{{"path":"src/module_{i}.rs","kind":"file"}}"#))
+            .collect();
+        let source = format!("[{}]", records.join(","));
+
+        let config = CrushConfig::default();
+        let doc = Document::parse(&source, &config).unwrap();
+        let stats = analyze_record_set(&doc, &config).unwrap();
+        let outliers = rank_outliers(&doc, &stats, &config);
+
+        let mut without = config;
+        without.max_ranked_records = 0;
+
+        assert_eq!(
+            plan_with_query(&doc, &stats, &outliers, &config, None),
+            plan_with_query(&doc, &stats, &outliers, &without, None)
+        );
+    }
+
+    #[test]
+    fn ranking_still_compresses() {
+        // The cap. A score field with a narrow spread must not pin most of the set and
+        // quietly stop compression.
+        let plan = plan_for(&search_hits());
+        assert!(plan.elided() > 0, "ranking pinned the whole set");
+    }
+
+    #[test]
+    fn ranking_is_deterministic() {
+        // Every relevance below the top two is identical here, so the tie-break is doing
+        // the work — exactly the case that would vary if it relied on sort stability.
+        let source = search_hits();
+        let first = plan_for(&source);
+        for _ in 0..5 {
+            assert_eq!(first, plan_for(&source));
+        }
+    }
 }
 
 #[cfg(test)]

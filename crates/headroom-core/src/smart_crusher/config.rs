@@ -84,6 +84,12 @@ pub struct CrushConfig {
     /// `error`, `status` — from pinning the whole set and turning compression off
     /// without reporting that it did.
     pub max_relevant_records: usize,
+
+    /// Most records the payload's own ranking may pin.
+    ///
+    /// Bounded for the same reason as the relevance cap: a score field with a narrow
+    /// spread would otherwise pin most of the set and quietly stop compression.
+    pub max_ranked_records: usize,
 }
 
 impl Default for CrushConfig {
@@ -99,6 +105,7 @@ impl Default for CrushConfig {
             preserve_error_fields: true,
             relevance_threshold: 0.5,
             max_relevant_records: 5,
+            max_ranked_records: 5,
         }
     }
 }
