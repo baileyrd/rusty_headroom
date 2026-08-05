@@ -6,6 +6,22 @@ the crate starts publishing releases.
 
 ---
 
+## `headroom learn` measured plain user messages as compressible prose
+**2026-08-04** · D24/D36/D37's failure mode, a fourth time
+
+- `compressible_content` handed every extracted string back as untagged
+  `BlockKind::Text` and `learn` routed it through `Orchestrator::transform_for`,
+  which skips the tool-output-only gate that keeps the lossy prose summarizer off
+  content a person or the model wrote. So a plain user message in the training
+  corpus could be measured, and recommended, as compressible.
+- `compressible_content` now derives the same `BlockKind` `headroom-proxy`'s
+  `compression.rs` would give the content — `role == "tool"` for OpenAI chat, the
+  Responses item's `type` field, the Anthropic block's `type` field — and `learn`
+  routes with `transform_for_block`, the gated call. `headroom-proxy` is only a
+  dev-dependency of this crate, so the rules are mirrored rather than reused.
+  Regression tests cover all three wire shapes plus an end-to-end check that a plain
+  user message never reaches a compressor through the `learn` corpus path.
+
 ## `headroom env`/`wrap` printed unquoted shell exports
 **2026-08-04** · documented usage is `eval "$(headroom env)"`
 

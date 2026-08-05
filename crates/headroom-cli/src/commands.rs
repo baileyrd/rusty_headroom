@@ -575,6 +575,87 @@ mod tests {
             .join("\n")
     }
 
+    #[test]
+    fn compressible_content_tags_openai_chat_by_role() {
+        // Regression. `learn` used to hand every extracted string back untagged and
+        // route it through `Orchestrator::transform_for`, which skips the
+        // tool-output-only gate -- so a plain user message could be measured as
+        // compressible prose.
+        let body: serde_json::Value = serde_json::from_str(
+            r#"{"messages":[
+                {"role":"user","content":"hello there"},
+                {"role":"tool","tool_call_id":"c","content":"tool output"}
+            ]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            compressible_content(&body),
+            vec![
+                ("hello there".to_owned(), BlockKind::Text),
+                ("tool output".to_owned(), BlockKind::ToolResult),
+            ]
+        );
+    }
+
+    #[test]
+    fn compressible_content_tags_anthropic_blocks_by_type() {
+        let body: serde_json::Value = serde_json::from_str(
+            r#"{"messages":[{"role":"user","content":[
+                {"type":"text","text":"hello there"},
+                {"type":"tool_result","content":"tool output"}
+            ]}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            compressible_content(&body),
+            vec![
+                ("hello there".to_owned(), BlockKind::Text),
+                ("tool output".to_owned(), BlockKind::ToolResult),
+            ]
+        );
+    }
+
+    #[test]
+    fn compressible_content_tags_responses_items_by_type() {
+        let body: serde_json::Value = serde_json::from_str(
+            r#"{"input":[{"type":"function_call_output","call_id":"c","output":"tool output"}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            compressible_content(&body),
+            vec![("tool output".to_owned(), BlockKind::FunctionCallOutput)]
+        );
+    }
+
+    #[test]
+    fn learn_never_routes_a_user_message_through_the_prose_summarizer() {
+        // The end-to-end version of the two tests above: content `compressible_content`
+        // tags as `BlockKind::Text` must still be declined by the orchestrator, exactly
+        // as `learn`'s loop would leave it -- proving the fix all the way through, not
+        // just the tagging step.
+        let prose = compressible_prose();
+        let body: serde_json::Value = serde_json::from_str(&format!(
+            r#"{{"messages":[{{"role":"user","content":{}}}]}}"#,
+            serde_json::to_string(&prose).unwrap()
+        ))
+        .unwrap();
+
+        let found = compressible_content(&body);
+        assert_eq!(found, vec![(prose, BlockKind::Text)]);
+
+        let orchestrator = orchestrator();
+        let block = Block::new(BlockKind::Text, found[0].0.clone());
+        assert!(
+            orchestrator
+                .transform_for_block(&block, payg(), "claude-opus-4")
+                .is_none(),
+            "a plain user message reached a compressor via the learn corpus path"
+        );
+    }
+
     /// The value `inspect_report` printed after `label:`, searching from `from`.
     ///
     /// Read out of the rendered lines rather than returned from a struct, because the
@@ -1981,7 +2062,7 @@ pub fn learn(min_samples: u64) -> anyhow::Result<()> {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("unknown");
 
-        for content in compressible_content(&body) {
+        for (content, kind) in compressible_content(&body) {
             let detected = detect(content.as_bytes()).content_type;
             let key = AggregationKey::new(
                 AuthMode::PayAsYouGo,
@@ -1989,8 +2070,8 @@ pub fn learn(min_samples: u64) -> anyhow::Result<()> {
                 StructureHash::of(&content, detected),
             );
 
-            let mut block = Block::new(BlockKind::Text, content.clone());
-            match orchestrator.transform_for(&content, policy, model) {
+            let mut block = Block::new(kind, content.clone());
+            match orchestrator.transform_for_block(&block, policy, model) {
                 Some(transform) => match validated_apply(transform, &mut block, &estimator) {
                     Ok(outcome) if outcome.is_compressed() => aggregator.record(
                         &key,
@@ -2021,12 +2102,24 @@ pub fn learn(min_samples: u64) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Extracts every compressible string from a request body.
+/// Extracts every compressible string from a request body, tagged with the
+/// [`BlockKind`] the live proxy would give it.
 ///
 /// Message content only. A system prompt or a tool definition is in the cache hot zone
 /// and never compressed, so measuring it would produce recommendations about content
 /// the proxy will never act on.
-fn compressible_content(body: &serde_json::Value) -> Vec<String> {
+///
+/// # Why the kind is derived here rather than reused from the proxy
+///
+/// Regression (D24/D36/D37's failure mode, again): this used to hand every string
+/// back as untagged `BlockKind::Text` and route it through `Orchestrator::transform_for`,
+/// which skips the gate that keeps the lossy prose summarizer off content a person or
+/// the model typed. `headroom-proxy` classifies exactly this shape correctly in
+/// `compression.rs` — `role == "tool"` for OpenAI chat, the Responses item's `type`
+/// field, and the Anthropic block's `type` field — but it is only a dev-dependency of
+/// this crate (see `Cargo.toml`), not a production one, so its internals cannot be
+/// called from here. The rules below mirror it instead.
+fn compressible_content(body: &serde_json::Value) -> Vec<(String, BlockKind)> {
     let mut found = Vec::new();
 
     let messages = body
@@ -2035,18 +2128,47 @@ fn compressible_content(body: &serde_json::Value) -> Vec<String> {
         .and_then(serde_json::Value::as_array);
 
     for message in messages.into_iter().flatten() {
-        // The three shapes a tool result arrives in: a plain string body (OpenAI chat),
-        // an `output` member (OpenAI Responses), or a typed block (Anthropic).
-        for key in ["content", "output"] {
-            if let Some(text) = message.get(key).and_then(serde_json::Value::as_str) {
-                found.push(text.to_owned());
-            }
+        let role = message.get("role").and_then(serde_json::Value::as_str);
+        let item_type = message.get("type").and_then(serde_json::Value::as_str);
+
+        // A plain string body (OpenAI chat). `role: "tool"` is a tool result; any
+        // other role is text a person or the model wrote, never lossily rewritten.
+        if let Some(text) = message.get("content").and_then(serde_json::Value::as_str) {
+            let kind = if role == Some("tool") {
+                BlockKind::ToolResult
+            } else {
+                BlockKind::Text
+            };
+            found.push((text.to_owned(), kind));
         }
+
+        // The OpenAI Responses item shape: a standalone item with no `role`, an
+        // `output` string, and a `type` naming which kind of call it answers.
+        if let Some(text) = message.get("output").and_then(serde_json::Value::as_str) {
+            let kind = match item_type {
+                Some("local_shell_call_output") => BlockKind::LocalShellCallOutput,
+                Some("apply_patch_call_output") => BlockKind::ApplyPatchCallOutput,
+                // `function_call_output` and anything else carrying an `output`
+                // string: a Responses item with no `role` at all is tool-shaped by
+                // construction, so this defaults to a tool result rather than text.
+                _ => BlockKind::FunctionCallOutput,
+            };
+            found.push((text.to_owned(), kind));
+        }
+
+        // Anthropic's typed content-block array.
         if let Some(blocks) = message.get("content").and_then(serde_json::Value::as_array) {
             for block in blocks {
+                let kind = if block.get("type").and_then(serde_json::Value::as_str)
+                    == Some("tool_result")
+                {
+                    BlockKind::ToolResult
+                } else {
+                    BlockKind::Text
+                };
                 for key in ["content", "text"] {
                     if let Some(text) = block.get(key).and_then(serde_json::Value::as_str) {
-                        found.push(text.to_owned());
+                        found.push((text.to_owned(), kind));
                     }
                 }
             }
