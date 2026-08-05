@@ -30,6 +30,14 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Coverage harness
+        # Asserts every content type still reaches the compressor `gap-analysis.md` claims
+        # for it, through the same orchestrator call the proxy makes. Runs beside the
+        # reachability audit because it answers the level-up question: the audit checks a
+        # capability is called from *somewhere*, this checks the right one is called for
+        # the right content.
+        run: cargo test -p headroom-parity
+
       - name: Reachability audit
         # Cheap, no build required, and it runs first so a capability that reaches
         # nothing is reported before a green test suite has a chance to imply otherwise.

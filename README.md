@@ -216,6 +216,11 @@ compression off during an incident had it silently turned back on by their next 
 anything else — with `applied: ["HEADROOM_STABILIZE"]`, or whatever they had just set, as
 the only report.
 
+`crates/headroom-parity` runs in CI and asserts the claim above: each content type
+reaches the compressor named for it, through the same orchestrator call the proxy makes,
+and comes out smaller. Skips are counted separately from passes and print their reason, so
+coverage is a number rather than a column somebody maintained by hand.
+
 ## Development
 
 ```bash

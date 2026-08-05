@@ -6,6 +6,37 @@ the crate starts publishing releases.
 
 ---
 
+## Coverage is a number in CI now, not a column in a table
+**2026-08-05** · closes #183 · this whole round exists because a table drifted
+
+- `gap-analysis.md` is written by hand, and Round 2 exists precisely because it drifted:
+  three rows were marked done on a reading the reference's source does not support, and
+  nothing in CI could have noticed. `crates/headroom-parity` is the start of the fix —
+  the instinct behind `scripts/reachability-audit.sh`, one level up.
+- Each fixture pairs realistic content with **the claim the gap analysis makes about it**:
+  this content type routes to this named compressor, through `transform_for_block` — the
+  same call the proxy makes — and comes out smaller. Six content types, all covered.
+- **Two things it deliberately is not.** Not a byte comparison against the reference:
+  that would need a Python environment in CI and would make this repo's output a function
+  of upstream's, which is the opposite of how it was built. And not a snapshot of our own
+  output, which would be a *regression* harness wearing a parity harness's name —
+  CONTRIBUTING.md already records why a fixture recorded from the thing it tests agrees
+  with itself no matter what that thing does.
+- **Skips are counted separately from passes and print their reason.** A harness that
+  silently reports 100% because half its comparators are stubs is worse than no harness:
+  it is the "documented as done" failure with a green checkmark on it. The summary always
+  states the denominator, so "6 covered" cannot be read as complete without looking.
+- **It found something on its first run.** The search-results fixture was 300 files with
+  one match each — a shape `SearchCompressor` declines *by design*, since every path is
+  already stated once and grouping saves nothing. The fixture was unrealistic, not the
+  compressor broken, and a harness that could not tell those apart would have accused the
+  wrong component. Real `grep -rn` output has several matches per file, which is what the
+  fixture carries now, with the reasoning beside it.
+- Two tests keep the harness honest about itself: one asserts a fixture claiming the wrong
+  compressor is *reported* rather than tolerated, and one asserts every fixture clears its
+  size threshold — the below-threshold trap that shipped three fixtures in #181 before it
+  was caught there.
+
 ## Three hardcoded limits an operator could not turn
 **2026-08-05** · closes #196 · and one the reference exposes that this project cannot
 
