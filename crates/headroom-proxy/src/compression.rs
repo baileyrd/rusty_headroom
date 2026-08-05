@@ -127,6 +127,19 @@ impl Compressors {
         self.orchestrator.transform_for_block(block, policy, model)
     }
 
+    /// The transform for `block` under `policy`, for callers outside the request path.
+    ///
+    /// The same routing the proxy uses, exposed so the HTTP compress endpoint cannot
+    /// develop its own — a second copy of the routing decision is what check 6 of the
+    /// reachability audit fails the build over.
+    pub fn routed_transform(
+        &self,
+        block: &headroom_core::block::Block,
+        policy: CompressionPolicy,
+    ) -> Option<&dyn Transform> {
+        self.route_block(block, policy, "")
+    }
+
     /// Why `content` was routed as it was, for telemetry.
     pub fn routing(&self, content: &str, policy: CompressionPolicy, model: &str) -> Routing {
         self.orchestrator.route(content, policy, model)

@@ -6,6 +6,37 @@ the crate starts publishing releases.
 
 ---
 
+## A marker could be handed to a client with no way to read it
+**2026-08-05** · closes #184 · CCR was reachable only through MCP
+
+- Compression replaces content with a `<<ccr:HASH>>` marker, and the only way to redeem
+  one was the `headroom_retrieve` MCP tool. So the proxy would compress a tool result for
+  a plain-HTTP caller, an SDK user, or any agent that does not speak MCP, and hand back a
+  reference to content that client had no means of fetching. R5 keeps `ccr_retrieve`
+  permanently registered so the tools array never busts — but that only helps clients that
+  see a tools array at all.
+- Added `GET /v1/retrieve/{hash}`, `POST /v1/retrieve` (batch), `GET /v1/retrieve/stats`
+  and `POST /v1/compress`. All four route through the same `Orchestrator` and the same
+  `handle_retrieve` the proxy and MCP server use — check 6 of the reachability audit fails
+  the build on a second copy of the routing table, eight were found once, and an HTTP
+  surface with its own opinions would have been the ninth. A test asserts the endpoint and
+  the shared router agree about identical bytes.
+- **The path takes the bare hash, not the marker.** `<` and `>` are not legal in a URI
+  path, so a client pasting `<<ccr:...>>` whole is rejected by its own HTTP library before
+  reaching this proxy. Found while writing the test, and documented at the handler rather
+  than left for a caller to discover. `POST /v1/retrieve` accepts either form.
+- The batch endpoint reports **per hash** rather than failing whole: one expired entry
+  among twenty must not cost the caller the other nineteen. `kind` is honored the way
+  every other surface honors it (D24) — a test asserts `text` is not summarized while
+  `tool_output` is — and an unrecognized kind is a 400 rather than a guess.
+- `stats` reports only what `CcrStore` can actually answer: a live entry count and which
+  store was built. A hit rate would be invented here, and `/metrics` already carries the
+  counters that are genuinely measured.
+- The route-reachability test needed strengthening to accept these. `GET
+  /v1/retrieve/{hash}` answers 404 for a hash the store does not hold, which is a handler
+  saying "not here" and was indistinguishable from axum's unrouted 404. It now checks that
+  a 404 carries a handler body, which is a sharper test than the one it replaced.
+
 ## A ranked result set could elide its own best hits
 **2026-08-05** · closes #179 · the payload said which records mattered and nothing read it
 
