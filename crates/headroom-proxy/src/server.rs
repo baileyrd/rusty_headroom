@@ -38,6 +38,10 @@ pub struct AppState {
     /// *why* it is down. Booting and answering 502 on the request path says more.
     upstream: Option<Upstream>,
     limiter: Arc<RateLimiter>,
+    /// The last upstream reachability probe and when it was taken.
+    ///
+    /// See [`AppState::upstream_reachable`].
+    upstream_health: Arc<std::sync::Mutex<Option<(std::time::Instant, bool)>>>,
     /// The store that was built, not the one that was configured — see
     /// [`Config::ccr_store_with_kind`].
     ccr_store_kind: crate::config::CcrStoreKind,
@@ -52,6 +56,11 @@ pub struct AppState {
 /// somewhere upstream of the proxy relaying thousands of requests with the customer's
 /// credential attached — not a quota, and it should never be the thing a real user
 /// meets.
+/// How long an upstream reachability answer is reused before probing again.
+///
+/// See [`AppState::upstream_reachable`].
+const UPSTREAM_PROBE_CACHE: Duration = Duration::from_secs(5);
+
 const RATE_CAPACITY: u32 = 600;
 
 /// The rate-limit window.
@@ -109,6 +118,7 @@ impl AppState {
             metrics,
             upstream,
             limiter: Arc::new(RateLimiter::new(RATE_CAPACITY, RATE_WINDOW)),
+            upstream_health: Arc::new(std::sync::Mutex::new(None)),
             ccr_store_kind,
             ccr_store: ccr_store_for_purge,
         }
@@ -155,6 +165,49 @@ impl AppState {
         self.upstream.as_ref().map(|upstream| upstream.base())
     }
 
+    /// Whether the upstream is reachable, answered from a short-lived cache.
+    ///
+    /// # Why this is cached
+    ///
+    /// `/healthz/upstream` is scraped, often every few seconds by more than one prober.
+    /// Probing on each call would turn a health check into an outbound request flood
+    /// against the provider — and during an outage, when every probe is also retrying,
+    /// that is the least welcome moment to add load.
+    ///
+    /// The window is short enough that an operator watching a dashboard sees a recovery
+    /// within one refresh, and long enough that a scrape interval cannot amplify.
+    ///
+    /// `Instant` rather than a wall clock: this must not jump when the system clock is
+    /// adjusted. Nothing here feeds compression, so I4's no-clocks rule does not apply —
+    /// that rule is about the bytes sent upstream, and no byte of a request depends on
+    /// this.
+    pub async fn upstream_reachable(&self) -> bool {
+        let Some(upstream) = self.upstream.as_ref() else {
+            // No relay was built, so nothing is reachable through it. Answering from
+            // configuration here would report a provider this process cannot call.
+            return false;
+        };
+
+        if let Ok(cached) = self.upstream_health.lock() {
+            if let Some((checked_at, reachable)) = *cached {
+                if checked_at.elapsed() < UPSTREAM_PROBE_CACHE {
+                    return reachable;
+                }
+            }
+        }
+
+        let reachable = upstream.is_reachable().await;
+
+        // A poisoned lock loses the caching, not the answer. Refusing to report
+        // reachability because a mutex is poisoned would take out the endpoint an
+        // operator is using to find out what is wrong.
+        if let Ok(mut cached) = self.upstream_health.lock() {
+            *cached = Some((std::time::Instant::now(), reachable));
+        }
+
+        reachable
+    }
+
     /// The process metrics.
     pub fn metrics(&self) -> &Arc<Metrics> {
         &self.metrics
@@ -196,6 +249,11 @@ pub fn router_with(state: AppState) -> Router {
         .route("/v1/conversations", post(openai::passthrough))
         .route("/v1/conversations/{*rest}", post(openai::passthrough))
         .route("/admin/runtime-env", post(crate::admin::runtime_env))
+        // Liveness and upstream reachability, split. `/health` stays as it was so
+        // anything already deployed against it keeps working. See `health::healthz`.
+        .route("/healthz", get(crate::health::healthz))
+        .route("/healthz/upstream", get(crate::health::upstream_health))
+        .route("/admin/upstream", get(crate::admin::upstream))
         // Codex uses a WebSocket transport, and a proxy that only speaks HTTP silently
         // drops that client to whatever fallback it has, or breaks it.
         .route("/v1/realtime", get(crate::websocket::relay_socket))
@@ -1640,8 +1698,11 @@ mod tests {
     /// reads the `.route(` calls out of this file and fails if one is missing here. A
     /// hand-maintained copy of a list is exactly what this project keeps getting wrong,
     /// and axum's `Router` cannot be enumerated, so the list is checked instead of shared.
-    const ROUTES: [(&str, &str); 10] = [
+    const ROUTES: [(&str, &str); 13] = [
         ("GET", "/health"),
+        ("GET", "/healthz"),
+        ("GET", "/healthz/upstream"),
+        ("GET", "/admin/upstream"),
         ("GET", "/metrics"),
         ("POST", "/v1/messages"),
         ("POST", "/v1/chat/completions"),
@@ -1961,6 +2022,184 @@ mod tests {
         let mut half = HeaderMap::new();
         half.insert("upgrade", "websocket".parse().unwrap());
         assert!(!is_websocket_upgrade(&half));
+    }
+
+    // ---- liveness vs upstream reachability (#186) ----
+
+    #[tokio::test]
+    async fn liveness_succeeds_even_when_the_upstream_is_unreachable() {
+        // The whole reason `/healthz` is separate from `/healthz/upstream`. If liveness
+        // depended on the provider, an orchestrator would restart a perfectly healthy
+        // proxy during someone else's outage — dropping in-flight requests to fix
+        // nothing a restart can fix.
+        //
+        // Port 1 on loopback with nothing bound is a connection refused, which is the
+        // cheapest unreachable upstream available offline.
+        let state = AppState::new("http://127.0.0.1:1");
+
+        let live = router_with(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(live.status(), StatusCode::OK);
+
+        let upstream = router_with(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz/upstream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            upstream.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "an unreachable upstream reported as reachable"
+        );
+    }
+
+    #[tokio::test]
+    async fn upstream_health_succeeds_against_a_reachable_provider() {
+        // The control. Without it the test above passes on a probe that always fails.
+        let base = permissive_upstream().await;
+
+        let response = router_with(AppState::new(&base))
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz/upstream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["reachable"], true);
+        assert_eq!(json["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn a_non_2xx_upstream_is_still_reachable() {
+        // Reachability is not authorization. A provider answering 401 to an
+        // unauthenticated probe is *up* — DNS, TLS and the network path all worked.
+        // Reading that as "down" would have every proxy report an outage permanently,
+        // since the probe deliberately carries no credential.
+        let app = Router::new().fallback(|| async { (StatusCode::UNAUTHORIZED, "{}") });
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let response = router_with(AppState::new(&format!("http://{addr}")))
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz/upstream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn repeated_upstream_probes_do_not_flood_the_provider() {
+        // `/healthz/upstream` is scraped. Probing per call would turn a health check
+        // into outbound load against a provider that, when this endpoint matters most,
+        // is already struggling.
+        let hits = Arc::new(Mutex::new(0usize));
+        let seen = hits.clone();
+
+        let app = Router::new().fallback(move || {
+            let seen = seen.clone();
+            async move {
+                if let Ok(mut count) = seen.lock() {
+                    *count += 1;
+                }
+                (StatusCode::OK, "{}")
+            }
+        });
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let state = AppState::new(&format!("http://{addr}"));
+        for _ in 0..5 {
+            router_with(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .uri("/healthz/upstream")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+
+        let count = *hits.lock().unwrap();
+        assert_eq!(count, 1, "5 scrapes produced {count} outbound probes");
+    }
+
+    #[tokio::test]
+    async fn health_is_unchanged_by_the_new_endpoints() {
+        // `/health` predates these and is what anything already deployed reads. Adding
+        // siblings must not move it.
+        let base = permissive_upstream().await;
+        let response = router_with(AppState::new(&base))
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["status"], "ok");
+        assert!(json.get("relay_available").is_some());
+    }
+
+    #[tokio::test]
+    async fn admin_upstream_refuses_a_caller_it_cannot_place() {
+        // Same gate as `/admin/runtime-env`. A `oneshot` test carries no `ConnectInfo`,
+        // which is exactly the "cannot establish the caller is local" case — and this
+        // endpoint's only protection is that it can.
+        let base = permissive_upstream().await;
+        let response = router_with(AppState::new(&base))
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/upstream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     // ---- operational guards ----

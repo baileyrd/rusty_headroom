@@ -43,6 +43,13 @@ const REBUILT_PER_HOP: [&str; 2] = ["host", "content-length"];
 /// that is merely slow.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a reachability probe may take before it counts as unreachable.
+///
+/// Much tighter than the relay's budget, because a probe answers a question somebody is
+/// waiting on — and an orchestrator's own health-check timeout is usually shorter than
+/// this anyway, so a slower probe would be cut off by the caller rather than answered.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// Errors from the relay.
 ///
 /// Deliberately coarse. A caller can only do one thing with any of these — return a
@@ -223,6 +230,41 @@ impl Upstream {
             headers: response_headers(response.headers()),
             inner: response,
         })
+    }
+
+    /// Whether the upstream is reachable right now.
+    ///
+    /// Reachability, not correctness. A provider answering `401` to an unauthenticated
+    /// probe is *up* — the network path, DNS and TLS handshake all worked, which is
+    /// exactly what this question is about. Only a transport failure counts as
+    /// unreachable, so this must never be read as "the provider is healthy for my
+    /// credential".
+    ///
+    /// No credentials are sent. This is called from an unauthenticated endpoint, and
+    /// borrowing some other request's `Authorization` to make the probe look real would
+    /// put a customer credential on a request they did not make.
+    ///
+    /// # Errors
+    ///
+    /// Never returns `Err` for a non-2xx answer — see above. `false` means the request
+    /// did not complete.
+    pub async fn is_reachable(&self) -> bool {
+        let request = self
+            .client
+            .request(Method::HEAD, &self.base)
+            // Bounded separately from the relay's connect timeout: a probe that takes
+            // five seconds has already answered the operator's question badly, and this
+            // one runs while somebody is staring at a dashboard during an incident.
+            .timeout(PROBE_TIMEOUT)
+            .build();
+
+        match request {
+            Ok(request) => self.client.execute(request).await.is_ok(),
+            // An unbuildable request means the configured base is not a usable URL,
+            // which is indistinguishable from unreachable as far as the caller can act
+            // on it.
+            Err(_) => false,
+        }
     }
 }
 
