@@ -6,6 +6,18 @@ the crate starts publishing releases.
 
 ---
 
+## `templatize` could panic on a token made entirely of quotes
+**2026-08-04** · found reading the punctuation-stripping logic, not from a crash report
+
+- `normalize_token` stripped leading and trailing punctuation independently, and both
+  character classes include quote characters. A token made entirely of quotes — a
+  lone `"`, or a run of them — was consumed by both scans, producing
+  `lead.len() + tail.len() > token.len()` and panicking on the slice
+  `token[lead.len()..token.len() - tail.len()]`.
+- Fixed by scanning the trailing class over `remainder` (what's left after the leading
+  scan), not over the whole token, which makes the two scans structurally unable to
+  overlap.
+
 ## The relay dropped every query string
 **2026-08-04** · found while checking whether `claude -p` could drive the live measurement
 
