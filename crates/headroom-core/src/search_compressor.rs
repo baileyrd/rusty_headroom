@@ -26,6 +26,7 @@
 //! ordering is lost. Acceptable for search output — ripgrep groups by file itself —
 //! but it is genuine information loss and is stated rather than glossed.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::block::Block;
@@ -170,7 +171,15 @@ impl SearchCompressor {
         // Grouped as a Vec keyed by first appearance rather than a map, so file order
         // follows the search output. A sorted map would alphabetize the results,
         // which discards whatever relevance ordering the search tool applied.
+        //
+        // `file_index` mirrors `log_compressor.rs`'s order-preserving lookup: a
+        // `HashMap<String, usize>` from path to its slot in `files` turns the
+        // per-match grouping into an O(1) lookup instead of a linear scan. Without
+        // it, grouping a broad `grep -rn` result with one match per file across a
+        // large codebase is O(n^2) in the number of distinct files, which can turn
+        // a single proxy request into a multi-second stall.
         let mut files: Vec<(String, Vec<Match>)> = Vec::new();
+        let mut file_index: HashMap<String, usize> = HashMap::new();
         let mut unparsed: Vec<&str> = Vec::new();
         let mut total_matches = 0usize;
 
@@ -181,9 +190,12 @@ impl SearchCompressor {
             match parse_match(line) {
                 Some(hit) => {
                     total_matches += 1;
-                    match files.iter_mut().find(|(path, _)| *path == hit.path) {
-                        Some((_, hits)) => hits.push(hit),
-                        None => files.push((hit.path.clone(), vec![hit])),
+                    match file_index.get(&hit.path) {
+                        Some(&idx) => files[idx].1.push(hit),
+                        None => {
+                            file_index.insert(hit.path.clone(), files.len());
+                            files.push((hit.path.clone(), vec![hit]));
+                        }
                     }
                 }
                 // Kept rather than dropped: this is usually a tool summary or a
@@ -516,5 +528,72 @@ mod tests {
             let (c, _s) = compressor();
             assert_eq!(c.compress(&source).unwrap(), first);
         }
+    }
+
+    #[test]
+    fn many_distinct_files_group_correctly_without_a_linear_scan_per_match() {
+        // Regression: `compress` used to find each match's group with
+        // `files.iter_mut().find(|(path, _)| *path == hit.path)` — a linear scan over
+        // every distinct file seen so far, repeated for every match line. For a broad
+        // `grep -rn`/`rg` result spanning many distinct files (one match per file
+        // across a large codebase is the realistic worst case), that made grouping
+        // O(n^2) in the number of files and could turn a single proxy request into a
+        // multi-second stall. The fix adds a `HashMap<String, usize>` from path to its
+        // slot in `files`, the same order-preserving-lookup pattern `log_compressor.rs`
+        // uses, so each match is grouped in O(1).
+        //
+        // A timing assertion here would be fragile, so this proves correctness at a
+        // scale (900 distinct files) that would have made the old scan's cost
+        // unmistakable: every file present exactly once, with the right match count,
+        // in first-appearance order.
+        const FILES: usize = 900;
+        const PER_FILE: usize = 2;
+
+        let (compressor, _store) = compressor();
+        let compressor = compressor.with_config(SearchConfig {
+            max_files: FILES,
+            max_matches_per_file: PER_FILE,
+            max_total_matches: FILES * PER_FILE,
+            min_matches: 6,
+        });
+        let source = grep_output(FILES, PER_FILE);
+        let compressed = compressor.compress(&source).unwrap();
+
+        assert!(
+            compressed.starts_with(&format!("[{} matches in {FILES} files]", FILES * PER_FILE)),
+            "{compressed}"
+        );
+        assert!(!compressed.contains("more files not shown"), "{compressed}");
+        assert!(!compressed.contains("matches elided"), "{compressed}");
+
+        // Every file grouped exactly once (not scattered across duplicate entries)
+        // with exactly its two matches, none dropped and none merged into a
+        // neighboring file's group.
+        for f in 0..FILES {
+            let path = format!("module_{f}.rs");
+            assert_eq!(
+                compressed.matches(&path).count(),
+                1,
+                "file {f} missing or duplicated:\n{compressed}"
+            );
+        }
+        for m in 0..PER_FILE {
+            let expected = format!("  {}:", 10 + m * 7);
+            assert_eq!(
+                compressed.matches(&expected).count(),
+                FILES,
+                "expected every file to show its match at line {expected}"
+            );
+        }
+
+        // First-appearance order preserved across the whole span, not just the first
+        // handful of files where even a linear scan would still be fast.
+        let first = compressed.find("module_0.rs").unwrap();
+        let mid = compressed.find("module_450.rs").unwrap();
+        let last = compressed.find("module_899.rs").unwrap();
+        assert!(
+            first < mid && mid < last,
+            "file order should follow the input:\n{compressed}"
+        );
     }
 }

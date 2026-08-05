@@ -6,6 +6,19 @@ the crate starts publishing releases.
 
 ---
 
+## Grouping search matches by file was O(n²) in the number of distinct files
+**2026-08-04** · a single broad `grep -rn` could turn one request into a multi-second stall
+
+- `compress` found each match's group with a linear scan
+  (`files.iter_mut().find(...)`) over every distinct file seen so far, repeated per
+  match line. One match per file across a large codebase — the realistic worst case
+  for a broad search — made grouping quadratic in the file count.
+- Added a `HashMap<String, usize>` from path to its slot in `files`, the same
+  order-preserving-lookup pattern `log_compressor.rs` already uses, so each match
+  groups in O(1). A 900-distinct-file regression test proves correctness (right file,
+  right match count, first-appearance order preserved) at a scale where the old scan's
+  cost would have been unmistakable.
+
 ## The relay dropped every query string
 **2026-08-04** · found while checking whether `claude -p` could drive the live measurement
 
