@@ -1,0 +1,27 @@
+[package]
+name = "headroom-embed"
+description = "In-process text embedding with no daemon and no network"
+version = "0.1.0"
+edition.workspace = true
+
+# Deliberately not depending on `remind_me_core`, even though the reason this
+# crate exists is to satisfy its `Embedder` trait. That crate carries SQLite and
+# tokio; an inference crate needs neither, and a caller who wants only the
+# vectors should not compile a database to get them. The adapter that names the
+# trait lives with the code that already has the dependency.
+[dependencies]
+rten = { version = "0.24", optional = true }
+rten-tensor = { version = "0.24", optional = true }
+# Pinned to the version `rten` is built against, the same hazard `rusty_remind_me`
+# records for `ocrs`: a mismatched pair produces "expected Model, found Model".
+tokenizers = { version = "0.23", optional = true, default-features = false, features = [
+    "onig",
+] }
+
+[features]
+default = []
+# In-process embedding. Off by default because it adds ~86 crates and roughly
+# 100 seconds to a clean release build (measured, not estimated). Off, every
+# entry point still exists and reports the backend as unavailable, so a caller
+# compiles identically either way.
+local = ["dep:rten", "dep:rten-tensor", "dep:tokenizers"]
