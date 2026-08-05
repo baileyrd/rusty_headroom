@@ -223,7 +223,22 @@ pub fn set_overrides(values: BTreeMap<String, String>) -> Vec<String> {
     let names = accepted.keys().cloned().collect();
 
     if let Ok(mut guard) = OVERRIDES.write() {
-        guard.get_or_insert_with(BTreeMap::new).extend(accepted);
+        let map = guard.get_or_insert_with(BTreeMap::new);
+        for (name, value) in accepted {
+            // An empty value is "take this override back", not "override it with the
+            // empty string". `setting()` only falls through to `env::var()` when the
+            // key is *absent* from this map, so leaving an empty-string entry in place
+            // permanently shadowed the process environment with whatever every
+            // consumer's own empty-input default happens to be — turning
+            // `HEADROOM_COMPRESSION=0` (an env-configured safety policy) back on the
+            // moment an operator tried to "take back" an unrelated override, since
+            // `compression_enabled` reads `Some("")` as `true`.
+            if value.is_empty() {
+                map.remove(&name);
+            } else {
+                map.insert(name, value);
+            }
+        }
     }
     names
 }
@@ -242,7 +257,14 @@ pub fn set_overrides(values: BTreeMap<String, String>) -> Vec<String> {
 pub fn preview_overrides(values: &BTreeMap<String, String>) -> Config {
     let mut merged = overrides();
     for (name, value) in values {
-        if name.starts_with("HEADROOM_") {
+        if !name.starts_with("HEADROOM_") {
+            continue;
+        }
+        // Same "empty means take it back" rule as `set_overrides`, so a preview built
+        // from a clearing call matches what applying it would actually produce.
+        if value.is_empty() {
+            merged.remove(name);
+        } else {
             merged.insert(name.clone(), value.clone());
         }
     }

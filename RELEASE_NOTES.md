@@ -6,6 +6,25 @@ the crate starts publishing releases.
 
 ---
 
+## Clearing an override with an empty value could permanently shadow the environment
+**2026-08-04** · `extend` stored the empty string instead of removing the key
+
+- README.md documents "send a setting as an empty value to take it back" for
+  every setting. `set_overrides` implemented that by storing the empty string as a
+  real override, not by removing the key — and `setting()` only falls through to
+  `env::var()` when the key is *absent*. So the first "take it back" on any setting
+  left an empty-string entry in place forever, permanently shadowing the process
+  environment with whatever each consumer's own empty-input default happens to be.
+  Concretely: `HEADROOM_COMPRESSION=0` in the environment (a deliberate safety
+  policy) came back on the moment an operator cleared an *unrelated* override, since
+  `compression_enabled` reads `Some("")` as `true`.
+- Fixed in both `set_overrides` and `preview_overrides` (which must agree, since a
+  preview has to predict what applying would do): an empty value now removes the key
+  rather than inserting it. Regression test sets `HEADROOM_COMPRESSION=0` in the real
+  environment, overrides it to `1`, clears with an empty value, and asserts the
+  result is `false` — not `true`, which every previous assertion in this file
+  couldn't distinguish from the bug.
+
 ## `/admin/runtime-env` accepted a typo or an unwired setting as applied
 **2026-08-04** · the endpoint's only validation was the `HEADROOM_` prefix
 
