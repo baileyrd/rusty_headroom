@@ -1496,3 +1496,89 @@ facts reads as one. A test asserts the report mentions no currency.
 **Opt-in.** Without `HEADROOM_SAVINGS` the proxy behaves exactly as it did and
 `headroom savings` still reads a scrape from stdin. `--since-days` refuses in that mode
 rather than answering from data that cannot support it.
+
+## D43 — memories are selected against the request, and remind_me feeds the file rather than the request
+
+**Closes #193.** The original issue asked for persistence, eviction, similarity retrieval,
+and extraction — and stopped, because similarity retrieval meant a vector index and that
+is a dependency decision. Evaluating [`remind_me`](https://github.com/baileyrd/remind_me)
+as the backend split the question in two, and the two halves have different answers.
+
+**As the memory source: adopted, and it needed almost nothing.** `remind_me`'s exporter
+emits one JSON object per memory carrying every column of its `memories` table, and that
+table's `content` is `TEXT NOT NULL` — which is exactly and only what `from_jsonl_lossy`
+requires. Its entity-graph records carry no `content` and are skipped by the rule that was
+already there. The one real gap was provenance: `remind_me` has no `agent` or `context`
+column, so every fact arrived as `unknown`/`unknown` — the single provenance value that
+tells a reader nothing, on the import path most likely to be used. `source` and `category`
+are now read as fallbacks. Native names still win when both are present, so a file written
+for this reader is unaffected.
+
+That also settles persistence without building any. The store is still loaded once at
+startup from a file; what writes that file is now somebody else's problem, and there is a
+good answer for it.
+
+**As a request-time backend: not here, and the successor is why the question is live.**
+The Python server would have meant a network call on the compression path — the objection
+D16 raised against fetching a tokenizer, and the end of the argument. Its successor,
+[`rusty_remind_me`](https://github.com/baileyrd/rusty_remind_me), removes that objection
+entirely: `remind_me_core` is a Rust library, and `db::queries::search_memories` is a
+*synchronous* function over a `rusqlite::Connection`. It would link in, not dial out.
+
+Three things still argue against calling it per request, and none of them is "it is
+Python":
+
+- **The vitality filter reads the wall clock.** `register_sql_functions` registers an
+  `effective_vitality` scalar that calls `Utc::now()`, and `search_memories` puts it in the
+  `WHERE` clause unless `include_dormant` is set. The same query returns different rows as
+  the afternoon wears on. That is avoidable — `include_dormant: true` with `min_vitality:
+  0.0` omits both predicates — but it is avoidable by *discipline*, and I4 is currently
+  enforced by there being nothing to get wrong.
+- **The database is live.** A file another process writes is a different input on every
+  request by construction. `HEADROOM_MEMORY` is `STARTUP_ONLY` precisely so the memory set
+  is pinned for the process's lifetime; querying a mutable store un-pins it.
+- **The semantic tier dials out anyway.** `available_embedder` is Ollama over HTTP, off
+  unless `REMIND_ME_EMBEDDING_BACKEND` is set. Off, the search is FTS5 BM25 — which is what
+  we already do. On, it is a network call on the compression path.
+
+So the retrieval quality that would justify the dependency is either what we have, or the
+thing we cannot have. Filed separately rather than decided here; this is the same shape as
+refusing `HEADROOM_COMPRESSION_DEADLINE_MS`, where the reference can afford request-time
+nondeterminism because it does not promise I4.
+
+**Two record kinds are refused outright, and the successor's schema is what surfaced
+them.** `sensitive` is a flag the owner sets to mean *do not surface by default*;
+`remind_me`'s own search honors it and its exporter does not filter on it, so a routine
+export carries those rows. Injection would send them to a third-party model with nobody
+shown them first — a worse disclosure than the search this flag already guards. A non-null
+`superseded_by` marks a fact its own source knows to be stale; the exporter excludes those
+by default and includes them for a full backup, which is exactly the file somebody points
+at this reader. Injecting one would hand the model a stale fact with the corroboration
+marker vouching for it. Both are skipped at load, logged at debug rather than warn so a
+large export cannot train an operator to ignore the warnings that mean something.
+
+**So selection had to be ours, and BM25 is not a consolation prize.** `recall` ranked by
+corroboration and took no query at all, which meant importing `remind_me`'s corpus would
+have discarded the half that makes it good. `recall_for_query` scores with the same
+`Bm25Scorer` the record-set compressors use (#187) — deterministic, in-process, no new
+dependency, and unaffected by the ONNX exclusion that blocked the embedding tier. The
+reference itself runs a text index alongside its vector index, so keyword scoring is a tier
+it has too, not a substitute for the one it has.
+
+**Zero-scoring facts rank last rather than dropping out.** `limit` is a budget. Enforcing a
+keyword match would hand back *less* context than the same store returns today for the same
+request — a relevance feature that makes the output worse whenever the query is narrow. For
+the same reason, a query with no signal (absent, empty, or sharing no term with any fact)
+falls back to the corroboration ranking rather than returning nothing.
+
+**The query is returned from `read_conversation` rather than derived again.** It is a
+property of the whole conversation and was already computed there for block scoring. A
+second walk over the same messages at the injection site would be free to drift from the
+first, and nothing would fail when it did. The wiring is asserted by a test through
+`compress_dialect` — the proxy's own path — with decoy memories that outrank the relevant
+one on corroboration, so an unwired query cannot produce the expected answer by luck. That
+test was confirmed to fail with the argument removed; #71's failure class is capabilities
+that pass every unit test they have and are called by nothing.
+
+**Not done here, deliberately.** A reload path (it needs its own I4 argument and does not
+come free with this), extraction from traffic, and the vector tier.

@@ -31,6 +31,7 @@ use std::collections::BTreeMap;
 use crate::block::BlockKind;
 use crate::ccr::ContentHash;
 use crate::conversation::{Conversation, Role};
+use crate::relevance::{Bm25Scorer, RelevanceScore, RelevanceScorer};
 
 /// Where a memory came from.
 ///
@@ -186,6 +187,71 @@ impl MemoryStore {
         });
         ranked.into_iter().take(limit).map(|(_, m)| m).collect()
     }
+
+    /// The `limit` facts most relevant to `query`, most first.
+    ///
+    /// Falls back to [`MemoryStore::recall`] when there is no query, or when no fact
+    /// shares a term with it. Both are the same situation from the store's side: the
+    /// query carries no signal about which facts matter, so the corroboration ranking
+    /// is the best available answer rather than a degraded one.
+    ///
+    /// # Why keyword scoring and not embeddings
+    ///
+    /// Scoring must be deterministic and in-process. Compression that varied with a
+    /// model's mood, or that waited on a network call, would break I4 twice over — and
+    /// the request path is the one place neither is negotiable. [`Bm25Scorer`] is both.
+    ///
+    /// # Ranking
+    ///
+    /// Score, then distinct sources, then occurrences, then content hash. Facts that
+    /// score zero are ranked last rather than dropped: `limit` is a budget, and leaving
+    /// it unspent to enforce a keyword match would hand back less context than the same
+    /// store returns today for the same request.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use headroom_core::memory::{MemoryStore, Provenance};
+    ///
+    /// let mut store = MemoryStore::new();
+    /// store.remember("The auth module uses tokens, not sessions.", Provenance::new("a", "s"));
+    /// store.remember("Staging mirrors prod except for the cache tier.", Provenance::new("a", "s"));
+    ///
+    /// let hits = store.recall_for_query(Some("how does auth work"), 1);
+    /// assert!(hits[0].content().contains("auth module"));
+    /// ```
+    pub fn recall_for_query(&self, query: Option<&str>, limit: usize) -> Vec<&Memory> {
+        let Some(query) = query.map(str::trim).filter(|query| !query.is_empty()) else {
+            return self.recall(limit);
+        };
+
+        let entries: Vec<(&String, &Memory)> = self.entries.iter().collect();
+        let contents: Vec<String> = entries
+            .iter()
+            .map(|(_, memory)| memory.content.clone())
+            .collect();
+        let scores = Bm25Scorer::new().score_all(query, &contents);
+
+        if scores.iter().all(|score| score.value() <= 0.0) {
+            return self.recall(limit);
+        }
+
+        let mut ranked: Vec<((&String, &Memory), RelevanceScore)> =
+            entries.into_iter().zip(scores).collect();
+        ranked.sort_by(|((a_key, a), a_score), ((b_key, b), b_score)| {
+            b_score
+                .value()
+                .total_cmp(&a_score.value())
+                .then(b.sources.len().cmp(&a.sources.len()))
+                .then(b.occurrences.cmp(&a.occurrences))
+                .then(a_key.cmp(b_key))
+        });
+        ranked
+            .into_iter()
+            .take(limit)
+            .map(|((_, memory), _)| memory)
+            .collect()
+    }
 }
 
 /// Collapses whitespace so trivially different spellings of one fact hash alike.
@@ -213,7 +279,25 @@ fn normalize(content: &str) -> String {
 /// assert!(!block.to_lowercase().contains("you are"));
 /// ```
 pub fn inject_block(store: &MemoryStore, limit: usize) -> Option<String> {
-    let recalled = store.recall(limit);
+    inject_block_for_query(store, limit, None)
+}
+
+/// Renders the memories most relevant to `query` as an injectable block.
+///
+/// [`inject_block`] with a query. Selection is [`MemoryStore::recall_for_query`]; the
+/// rendering, the corroboration marker, and the `None`-when-empty contract are the same.
+///
+/// # Why the query only reaches selection
+///
+/// The rendered block does not mention the query, and must not. It is appended to a
+/// message the user just wrote; a block that restated their question back at them would
+/// read as an instruction rather than as context, which is the line D19 draws.
+pub fn inject_block_for_query(
+    store: &MemoryStore,
+    limit: usize,
+    query: Option<&str>,
+) -> Option<String> {
+    let recalled = store.recall_for_query(query, limit);
     if recalled.is_empty() {
         return None;
     }
@@ -242,6 +326,35 @@ impl MemoryStore {
     /// is missing, and inventing a plausible source would be worse than admitting it,
     /// since provenance is what a reader uses to decide whether to act on a memory.
     ///
+    /// # Reading another tool's export
+    ///
+    /// `agent` falls back to `source` and `context` to `category` before defaulting.
+    /// Those are the column names a `remind_me` export carries, and it is the export
+    /// format most likely to be pointed at `HEADROOM_MEMORY` — its records are
+    /// `{"role": "assistant", ...every column of the memories table}`, which already
+    /// satisfies the `content` requirement above. Without the fallback every fact from
+    /// such a file arrives as `unknown`/`unknown`, which is the one provenance value
+    /// that tells a reader nothing, on the import path most likely to be used.
+    ///
+    /// Records from that export that are *not* memories — its entity graph — carry no
+    /// `content` and are skipped by the rule above. That is the right outcome, but it
+    /// costs one warning per skipped line, so exports meant for this reader are better
+    /// taken with the graph excluded.
+    ///
+    /// # Two kinds of record are refused rather than skipped for lacking a field
+    ///
+    /// `"sensitive": true` marks a memory the owner flagged as *do not surface by
+    /// default*. `remind_me`'s own search honors it; its exporter does not filter on it,
+    /// so a routine export carries those rows. Injection sends them to a third-party
+    /// model, which is precisely the disclosure the flag exists to prevent — and unlike a
+    /// search result, nothing here is shown to the person who set it before it leaves.
+    ///
+    /// A non-null `superseded_by` marks a fact that has already been replaced. Its
+    /// exporter excludes those by default but includes them for a full backup, and a
+    /// backup is exactly the file somebody points at this reader. Injecting one hands the
+    /// model a fact its own source knows to be stale, with the corroboration marker
+    /// vouching for it.
+    ///
     /// # Why lossy, and why line-oriented
     ///
     /// A malformed line is skipped with a warning rather than failing the load. This file
@@ -267,14 +380,32 @@ impl MemoryStore {
                 continue;
             };
 
-            let field = |name: &str| {
-                value
-                    .get(name)
-                    .and_then(|v| v.as_str())
+            // Logged at debug rather than warn: these are well-formed records this reader
+            // is declining on purpose, and a full export can carry many of them. A warning
+            // per line would train an operator to ignore the warnings that mean something.
+            if value.get("sensitive").and_then(|v| v.as_bool()) == Some(true) {
+                tracing::debug!(line = number + 1, "memory is marked sensitive; not loaded");
+                continue;
+            }
+            if value.get("superseded_by").is_some_and(|v| !v.is_null()) {
+                tracing::debug!(line = number + 1, "memory was superseded; not loaded");
+                continue;
+            }
+
+            // First name that is present and a string wins, so a file written for this
+            // reader keeps its own vocabulary and an export written for something else
+            // still lands with usable provenance.
+            let field = |names: &[&str]| {
+                names
+                    .iter()
+                    .find_map(|name| value.get(*name).and_then(|v| v.as_str()))
                     .unwrap_or("unknown")
                     .to_owned()
             };
-            store.remember(content, Provenance::new(field("agent"), field("context")));
+            store.remember(
+                content,
+                Provenance::new(field(&["agent", "source"]), field(&["context", "category"])),
+            );
         }
 
         store
@@ -311,8 +442,9 @@ pub fn inject_append(
     store: &MemoryStore,
     limit: usize,
     frozen: usize,
+    query: Option<&str>,
 ) -> Option<(usize, usize, String)> {
-    let block_text = inject_block(store, limit)?;
+    let block_text = inject_block_for_query(store, limit, query)?;
 
     let (message_index, message) = conversation
         .messages()
@@ -477,7 +609,7 @@ mod tests {
         // injection ever targets.
         for frozen in [3, 4, usize::MAX] {
             assert!(
-                inject_append(&conversation, &store, 8, frozen).is_none(),
+                inject_append(&conversation, &store, 8, frozen, None).is_none(),
                 "injected into a message below a floor of {frozen}"
             );
         }
@@ -491,7 +623,7 @@ mod tests {
         let conversation = conversation_of(3);
 
         let (message, block, content) =
-            inject_append(&conversation, &store, 8, 2).expect("nothing was injected");
+            inject_append(&conversation, &store, 8, 2, None).expect("nothing was injected");
 
         assert_eq!(message, 2, "injected into a message behind the floor");
         assert_eq!(block, 0);
@@ -506,7 +638,7 @@ mod tests {
         let store = one_memory();
         let conversation = conversation_of(1);
 
-        assert!(inject_append(&conversation, &store, 8, 0).is_some());
+        assert!(inject_append(&conversation, &store, 8, 0, None).is_some());
     }
 
     // ---- dedup ----
@@ -763,5 +895,156 @@ mod tests {
         assert_eq!(context.remove("a", "k"), Some("v".into()));
         assert_eq!(context.remove("a", "k"), None);
         assert!(context.is_empty());
+    }
+
+    // ---- reading an export written for something else ----
+
+    /// The shape `remind_me_mcp.exporter` emits for JSONL: `{"role": "assistant",
+    /// ...every column of the memories table}` for memories, then `record_type`-tagged
+    /// graph records.
+    const REMIND_ME_EXPORT: &str = concat!(
+        r#"{"role":"assistant","id":"01HX","content":"The deploy key rotates every 90 days.","#,
+        r#""category":"ops","tags":["infra"],"source":"chat","created_at":"2026-01-02T03:04:05Z"}"#,
+        "\n",
+        r#"{"record_type":"entity","id":"e1","name":"deploy key","kind":"thing"}"#,
+        "\n",
+        r#"{"record_type":"memory_entity","memory_id":"01HX","entity_id":"e1"}"#,
+    );
+
+    #[test]
+    fn a_remind_me_export_lands_with_usable_provenance() {
+        let store = MemoryStore::from_jsonl_lossy(REMIND_ME_EXPORT);
+
+        assert_eq!(
+            store.len(),
+            1,
+            "graph records carry no content and are skipped"
+        );
+        let memory = store.all().next().expect("one memory");
+        assert_eq!(memory.content(), "The deploy key rotates every 90 days.");
+        // `source` and `category` stand in for `agent` and `context`. Without this the
+        // whole file arrives as unknown/unknown, which is the one provenance value that
+        // tells a reader nothing.
+        assert_eq!(memory.sources()[0], Provenance::new("chat", "ops"));
+    }
+
+    #[test]
+    fn a_sensitive_memory_is_never_loaded() {
+        // The flag means "do not surface by default", and the exporter does not filter on
+        // it. Injection sends it to a third-party model with nobody shown it first.
+        let line = r#"{"content":"the recovery phrase is ...","source":"chat","sensitive":true}"#;
+        assert!(MemoryStore::from_jsonl_lossy(line).is_empty());
+
+        let ordinary = r#"{"content":"c","source":"chat","sensitive":false}"#;
+        assert_eq!(MemoryStore::from_jsonl_lossy(ordinary).len(), 1);
+    }
+
+    #[test]
+    fn a_superseded_memory_is_never_loaded() {
+        // A full backup carries these. Injecting one hands the model a fact its own
+        // source knows to be stale, with the corroboration marker vouching for it.
+        let stale = r#"{"content":"the API lives at v1","source":"chat","superseded_by":"01HZ"}"#;
+        assert!(MemoryStore::from_jsonl_lossy(stale).is_empty());
+
+        // A null `superseded_by` is the live case, and every row carries the column.
+        let live = r#"{"content":"c","source":"chat","superseded_by":null}"#;
+        assert_eq!(MemoryStore::from_jsonl_lossy(live).len(), 1);
+    }
+
+    #[test]
+    fn a_file_written_for_this_reader_keeps_its_own_vocabulary() {
+        // The fallback must not outrank the native names when both are present.
+        let line =
+            r#"{"content":"c","agent":"reader","context":"s1","source":"chat","category":"ops"}"#;
+        let store = MemoryStore::from_jsonl_lossy(line);
+
+        let memory = store.all().next().expect("one memory");
+        assert_eq!(memory.sources()[0], Provenance::new("reader", "s1"));
+    }
+
+    // ---- query-aware recall ----
+
+    /// Two well-corroborated decoys and one singly-sourced fact about hashing.
+    fn ranked_store() -> MemoryStore {
+        let mut store = MemoryStore::new();
+        for agent in ["reader", "planner"] {
+            store.remember(
+                "Tests live under crates/*/tests.",
+                Provenance::new(agent, "s1"),
+            );
+            store.remember("Releases are cut on Fridays.", Provenance::new(agent, "s1"));
+        }
+        store.remember(
+            "Content is normalized before hashing.",
+            Provenance::new("reader", "s1"),
+        );
+        store
+    }
+
+    #[test]
+    fn a_query_outranks_corroboration() {
+        let store = ranked_store();
+        // The decoys have two sources each, so `recall` prefers one of them outright —
+        // which is what makes this assertion about the query rather than about luck.
+        assert!(!store.recall(1)[0].content().contains("hashing"));
+
+        let hits = store.recall_for_query(Some("how is content hashed"), 1);
+        assert_eq!(hits[0].content(), "Content is normalized before hashing.");
+    }
+
+    #[test]
+    fn a_query_with_no_signal_recalls_exactly_what_it_would_without_one() {
+        // The invariant that makes this safe to turn on: a request that carries no usable
+        // query gets the same block it got before selection existed.
+        let store = ranked_store();
+        let baseline: Vec<&str> = store.recall(3).iter().map(|m| m.content()).collect();
+
+        for query in [None, Some(""), Some("   "), Some("zzz qqq")] {
+            let hits: Vec<&str> = store
+                .recall_for_query(query, 3)
+                .iter()
+                .map(|m| m.content())
+                .collect();
+            assert_eq!(
+                hits, baseline,
+                "query {query:?} changed the queryless answer"
+            );
+        }
+    }
+
+    #[test]
+    fn a_partial_match_still_spends_the_whole_budget() {
+        // Zero-scoring facts rank last rather than dropping out. Enforcing a keyword
+        // match would hand back less context than the same store returns today.
+        let store = ranked_store();
+        let hits = store.recall_for_query(Some("how is content hashed"), 3);
+
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[0].content(), "Content is normalized before hashing.");
+    }
+
+    #[test]
+    fn query_ranking_is_stable_across_stores_built_in_different_orders() {
+        // Invariant I4. Two stores holding the same facts must inject the same bytes, or
+        // the injection busts the cache it was designed to protect.
+        let forward = ranked_store();
+
+        let mut reverse = MemoryStore::new();
+        reverse.remember(
+            "Content is normalized before hashing.",
+            Provenance::new("reader", "s1"),
+        );
+        for agent in ["planner", "reader"] {
+            reverse.remember("Releases are cut on Fridays.", Provenance::new(agent, "s1"));
+            reverse.remember(
+                "Tests live under crates/*/tests.",
+                Provenance::new(agent, "s1"),
+            );
+        }
+
+        let render = |store: &MemoryStore| {
+            inject_block_for_query(store, 8, Some("how is content hashed")).expect("a block")
+        };
+        assert_eq!(render(&forward), render(&reverse));
     }
 }

@@ -6,6 +6,45 @@ the crate starts publishing releases.
 
 ---
 
+## Memories are chosen for the request, and remind_me can write the file
+**2026-08-05** · closes #193 · the retrieval half of memory, without a vector index
+
+- **`recall` took no query.** It ranked by corroboration and returned the top N, which is
+  the right answer when nothing is known about what the request is asking — and the wrong
+  one the rest of the time. `recall_for_query` scores with the same `Bm25Scorer` the
+  record-set compressors already use: deterministic, in-process, no new dependency.
+- **A queryless request gets exactly the block it got before.** No query, an empty one, or
+  one sharing no term with any fact all fall back to the corroboration ranking. Facts that
+  score zero rank last rather than dropping out — `limit` is a budget, and enforcing a
+  keyword match would return *less* context than before whenever the query was narrow.
+- **A [`remind_me`](https://github.com/baileyrd/remind_me) export drops straight in.** Its
+  records carry every column of its `memories` table, and `content` is `TEXT NOT NULL` —
+  which is all `from_jsonl_lossy` ever required. `source` and `category` are now read as
+  fallbacks for `agent` and `context`, so those facts arrive with usable provenance instead
+  of `unknown`/`unknown`. Its entity-graph records have no `content` and are skipped by the
+  rule that was already there.
+- **Sensitive and superseded memories are never loaded.** `sensitive` means "do not
+  surface by default" and the exporter does not filter on it; a non-null `superseded_by`
+  marks a fact its own source knows to be stale, and a full backup carries those. Injection
+  would send both to a third-party model, the second with the corroboration marker
+  vouching for it.
+- **Querying a memory store per request stays out, and it is no longer a language
+  question.** [`rusty_remind_me`](https://github.com/baileyrd/rusty_remind_me) is a Rust
+  library whose `search_memories` is synchronous over a `rusqlite::Connection` — it would
+  link in rather than dial out. What still argues against it: its vitality filter calls
+  `Utc::now()` inside a SQL scalar function, a live database is a different input on every
+  request, and the semantic tier is Ollama over HTTP. Off, its search is FTS5 BM25 — which
+  is what this now does. D43 has the full reasoning; the dependency is filed separately
+  rather than decided in passing.
+- **The wiring is tested through the proxy, not the scorer.** `read_conversation` now
+  returns the query it already computed, rather than the injection site deriving it a
+  second time and being free to drift. A test through `compress_dialect` uses decoy
+  memories that outrank the relevant one on corroboration, so an unwired query cannot pass
+  it by luck — confirmed by removing the argument and watching it fail. Selection nothing
+  calls is #71's failure class.
+
+---
+
 ## Coverage is a number in CI now, not a column in a table
 **2026-08-05** · closes #183 · this whole round exists because a table drifted
 
