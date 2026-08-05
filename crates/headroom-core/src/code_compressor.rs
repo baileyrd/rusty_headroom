@@ -229,10 +229,22 @@ impl CodeCompressor {
 
             // The signature is kept; the body after it is a candidate for elision.
             let body_start = index + 1;
-            let body_end = if language.indentation_scoped() {
-                end_of_indented_block(lines, body_start, indent_of(line))
+            // For brace-delimited languages, `scan_braced_block` also reports how far
+            // it looked before giving up. When it never found an opening brace at
+            // all, every line it examined — not just this one — is known to be
+            // brace-less too, so the outer loop can jump straight past all of them
+            // instead of re-scanning the same tail from each one in turn. See the
+            // "# Why report `scanned_to`" note on `scan_braced_block` for the O(n^2)
+            // regression this closes.
+            let (body_end, skip_rescan_to) = if language.indentation_scoped() {
+                (
+                    end_of_indented_block(lines, body_start, indent_of(line)),
+                    None,
+                )
             } else {
-                end_of_braced_block(lines, index)
+                let scan = scan_braced_block(lines, index);
+                let skip = (!scan.found_open).then_some(scan.scanned_to);
+                (scan.end, skip)
             };
 
             if body_end > body_start && body_end - body_start >= self.config.min_body_lines {
@@ -248,7 +260,10 @@ impl CodeCompressor {
                 }
             }
 
-            index = body_end.max(index + 1);
+            index = match skip_rescan_to {
+                Some(scanned_to) => scanned_to.max(index + 1),
+                None => body_end.max(index + 1),
+            };
         }
 
         keep
@@ -283,12 +298,39 @@ fn end_of_indented_block(lines: &[&str], start: usize, opener_indent: usize) -> 
     index
 }
 
+/// Outcome of scanning forward from `opener` for a brace-delimited block's end.
+struct BraceScan {
+    /// Index just past the block, or `opener + 1` when no balanced block was found —
+    /// same convention this crate has always used for "no block found".
+    end: usize,
+    /// How far the forward scan actually looked before it returned.
+    ///
+    /// # Why this exists
+    ///
+    /// `mark_kept` used to call this scan once per definition line and advance its
+    /// own index by exactly one line each time. A definition with no opening brace
+    /// anywhere in the rest of the file — a C++ forward declaration such as
+    /// `class Foo;`, say — makes the scan below run to end-of-file, and a run of N
+    /// such lines in a row then cost O(n) work N times over, i.e. O(n^2) total.
+    /// Reporting how far this scan traveled lets the caller skip straight past every
+    /// line it already examined instead of rediscovering "no brace here either" one
+    /// line at a time — but only when `found_open` is false: every line up to
+    /// `scanned_to` was checked for a `{` and none had one, so none of them could
+    /// open a block of their own either. When `found_open` is true (an unbalanced
+    /// rather than absent brace), later lines may still legitimately open real
+    /// blocks, so the caller must not skip in that case.
+    scanned_to: usize,
+    /// Whether an opening brace was seen anywhere in `[opener, scanned_to)`.
+    found_open: bool,
+}
+
 /// Index just past a brace-delimited block.
 ///
 /// Counts braces from the opening line. Braces inside string literals and comments are
 /// not excluded, which is the main way this heuristic misjudges — and why the caller
-/// treats an implausible result as "no block found" rather than trusting it.
-fn end_of_braced_block(lines: &[&str], opener: usize) -> usize {
+/// treats an implausible result as "no block found" rather than trusting it. See
+/// `BraceScan::scanned_to` for why the scan extent is reported alongside the result.
+fn scan_braced_block(lines: &[&str], opener: usize) -> BraceScan {
     let mut depth = 0i32;
     let mut seen_open = false;
 
@@ -304,13 +346,21 @@ fn end_of_braced_block(lines: &[&str], opener: usize) -> usize {
             }
         }
         if seen_open && depth <= 0 {
-            return offset + 1;
+            return BraceScan {
+                end: offset + 1,
+                scanned_to: offset + 1,
+                found_open: true,
+            };
         }
     }
 
-    // Unbalanced. Reporting the end of input would elide the rest of the file on a
-    // single stray brace, so report "nothing found" instead.
-    opener + 1
+    // Unbalanced or brace-less. Reporting the end of input would elide the rest of
+    // the file on a single stray brace, so report "nothing found" instead.
+    BraceScan {
+        end: opener + 1,
+        scanned_to: lines.len(),
+        found_open: seen_open,
+    }
 }
 
 impl Transform for CodeCompressor {
@@ -462,7 +512,38 @@ mod tests {
         // Reporting end-of-input on an unbalanced block would elide everything after a
         // single stray brace, most likely one inside a string literal.
         let lines = vec!["fn broken() {", "    let s = \"{\";", "    do_thing();"];
-        assert_eq!(end_of_braced_block(&lines, 0), 1, "should report no block");
+        assert_eq!(
+            scan_braced_block(&lines, 0).end,
+            1,
+            "should report no block"
+        );
+    }
+
+    #[test]
+    fn a_long_run_of_brace_less_definitions_stays_linear() {
+        // Regression for the O(n^2) blowup this file used to have: a C++ forward
+        // declaration (`class Foo;`) matches `is_definition` but never opens a brace,
+        // so `end_of_braced_block`/`scan_braced_block` used to scan all the way to
+        // end-of-file to discover that, and `mark_kept`'s outer loop only advanced by
+        // one line afterward — a run of N such lines cost O(n) work N times over. The
+        // fix has `scan_braced_block` report how far it looked, and `mark_kept` jumps
+        // its index past that whole range in one step when no brace was found, which
+        // makes each line get examined by the brace scan at most once across the
+        // entire pass. Before the fix, 15,000 lines here cost on the order of 100
+        // million line-visits and took well over a second; after the fix it is a
+        // single linear scan and completes near-instantly, which this test's normal
+        // pass (well inside `cargo test`'s default timeout) is the evidence for.
+        let (compressor, _store) = compressor();
+        let lines: Vec<&str> = std::iter::repeat("class Forward;").take(15_000).collect();
+
+        let keep = compressor.mark_kept(&lines, Language::Cpp);
+
+        // A brace-less definition never has a body to elide, so every line survives.
+        assert_eq!(keep.len(), lines.len());
+        assert!(
+            keep.iter().all(|k| *k),
+            "brace-less definitions have no body to elide"
+        );
     }
 
     #[test]

@@ -164,12 +164,20 @@ pub fn classify(event: &Event) -> ResponsesEvent {
     // `response.output_text.delta` → stem `output_text`, suffix `delta`. Splitting
     // rather than matching the whole string is what keeps a newly added
     // `response.<something>.delta` recognizable as a delta instead of unknown.
-    let mut segments = event_type.rsplitn(2, '.');
-    let suffix = segments.next().unwrap_or_default();
-    let stem = segments
-        .next()
-        .and_then(|rest| rest.rsplit('.').next())
-        .unwrap_or_default();
+    //
+    // A type with no `.` at all — e.g. the Responses API's mid-stream `error` event,
+    // which arrives as a bare `"error"` rather than `response.error` — has nothing to
+    // split. Regression: treating that case as an empty stem with the whole string as
+    // suffix (what `rsplitn(2, '.')` naturally gives when there is only one segment)
+    // meant a bare `error` event matched neither `("error", _)` nor `("response",
+    // "error")` below, and fell through to `Other` — silently dropping the dedicated
+    // provider-error case this classifier exists to catch. The whole string is the
+    // stem here instead, since that is where every real dotted type carries its
+    // meaningful discriminator.
+    let (stem, suffix) = match event_type.rsplit_once('.') {
+        Some((rest, suffix)) => (rest.rsplit('.').next().unwrap_or(rest), suffix),
+        None => (event_type.as_str(), ""),
+    };
 
     let phase = match suffix {
         "added" => Phase::Added,
@@ -395,6 +403,26 @@ mod tests {
             assert!(observer.completed, "{reason}");
             assert!(!observer.succeeded(), "{reason}");
         }
+    }
+
+    #[test]
+    fn a_bare_error_event_is_classified_as_an_error_not_dropped_as_unknown() {
+        // Regression. The Responses API's mid-stream error event arrives as a bare
+        // `"error"` type, not `response.error` — no `.` at all. The stem/suffix split
+        // used to leave a dot-less type with an empty stem, which matched neither
+        // `("error", _)` nor `("response", "error")` and silently fell through to
+        // `Other`, so a real provider error was never recorded as a failure.
+        assert_eq!(
+            classify(&event("error", r#"{"type":"error","message":"boom"}"#)),
+            ResponsesEvent::Error {
+                message: "boom".to_owned(),
+            }
+        );
+
+        let mut observer = ResponsesObserver::default();
+        observer.observe(&event("error", r#"{"type":"error","message":"boom"}"#));
+        assert_eq!(observer.failure.as_deref(), Some("boom"));
+        assert!(!observer.succeeded());
     }
 
     #[test]

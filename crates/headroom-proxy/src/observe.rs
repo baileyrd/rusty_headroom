@@ -55,6 +55,10 @@ pub struct ObservingStream<S> {
     /// it was not already going to pay — and it is the only way to read usage that
     /// arrives in a body rather than a frame.
     buffered: Option<Vec<u8>>,
+    /// Whether an SSE frame that exceeded [`SseParser`]'s bound has already been
+    /// logged for this reply. Without it, every subsequent poll of an oversized
+    /// stream would repeat the same warning until the connection closed.
+    frame_overflow_logged: bool,
 }
 
 /// Most a non-streaming reply may accumulate before its usage is given up on.
@@ -85,6 +89,7 @@ impl<S> ObservingStream<S> {
             metrics,
             recorded: false,
             buffered: (!event_stream).then(Vec::new),
+            frame_overflow_logged: false,
         }
     }
 
@@ -147,6 +152,19 @@ where
                     None => {
                         for event in this.parser.feed(&bytes) {
                             this.observer.observe(&event);
+                        }
+                        // Bounded the same way the non-streaming branch above is: past
+                        // the cap the bytes still pass through untouched below and only
+                        // this reply's telemetry is given up on. Logged once so an
+                        // operator can see it happened instead of the stream quietly
+                        // reporting less than it saw.
+                        if this.parser.is_overflowed() && !this.frame_overflow_logged {
+                            this.frame_overflow_logged = true;
+                            tracing::warn!(
+                                "an SSE frame exceeded the parser's bound with no \
+                                 terminator; this reply's telemetry is incomplete from \
+                                 here on, though the relayed bytes are unaffected"
+                            );
                         }
                     }
                 }
@@ -256,6 +274,31 @@ mod tests {
         .await;
 
         assert_eq!(out, source);
+    }
+
+    #[tokio::test]
+    async fn a_frame_that_never_terminates_still_relays_every_byte() {
+        // Invariant I9 again, for the bounded-parser path specifically: an SSE frame
+        // that never finds a terminator makes `SseParser` give up on itself (see
+        // `sse::framing::SseParser::is_overflowed`), and observation giving up must
+        // not mean the relay gives up too. The oversized bytes still have to reach the
+        // client exactly as they arrived.
+        let metrics = Arc::new(Metrics::new());
+        // Past framing.rs's private MAX_FRAME_BYTES bound (1 MiB), with no `\n\n`
+        // anywhere in it.
+        let source = vec![b'a'; 1024 * 1024 + 1];
+
+        let out = drain(ObservingStream::new(
+            from_chunks(vec![source.clone()]),
+            metrics,
+            "/v1/messages",
+        ))
+        .await;
+
+        assert_eq!(
+            out, source,
+            "an overflowed frame must still relay byte-for-byte"
+        );
     }
 
     #[tokio::test]

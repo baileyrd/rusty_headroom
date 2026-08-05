@@ -132,20 +132,38 @@ fn has_o_series_shape(model: &str) -> bool {
 #[derive(Clone)]
 pub struct Registry {
     exact: Vec<(Family, Arc<dyn Tokenizer>)>,
+    /// Whether the compiled-in OpenAI BPE tables are available for *per-model*
+    /// resolution.
+    ///
+    /// Kept separate from `exact` rather than folded into one `Arc<dyn Tokenizer>`
+    /// registered for `Family::OpenAi`: OpenAI is the one family with more than one
+    /// encoding in active use (`cl100k_base` for GPT-4/GPT-3.5, `o200k_base` for
+    /// GPT-4o and later), and a single trait-object instance keyed only on the coarse
+    /// `Family` cannot represent "pick the encoding from the actual model string" —
+    /// which is exactly what `TiktokenCounter::for_model` already does correctly when
+    /// called directly. A single fixed instance built once from `"gpt-4o"` used to be
+    /// registered for the whole family, so a `gpt-3.5`/`gpt-4` request was measured
+    /// with `gpt-4o`'s vocabulary while still reporting itself as exact — under the
+    /// hood, `o200k_base` under-counts relative to a model's real `cl100k_base` on
+    /// content where they differ, which is the direction invariant I5 exists to
+    /// forbid.
+    openai_tiktoken: bool,
     fallback: Arc<dyn Tokenizer>,
 }
 
 impl std::fmt::Debug for Registry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut exact: Vec<(&'static str, &'static str)> = self
+            .exact
+            .iter()
+            .map(|(family, tokenizer)| (family.as_str(), tokenizer.name()))
+            .collect();
+        if self.openai_tiktoken && !self.exact.iter().any(|(f, _)| *f == Family::OpenAi) {
+            exact.push((Family::OpenAi.as_str(), "tiktoken (per-model)"));
+            exact.sort_unstable();
+        }
         f.debug_struct("Registry")
-            .field(
-                "exact",
-                &self
-                    .exact
-                    .iter()
-                    .map(|(family, tokenizer)| (family.as_str(), tokenizer.name()))
-                    .collect::<Vec<_>>(),
-            )
+            .field("exact", &exact)
             .field("fallback", &self.fallback.name())
             .finish()
     }
@@ -163,24 +181,22 @@ impl Registry {
     pub fn new() -> Self {
         Self {
             exact: Vec::new(),
+            openai_tiktoken: false,
             fallback: Arc::new(HeuristicEstimator::new()),
         }
     }
 
     /// Builds a registry with every exact tokenizer this build carries.
     ///
-    /// Registering by default rather than on request: the OpenAI vocabularies are
+    /// Enabled by default rather than on request: the OpenAI vocabularies are
     /// compiled in either way, so leaving them unregistered would mean carrying the
     /// tables and then not using them — the worst of both.
     ///
-    /// The model identifier still decides which encoding applies, so an Anthropic model
-    /// is unaffected and still falls back to the heuristic.
+    /// The model identifier still decides which encoding applies, so an Anthropic
+    /// model is unaffected and still falls back to the heuristic.
     pub fn with_defaults() -> Self {
         let mut registry = Self::new();
-        registry.register(
-            Family::OpenAi,
-            Arc::new(TiktokenCounter::for_model("gpt-4o")),
-        );
+        registry.openai_tiktoken = true;
         registry
     }
 
@@ -189,6 +205,11 @@ impl Registry {
     /// Replacing rather than appending: two tokenizers registered for one family is a
     /// configuration mistake, and silently keeping the first makes it look like the
     /// second call did nothing.
+    ///
+    /// An explicit registration for [`Family::OpenAi`] takes priority over the
+    /// compiled-in per-model tiktoken resolution `with_defaults` enables — this is
+    /// still the escape hatch for a caller that wants one fixed tokenizer for the
+    /// whole family (tests use it that way).
     pub fn register(&mut self, family: Family, tokenizer: Arc<dyn Tokenizer>) {
         self.exact.retain(|(existing, _)| *existing != family);
         self.exact.push((family, tokenizer));
@@ -202,10 +223,29 @@ impl Registry {
     /// Falls back to the heuristic estimator when the family is unknown or has no
     /// registered tokenizer.
     pub fn for_model(&self, model: &str) -> Arc<dyn Tokenizer> {
-        self.for_family(Family::of(model))
+        let family = Family::of(model);
+
+        if let Some((_, tokenizer)) = self.exact.iter().find(|(f, _)| *f == family) {
+            return tokenizer.clone();
+        }
+
+        if family == Family::OpenAi && self.openai_tiktoken {
+            // Resolved from the actual model string, not just the family, so
+            // `gpt-3.5-turbo`/`gpt-4` get `cl100k_base` and `gpt-4o`/later get
+            // `o200k_base` instead of sharing whichever one a fixed instance happened
+            // to be built from.
+            return Arc::new(TiktokenCounter::for_model(model));
+        }
+
+        self.fallback.clone()
     }
 
-    /// The tokenizer for `family`.
+    /// The tokenizer for `family`, without a model string to resolve OpenAI's
+    /// encoding from.
+    ///
+    /// Only meaningful for a family with one encoding, or a family with an explicit
+    /// [`Self::register`] override. Prefer [`Self::for_model`] wherever a model
+    /// identifier is available, which is everywhere this crate calls it.
     pub fn for_family(&self, family: Family) -> Arc<dyn Tokenizer> {
         self.exact
             .iter()
@@ -224,7 +264,12 @@ impl Registry {
 
     /// Families with a registered exact tokenizer.
     pub fn registered(&self) -> Vec<Family> {
-        self.exact.iter().map(|(family, _)| *family).collect()
+        let mut families: Vec<Family> = self.exact.iter().map(|(family, _)| *family).collect();
+        if self.openai_tiktoken && !families.contains(&Family::OpenAi) {
+            families.push(Family::OpenAi);
+        }
+        families.sort_unstable();
+        families
     }
 }
 
@@ -318,6 +363,32 @@ mod tests {
 
         assert!(registry.is_exact_for("gpt-4o"));
         assert_eq!(registry.for_model("gpt-4o").name(), "o200k_base");
+    }
+
+    #[test]
+    fn different_openai_models_use_their_own_encoding_not_gpt_4os() {
+        // Regression. A single fixed instance built once from "gpt-4o" used to be
+        // registered for the whole `Family::OpenAi` bucket, so every OpenAI model —
+        // including ones that really use `cl100k_base` — was counted with `gpt-4o`'s
+        // `o200k_base` vocabulary while `is_exact_for` still reported `true`.
+        let registry = Registry::with_defaults();
+
+        assert_eq!(registry.for_model("gpt-4o").name(), "o200k_base");
+        assert_eq!(registry.for_model("gpt-4-turbo").name(), "cl100k_base");
+        assert_eq!(registry.for_model("gpt-3.5-turbo").name(), "cl100k_base");
+        assert!(registry.is_exact_for("gpt-3.5-turbo"));
+    }
+
+    #[test]
+    fn an_explicit_openai_registration_still_overrides_per_model_resolution() {
+        // The escape hatch `register` documents: a caller that wants one fixed
+        // tokenizer for the whole family, rather than the compiled-in per-model
+        // resolution, still gets it.
+        let mut registry = Registry::with_defaults();
+        registry.register(Family::OpenAi, Arc::new(FakeExact("fixed")));
+
+        assert_eq!(registry.for_model("gpt-4o").name(), "fixed");
+        assert_eq!(registry.for_model("gpt-3.5-turbo").name(), "fixed");
     }
 
     #[test]
