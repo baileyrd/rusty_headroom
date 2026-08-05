@@ -210,8 +210,12 @@ echo "== 9. the README marks every startup-only setting as needing a restart"
 #
 # The init template is checked the same way, by a test rather than here — see
 # `the_generated_config_marks_every_startup_only_setting`.
-consts=$(grep -oP '^\s+vars::\K[A-Z_]+(?=,)' crates/headroom-proxy/src/config.rs \
-  | awk 'NR<=20' | sort -u)
+# Scoped to the `STARTUP_ONLY` array specifically — `config.rs` also declares `KNOWN`
+# (every recognized setting, live or not) in the same `vars::NAME,`-per-line shape, and
+# an unscoped grep across the whole file merged the two, wrongly flagging every live
+# setting in `KNOWN` as one the README should mark `restart: yes`.
+consts=$(awk '/^pub const STARTUP_ONLY/,/^\];/' crates/headroom-proxy/src/config.rs \
+  | grep -oP '^\s+vars::\K[A-Z_]+(?=,)' | sort -u)
 for c in $consts; do
   value=$(grep -oP "pub const $c: &str = \"\K[^\"]+" crates/headroom-proxy/src/config.rs)
   [ -z "$value" ] && continue
