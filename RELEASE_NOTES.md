@@ -6,6 +6,22 @@ the crate starts publishing releases.
 
 ---
 
+## The CCR store's expired entries were never purged
+**2026-08-04** · `purge_expired` existed; nothing in either binary called it
+
+- `CcrStore::get` filters expired entries out of reads but never removes them from
+  the backing map or directory — `purge_expired` is the only thing that does, and
+  neither the proxy nor the MCP server ever called it. Under sustained traffic, an
+  in-memory or file-backed store grew for the life of the process, since every lossy
+  compression writes a new TTL'd entry. Redis is unaffected (native key expiry) but
+  isn't the default backend.
+- Added a periodic sweep to both binaries: a `tokio::spawn`ed task in the proxy
+  (against the exact store `AppState` hands to `Compressors`, spawned before `serve`
+  starts accepting requests) and a plain `std::thread` in the MCP server (which has no
+  async runtime). Both run every 5 minutes — well inside a tenth of the shortest
+  `CCR_TTL` in use. `purge_ccr_once` is split out and tested directly against a
+  seeded store in each binary, so the fix is proven without waiting on a real timer.
+
 ## CCR retrieval has no tenant isolation, and now says so
 **2026-08-04** · a deployment requirement the code cannot enforce from where it sits
 
