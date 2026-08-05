@@ -29,6 +29,7 @@ pub mod openai;
 pub mod server;
 pub mod sse;
 pub mod stabilization;
+pub mod toin;
 pub mod upstream;
 pub mod volatile;
 pub mod websocket;

@@ -13,13 +13,20 @@
 use http::header::HeaderMap;
 
 /// How a request authenticated.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AuthMode {
     /// A plain API key. The customer pays per token and has no account state to risk.
     PayAsYouGo,
     /// An OAuth token. Scope-bound; modifications could void the grant.
     OAuth,
     /// A subscription CLI. The most restricted mode.
+    ///
+    /// The `Default`, deliberately: it grants nothing, which matches what
+    /// `CompressionPolicy::default()` already permits. A default that allowed more than
+    /// the policy beside it would let a mode nobody set authorize compression nobody
+    /// intended — and `classify_auth_mode` already resolves anything unrecognized here
+    /// for the same reason.
+    #[default]
     Subscription,
 }
 
@@ -116,6 +123,12 @@ fn looks_like_pay_as_you_go_key(token: &str) -> bool {
 /// [`Default`] gives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CompressionPolicy {
+    /// The auth mode this policy was derived from.
+    ///
+    /// Carried so an observer downstream can name the mode without re-classifying the
+    /// headers — telemetry aggregates by `(auth_mode, model_family, structure_hash)`, and
+    /// re-deriving it from the policy's flags would be a second copy of this mapping.
+    pub mode: AuthMode,
     /// Whether lossy transforms may run.
     ///
     /// Off outside pay-as-you-go. Lossy compression visibly rewrites content, and on
@@ -158,6 +171,7 @@ impl CompressionPolicy {
     pub fn for_mode(mode: AuthMode) -> Self {
         match mode {
             AuthMode::PayAsYouGo => Self {
+                mode,
                 lossy_transforms: true,
                 lossless_transforms: true,
                 auto_cache_control: true,
@@ -166,6 +180,7 @@ impl CompressionPolicy {
                 may_strip_accept_encoding: true,
             },
             AuthMode::OAuth => Self {
+                mode,
                 // Lossless only, and no automatic markers that could fall outside the
                 // granted scope. A meaning-preserving reformat cannot exceed a scope,
                 // so it is permitted here where it is not on subscription traffic.
