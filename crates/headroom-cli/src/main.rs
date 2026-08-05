@@ -66,7 +66,7 @@ enum Command {
     },
     /// Point an agent at the proxy.
     Wrap {
-        /// Agent name — claude, codex, cursor, aider, cline, continue, goose, openhands.
+        /// Agent name — run `headroom tools` for the full list and which are wrappable.
         agent: String,
         /// Proxy address to point at.
         #[arg(long, default_value = "http://127.0.0.1:8787")]

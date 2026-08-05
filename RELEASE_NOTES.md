@@ -6,6 +6,31 @@ the crate starts publishing releases.
 
 ---
 
+## Six more agents audited, three of them wrappable
+**2026-08-05** · closes #195 · the audit mattered more than the additions
+
+- We wrapped 8 agents; the reference carries provider definitions for roughly 20. #195 was
+  filed as an **audit first, implementation second**, and that ordering paid: the useful
+  output is not the three agents added but the three ruled out with evidence.
+- Added as env-wrappable, each checked against the reference's provider definition rather
+  than guessed: **kimi** (`KIMI_BASE_URL`), **cortex-code** (`OPENAI_BASE_URL`, with the
+  `/v1` suffix the other OpenAI-shaped agents take), and **grok** (both shapes, since the
+  model selected decides which it speaks).
+- Recognized but reported as env-unsupported, following the `cursor` precedent: **opencode**
+  and **zcode**, which resolve their endpoint from their own config files, and **omp**.
+- **`omp` is the one worth naming.** It looks env-wrappable and is not: `ANTHROPIC_BASE_URL`
+  feeds only its web-search helper, while chat traffic follows
+  `providers.anthropic.baseUrl` in `~/.omp/agent/models.yml`. Adding it as env-wrappable
+  would have printed a plausible export, changed nothing about where requests went, and
+  left an operator certain they had wrapped it — worse than saying no. The reference
+  documents having verified this empirically against a probe server; this repo takes the
+  same position for the same reason, with a test naming the trap.
+- Settings-file wrapping already generalized: the existing
+  `every_agent_can_be_pointed_at_the_proxy_through_a_settings_file` test covered all six
+  new agents without changes, so `unwrap`'s byte-exact restore (L8) holds for them too.
+- Also asserted: every agent name is unique and parses back. A duplicate `as_str` would
+  leave one agent listed in `ALL` and unreachable from the CLI.
+
 ## Nothing reported why real traffic declined to compress
 **2026-08-05** · closes #188 · `learn` mines a corpus; this reads what actually flowed
 

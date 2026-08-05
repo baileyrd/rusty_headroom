@@ -49,11 +49,23 @@ pub enum Agent {
     Goose,
     /// OpenHands.
     OpenHands,
+    /// Kimi CLI.
+    Kimi,
+    /// Grok CLI.
+    Grok,
+    /// Cortex Code.
+    CortexCode,
+    /// OpenCode.
+    OpenCode,
+    /// ZCode desktop.
+    ZCode,
+    /// Oh My Pi.
+    Omp,
 }
 
 impl Agent {
     /// Every supported agent.
-    pub const ALL: [Agent; 8] = [
+    pub const ALL: [Agent; 14] = [
         Agent::Claude,
         Agent::Codex,
         Agent::Cursor,
@@ -62,6 +74,12 @@ impl Agent {
         Agent::Continue,
         Agent::Goose,
         Agent::OpenHands,
+        Agent::Kimi,
+        Agent::Grok,
+        Agent::CortexCode,
+        Agent::OpenCode,
+        Agent::ZCode,
+        Agent::Omp,
     ];
 
     /// Parses an agent name.
@@ -75,6 +93,12 @@ impl Agent {
             "continue" => Some(Self::Continue),
             "goose" => Some(Self::Goose),
             "openhands" | "open-hands" => Some(Self::OpenHands),
+            "kimi" => Some(Self::Kimi),
+            "grok" => Some(Self::Grok),
+            "cortex-code" | "cortex_code" | "cortexcode" => Some(Self::CortexCode),
+            "opencode" | "open-code" => Some(Self::OpenCode),
+            "zcode" | "z-code" => Some(Self::ZCode),
+            "omp" | "oh-my-pi" => Some(Self::Omp),
             _ => None,
         }
     }
@@ -90,6 +114,12 @@ impl Agent {
             Self::Continue => "continue",
             Self::Goose => "goose",
             Self::OpenHands => "openhands",
+            Self::Kimi => "kimi",
+            Self::Grok => "grok",
+            Self::CortexCode => "cortex-code",
+            Self::OpenCode => "opencode",
+            Self::ZCode => "zcode",
+            Self::Omp => "omp",
         }
     }
 
@@ -107,11 +137,37 @@ impl Agent {
                 ("ANTHROPIC_BASE_URL", proxy.clone()),
                 ("OPENAI_BASE_URL", format!("{proxy}/v1")),
             ],
-            // Cursor is configured through its own settings UI and does not read a base
-            // URL from the environment. Returning nothing is the honest answer; the
-            // command reports it as unsupported rather than printing exports that would
-            // do nothing.
-            Self::Cursor => Vec::new(),
+            // Reads its own base URL from the environment under its own name.
+            Self::Kimi => vec![("KIMI_BASE_URL", proxy)],
+
+            // OpenAI-shaped, and reads the standard variable.
+            Self::CortexCode => vec![("OPENAI_BASE_URL", format!("{proxy}/v1"))],
+
+            // Speaks both shapes depending on the model selected.
+            Self::Grok => vec![
+                ("ANTHROPIC_BASE_URL", proxy.clone()),
+                ("OPENAI_BASE_URL", format!("{proxy}/v1")),
+            ],
+
+            // # Agents that cannot be wrapped by environment alone
+            //
+            // Returning nothing is the honest answer for each, and the command reports
+            // them as unsupported rather than printing exports that would silently do
+            // nothing. `cursor` established that behavior and these follow it.
+            //
+            // **Cursor** is configured through its own settings UI.
+            //
+            // **OpenCode** and **ZCode** resolve their endpoint from their own config
+            // files rather than the environment.
+            //
+            // **Oh My Pi** is the one worth naming specifically, because it looks
+            // env-wrappable and is not: it resolves its Anthropic endpoint from
+            // `providers.anthropic.baseUrl` in `~/.omp/agent/models.yml`, and
+            // `ANTHROPIC_BASE_URL` feeds only its web-search helper. Setting that
+            // variable would print a plausible export, change nothing about where chat
+            // traffic goes, and leave an operator certain they had wrapped it. That is a
+            // worse outcome than saying no.
+            Self::Cursor | Self::OpenCode | Self::ZCode | Self::Omp => Vec::new(),
         }
     }
 
@@ -412,10 +468,65 @@ mod tests {
         // Printing exports that do nothing is worse than reporting the limitation: the
         // customer would believe they are routed through the proxy and see no savings,
         // with nothing to explain why.
-        assert!(!Agent::Cursor.env_configurable());
-        for agent in Agent::ALL.into_iter().filter(|a| *a != Agent::Cursor) {
+        // Each of these was checked against the reference's provider definitions rather
+        // than assumed. `omp` is the one worth naming: it *looks* env-wrappable and is
+        // not, because `ANTHROPIC_BASE_URL` feeds only its web-search helper while chat
+        // traffic follows `~/.omp/agent/models.yml`. An export for it would be a
+        // plausible no-op.
+        let unwrappable = [Agent::Cursor, Agent::OpenCode, Agent::ZCode, Agent::Omp];
+
+        for agent in unwrappable {
+            assert!(!agent.env_configurable(), "{agent} claims env support");
+        }
+        for agent in Agent::ALL.into_iter().filter(|a| !unwrappable.contains(a)) {
             assert!(agent.env_configurable(), "{agent}");
         }
+    }
+
+    #[test]
+    fn the_newly_audited_agents_use_the_variable_they_actually_read() {
+        // Audited against the reference's provider definitions rather than guessed. A
+        // wrong variable here prints a plausible export that changes nothing, which is
+        // the failure mode this whole set of decisions is organized around.
+        let kimi = Agent::Kimi.env("http://127.0.0.1:8787");
+        assert_eq!(
+            kimi,
+            vec![("KIMI_BASE_URL", "http://127.0.0.1:8787".to_owned())]
+        );
+
+        // OpenAI-shaped agents take the `/v1` suffix, the same as codex.
+        let cortex = Agent::CortexCode.env("http://127.0.0.1:8787");
+        assert_eq!(
+            cortex,
+            vec![("OPENAI_BASE_URL", "http://127.0.0.1:8787/v1".to_owned())]
+        );
+
+        // Grok speaks both shapes depending on the model selected.
+        let grok = Agent::Grok.env("http://127.0.0.1:8787");
+        assert_eq!(grok.len(), 2);
+    }
+
+    #[test]
+    fn omp_is_not_wrappable_by_environment_however_much_it_looks_it() {
+        // The trap. `ANTHROPIC_BASE_URL` feeds omp's web-search helper only; its chat
+        // endpoint comes from `providers.anthropic.baseUrl` in `~/.omp/agent/models.yml`.
+        // Emitting the export would leave an operator certain they had wrapped it while
+        // every request went to the real provider.
+        assert!(Agent::Omp.env("http://127.0.0.1:8787").is_empty());
+        assert!(!Agent::Omp.env_configurable());
+    }
+
+    #[test]
+    fn every_agent_name_is_unique_and_parses_back() {
+        // A duplicate `as_str` would make one agent unreachable by name while `ALL` still
+        // listed it — reachable from the enum, unreachable from the CLI.
+        let mut seen: Vec<&str> = Vec::new();
+        for agent in Agent::ALL {
+            assert!(!seen.contains(&agent.as_str()), "{agent} duplicates a name");
+            seen.push(agent.as_str());
+            assert_eq!(Agent::parse(agent.as_str()), Some(agent));
+        }
+        assert_eq!(seen.len(), Agent::ALL.len());
     }
 
     // ---- settings files ----
