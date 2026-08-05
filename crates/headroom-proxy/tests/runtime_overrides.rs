@@ -142,5 +142,4 @@ fn an_empty_value_returns_any_setting_to_its_default() {
 
     std::env::remove_var(config::vars::COMPRESSION);
     config::clear_overrides();
-
 }
