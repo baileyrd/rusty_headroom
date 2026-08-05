@@ -6,6 +6,19 @@ the crate starts publishing releases.
 
 ---
 
+## Two proxy tests were silently no-ops on Windows
+**2026-08-04** · `/proc/self/mem` doesn't exist there
+
+- Both tests use a directory path guaranteed to never open, to prove a CCR store falls
+  back correctly when its configured directory is unusable.
+  `/proc/self/mem/not-a-directory` served that purpose on Linux only — on Windows it's
+  an ordinary, creatable path, so `FileCcrStore::open` happily built real nested
+  directories there, leaving junk at `C:\proc` and making the "did not actually fall
+  back" assertion fail, since the store was never actually unusable.
+- Replaced with a cross-platform construction: a real file written to the OS temp
+  directory, then a path *inside* it (`blocker/not-a-directory`) — a directory create
+  can never succeed with a file as its parent component, on any platform.
+
 ## The relay dropped every query string
 **2026-08-04** · found while checking whether `claude -p` could drive the live measurement
 
