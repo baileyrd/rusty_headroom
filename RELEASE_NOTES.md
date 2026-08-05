@@ -6,6 +6,20 @@ the crate starts publishing releases.
 
 ---
 
+## Every OpenAI model was token-counted with gpt-4o's vocabulary
+**2026-08-04** · the direction invariant I5 exists to forbid
+
+- `Registry::with_defaults` built one `TiktokenCounter` from `"gpt-4o"` and registered
+  it for the whole `Family::OpenAi` bucket. OpenAI is the one family with more than one
+  encoding in active use — `cl100k_base` for GPT-4/GPT-3.5, `o200k_base` for GPT-4o
+  and later — so a `gpt-3.5-turbo`/`gpt-4` request was measured with `o200k_base`
+  while `is_exact_for` still reported `true`. `o200k_base` under-counts relative to a
+  model's real `cl100k_base` on content where they differ.
+- Fixed: the registry now resolves the encoding from the actual model string via
+  `TiktokenCounter::for_model`, not a fixed instance. An explicit
+  `register(Family::OpenAi, ...)` still overrides it, for a caller that wants one fixed
+  tokenizer regardless.
+
 ## The relay dropped every query string
 **2026-08-04** · found while checking whether `claude -p` could drive the live measurement
 
