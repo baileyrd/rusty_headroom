@@ -103,11 +103,19 @@ fn normalize_token(token: &str) -> String {
 
     // Strip surrounding punctuation so `(4821)` and `4821,` normalize the same way as
     // a bare `4821`, while the punctuation itself survives to keep the shape legible.
+    //
+    // `tail` is scanned over `remainder` (what's left after `lead`), not over the
+    // whole token. Both character classes include the quote characters, so a token
+    // made entirely of quotes — a lone `"`, or a run of them — used to be consumed by
+    // both scans independently, making `lead.len() + tail.len() > token.len()` and
+    // panicking on the slice below. Scanning `tail` over the post-`lead` remainder
+    // makes that impossible: the two scans can never overlap.
     let lead: String = token
         .chars()
         .take_while(|c| matches!(c, '(' | '[' | '{' | '"' | '\'' | '<'))
         .collect();
-    let tail: String = token
+    let remainder = &token[lead.len()..];
+    let tail: String = remainder
         .chars()
         .rev()
         .take_while(|c| {
@@ -121,7 +129,7 @@ fn normalize_token(token: &str) -> String {
         .rev()
         .collect();
 
-    let core = &token[lead.len()..token.len() - tail.len()];
+    let core = &remainder[..remainder.len() - tail.len()];
     if core.is_empty() {
         return token.to_owned();
     }
@@ -388,6 +396,26 @@ mod tests {
         assert_ne!(
             templatize("connection established"),
             templatize("connection refused")
+        );
+    }
+
+    #[test]
+    fn a_lone_or_repeated_quote_token_does_not_panic() {
+        // Regression. `normalize_token` stripped leading and trailing punctuation
+        // independently, and both classes include quote characters — so a token made
+        // entirely of quotes was consumed by both scans and produced a slice range
+        // that starts after it ends.
+        assert_eq!(
+            templatize("unexpected token \" in input"),
+            "unexpected token \" in input".to_string()
+        );
+        assert_eq!(
+            templatize("trailing quote run \"\"\""),
+            "trailing quote run \"\"\"".to_string()
+        );
+        assert_eq!(
+            templatize("a lone apostrophe ' here"),
+            "a lone apostrophe ' here".to_string()
         );
     }
 
