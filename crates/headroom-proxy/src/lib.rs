@@ -24,6 +24,7 @@ pub mod guard;
 pub mod headers;
 pub mod health;
 pub mod ledger;
+pub mod linked_memory;
 pub mod metrics;
 pub mod observe;
 pub mod openai;

@@ -50,6 +50,16 @@ pub mod vars {
     pub const MAX_LINES: &str = "HEADROOM_MAX_LINES";
     /// Requests per minute before the proxy answers 429.
     pub const RATE_LIMIT: &str = "HEADROOM_RATE_LIMIT";
+    /// Path to a `rusty_remind_me` SQLite store to query in-process (needs
+    /// `--features linked-memory`). Unset means no linked memory backend, regardless of
+    /// the other two `LINKED_MEMORY_*` settings.
+    pub const LINKED_MEMORY_DB: &str = "HEADROOM_LINKED_MEMORY_DB";
+    /// Path to a local `.rten` sentence-encoder model file for the linked backend's
+    /// semantic tier. Both this and `LINKED_MEMORY_TOKENIZER` are required together; the
+    /// tier is off (keyword-only) if either is unset or fails to load.
+    pub const LINKED_MEMORY_MODEL: &str = "HEADROOM_LINKED_MEMORY_MODEL";
+    /// Path to the tokenizer JSON matching `LINKED_MEMORY_MODEL`.
+    pub const LINKED_MEMORY_TOKENIZER: &str = "HEADROOM_LINKED_MEMORY_TOKENIZER";
 }
 
 /// Every `HEADROOM_*` name that some code in this crate actually reads.
@@ -67,7 +77,7 @@ pub mod vars {
 /// Kept beside [`vars`] so a new setting is wired to both in the same edit, rather than
 /// readable from `Config` but unreachable through the admin endpoint, or reachable
 /// through the admin endpoint but read by nothing.
-pub const KNOWN: [&str; 15] = [
+pub const KNOWN: [&str; 18] = [
     vars::HOST,
     vars::PORT,
     vars::UPSTREAM,
@@ -83,6 +93,9 @@ pub const KNOWN: [&str; 15] = [
     vars::MAX_BYTES,
     vars::MAX_LINES,
     vars::RATE_LIMIT,
+    vars::LINKED_MEMORY_DB,
+    vars::LINKED_MEMORY_MODEL,
+    vars::LINKED_MEMORY_TOKENIZER,
 ];
 
 /// Settings that are read once at startup and ignored thereafter.
@@ -102,7 +115,7 @@ pub const KNOWN: [&str; 15] = [
 ///
 /// Kept beside the variables themselves so a new startup-only setting is added here in the
 /// same edit rather than discovered later by someone whose change silently did nothing.
-pub const STARTUP_ONLY: [&str; 10] = [
+pub const STARTUP_ONLY: [&str; 13] = [
     vars::HOST,
     vars::PORT,
     // The one that mattered most, and the one this list was missing.
@@ -129,6 +142,14 @@ pub const STARTUP_ONLY: [&str; 10] = [
     // client beside it. A new value landing in the override map would change nothing
     // while the endpoint reported success.
     vars::RATE_LIMIT,
+    // The linked memory backend's database connection, and its embedder if configured,
+    // are resolved once at startup and pinned for the process lifetime — deliberately,
+    // per invariant I4 (DECISIONS D44). A live database re-opened per request would make
+    // the same request compress differently depending on when it arrived; an embedder
+    // that could load or fail to load per request would do the same to the semantic tier.
+    vars::LINKED_MEMORY_DB,
+    vars::LINKED_MEMORY_MODEL,
+    vars::LINKED_MEMORY_TOKENIZER,
 ];
 
 /// The safety limits the compressor runs under.
@@ -183,6 +204,30 @@ pub fn rate_limit() -> u32 {
 /// `/metrics` scrape — the behavior every deployment had before the ledger existed.
 pub fn savings_path() -> Option<std::path::PathBuf> {
     setting(vars::SAVINGS)
+        .filter(|value| !value.trim().is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+/// Path to a `rusty_remind_me` SQLite store, if a linked memory backend is configured.
+///
+/// `None` means no linked backend, the same "unconfigured is off" contract every other
+/// optional path here follows.
+pub fn linked_memory_db_path() -> Option<std::path::PathBuf> {
+    setting(vars::LINKED_MEMORY_DB)
+        .filter(|value| !value.trim().is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+/// Path to the local sentence-encoder model file for the linked backend's semantic tier.
+pub fn linked_memory_model_path() -> Option<std::path::PathBuf> {
+    setting(vars::LINKED_MEMORY_MODEL)
+        .filter(|value| !value.trim().is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+/// Path to the tokenizer JSON matching [`linked_memory_model_path`].
+pub fn linked_memory_tokenizer_path() -> Option<std::path::PathBuf> {
+    setting(vars::LINKED_MEMORY_TOKENIZER)
         .filter(|value| !value.trim().is_empty())
         .map(std::path::PathBuf::from)
 }

@@ -119,6 +119,10 @@ impl AppState {
                 // the same request produce different bytes depending on when it arrived,
                 // and those bytes go upstream — see `Config::memories`.
                 .with_memories(Config::memories(), Config::memory_limit())
+                // Resolved once, same reasoning: the database connection and the embedder
+                // (if any) are pinned for the process lifetime — see
+                // `linked_memory::LinkedMemory::resolve` and DECISIONS D44.
+                .with_linked_memory(crate::linked_memory::LinkedMemory::resolve().map(Arc::new))
                 // Routing reasons are counted here and nowhere else: the CLI and the
                 // library callers have no metrics endpoint to read them from.
                 .with_metrics(metrics.clone())

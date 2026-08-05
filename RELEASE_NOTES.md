@@ -6,6 +6,48 @@ the crate starts publishing releases.
 
 ---
 
+## A linked memory backend, with an in-process embedder instead of a probed daemon
+**2026-08-05** · closes #215 · `--features linked-memory`, off by default
+
+- **`HEADROOM_LINKED_MEMORY_DB` queries a `rusty_remind_me` store in-process,** instead of
+  reading a static `HEADROOM_MEMORY` JSONL export — FTS5 BM25 over a real index, RRF-fused
+  with an optional semantic tier, rather than scoring every memory in a `Vec` per request.
+  Takes precedence over `HEADROOM_MEMORY` when both are set.
+- **The semantic tier is `headroom-embed`'s pinned local model, not `remind_me_core`'s own
+  daemon-probed one.** `remind_me_core::embedder::available_embedder()` pings an Ollama
+  daemon and silently degrades to keyword-only on a failed probe — fine for an interactive
+  search, wrong for a compression path where the same request must produce the same bytes
+  every time (I4). `HEADROOM_LINKED_MEMORY_MODEL` / `_TOKENIZER` load a local `.rten` model
+  once at startup instead; a model that will not load takes the semantic tier offline for
+  the whole process, logged once, never retried per request.
+- **Vectors from an incompatible embedder are detected and declined, not silently compared.**
+  If the database's stored vectors were computed by a different embedder than the one just
+  loaded, comparing them would be — per `remind_me_core`'s own docs — "a number with no
+  meaning." Checked once at startup via `remind_me_core::vectors::embedding_mismatch_info`;
+  a mismatch falls back to keyword-only, the same as a load failure.
+- **The vitality filter's wall-clock read never happens.** `search_memories`'s default puts
+  `effective_vitality(...) >= 0.05` in the query unless told otherwise, which calls
+  `Utc::now()`. The linked backend always passes `include_dormant: true, min_vitality: 0.0`,
+  so that predicate is never emitted — proven by a test that manufactures a memory decayed
+  below the floor and confirms it still surfaces.
+- **A fused ranking survives the trip into the live zone.** `MemoryStore`'s own ranking
+  (corroboration, then BM25) would have reduced every linked result to a content-hash
+  tiebreak — each has exactly one source and one occurrence, so it ties on everything above
+  that. `inject_block_ranked` / `inject_append_ranked` render an already-ordered list
+  directly instead, sharing the live-zone splice logic with the existing path rather than
+  duplicating it.
+- **Off by default, and the cost is measured.** `remind_me_core` carries `rusqlite` with
+  `bundled` (SQLite from source) and `tokio` with `full`, neither optional; `headroom-embed`'s
+  `local` feature adds `rten` and `tokenizers`. A clean release build of `headroom-proxy`:
+  97s with default features, 171s with `linked-memory` — +74s, +76%.
+- **No `.rten` model exists in this environment, so the forward pass ships unexercised** —
+  the same limitation `headroom-embed` itself shipped under. Every test uses a deterministic
+  bag-of-characters double, the same pattern `rusty_remind_me`'s own injectable-embedder
+  test uses, to prove the wiring rather than the model. D44 has the full reasoning,
+  including why D43's three objections to a linked backend do not survive this shape.
+
+---
+
 ## Memories are chosen for the request, and remind_me can write the file
 **2026-08-05** · closes #193 · the retrieval half of memory, without a vector index
 

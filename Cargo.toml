@@ -8,6 +8,7 @@ members = [
     "crates/headroom-cli",
     "crates/headroom-simulators",
     "crates/headroom-parity",
+    "crates/headroom-embed",
 ]
 
 # `headroom-py` is a Python extension module built with maturin, not plain cargo.

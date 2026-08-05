@@ -53,6 +53,11 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Test
+        # Also where `headroom-proxy`'s `linked-memory` feature (gap #215; DECISIONS D44)
+        # gets built and tested. It does not get the `redis` job's treatment below —
+        # unlike `redis`'s store, its tests need no live service and do not skip when
+        # one is absent, so `--all-features` here already exercises them for real rather
+        # than merely compiling them.
         run: cargo test --all-features
 
   # The Python bindings, in their own job. The Rust job above runs against

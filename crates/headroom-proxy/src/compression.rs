@@ -62,6 +62,13 @@ pub struct Compressors {
     memories: headroom_core::memory::MemoryStore,
     /// How many memories one injection may carry.
     memory_limit: usize,
+    /// A linked `rusty_remind_me` backend, resolved once at startup, if configured.
+    ///
+    /// Takes precedence over `memories` when present — see [`Self::memory_candidates`].
+    /// `None` covers both "not built with the `linked-memory` feature" and "the feature
+    /// is on but `HEADROOM_LINKED_MEMORY_DB` is unset", the same "unconfigured is off"
+    /// shape every other optional backend in this crate uses.
+    linked_memory: Option<Arc<crate::linked_memory::LinkedMemory>>,
     /// Where routing outcomes are counted, when the caller wants them.
     ///
     /// Optional so a test — or the CLI, or a library caller — can build a compressor set
@@ -84,6 +91,7 @@ impl Compressors {
             orchestrator: Orchestrator::new(store).with_limits(crate::config::safety_limits()),
             memories: Default::default(),
             memory_limit: crate::config::DEFAULT_MEMORY_LIMIT,
+            linked_memory: None,
             metrics: None,
             aggregator: None,
         }
@@ -100,6 +108,7 @@ impl Compressors {
                 .with_recommendations(recommendations),
             memories: Default::default(),
             memory_limit: crate::config::DEFAULT_MEMORY_LIMIT,
+            linked_memory: None,
             metrics: None,
             aggregator: None,
         }
@@ -134,6 +143,70 @@ impl Compressors {
         self.memories = memories;
         self.memory_limit = limit;
         self
+    }
+
+    /// Attaches a linked `rusty_remind_me` backend, resolved once at startup.
+    ///
+    /// Takes precedence over `with_memories` at injection time when `Some` — see
+    /// [`Self::memory_candidates`].
+    pub fn with_linked_memory(
+        mut self,
+        linked_memory: Option<Arc<crate::linked_memory::LinkedMemory>>,
+    ) -> Self {
+        self.linked_memory = linked_memory;
+        self
+    }
+
+    /// Renders the memory block for `query`, from whichever source is configured.
+    ///
+    /// The linked backend wins when present: it is a strict capability superset (BM25
+    /// over a real index, RRF-fused with an optional semantic tier) of the static
+    /// `HEADROOM_MEMORY` file, and running both would mean deciding how to merge two
+    /// independently ranked lists for no benefit — nobody configures both meaning "use
+    /// only one, some of the time."
+    ///
+    /// The two sources render differently on purpose: the static store's corroboration
+    /// marker reports something the static store can actually observe (the same fact
+    /// recorded by more than one agent), and a linked search result — one shot, one
+    /// source, by construction — has nothing truthful to put there.
+    fn inject_memory_block(&self, query: Option<&str>) -> Option<String> {
+        match &self.linked_memory {
+            Some(linked) => {
+                let query = query.map(str::trim).filter(|q| !q.is_empty())?;
+                headroom_core::memory::inject_block_ranked(&linked.search(query, self.memory_limit))
+            }
+            None => headroom_core::memory::inject_block_for_query(
+                &self.memories,
+                self.memory_limit,
+                query,
+            ),
+        }
+    }
+
+    /// Splices [`Self::inject_memory_block`]'s output into the live-zone tail.
+    fn inject_memory_append(
+        &self,
+        conversation: &Conversation,
+        frozen: usize,
+        query: Option<&str>,
+    ) -> Option<(usize, usize, String)> {
+        match &self.linked_memory {
+            Some(linked) => {
+                let query = query.map(str::trim).filter(|q| !q.is_empty())?;
+                headroom_core::memory::inject_append_ranked(
+                    conversation,
+                    &linked.search(query, self.memory_limit),
+                    frozen,
+                )
+            }
+            None => headroom_core::memory::inject_append(
+                conversation,
+                &self.memories,
+                self.memory_limit,
+                frozen,
+                query,
+            ),
+        }
     }
 
     /// The transform for `content` under `policy`, if any applies.
@@ -345,13 +418,9 @@ pub fn compress_dialect<'a>(
     // injecting facts the client never sent plainly can. So this runs only where lossy
     // rewriting is already permitted — invariant I10.
     if policy.lossy_transforms {
-        if let Some((message, block, injected)) = headroom_core::memory::inject_append(
-            &conversation,
-            &compressors.memories,
-            compressors.memory_limit,
-            frozen,
-            query.as_deref(),
-        ) {
+        if let Some((message, block, injected)) =
+            compressors.inject_memory_append(&conversation, frozen, query.as_deref())
+        {
             match edits
                 .iter_mut()
                 .find(|(m, b, _)| *m == message && *b == block)
@@ -360,11 +429,7 @@ pub fn compress_dialect<'a>(
                 // to the original, or the compression would be discarded.
                 Some((_, _, content)) => {
                     if !content.contains("<memory>") {
-                        if let Some(memories) = headroom_core::memory::inject_block_for_query(
-                            &compressors.memories,
-                            compressors.memory_limit,
-                            query.as_deref(),
-                        ) {
+                        if let Some(memories) = compressors.inject_memory_block(query.as_deref()) {
                             content.push_str(&memories);
                         }
                     }
@@ -1343,6 +1408,82 @@ mod tests {
             !newest.contains("Fridays"),
             "an unrelated memory spent the budget: {newest}"
         );
+    }
+
+    // ---- linked memory (gap #215): the call site must actually prefer it ----
+
+    #[cfg(feature = "linked-memory")]
+    #[test]
+    fn a_configured_linked_backend_is_used_instead_of_the_static_store() {
+        // Reachability, the same class `the_conversation_query_decides_which_memory_is_
+        // injected` guards for the static store: a `Compressors` with a linked backend
+        // attached must actually reach `LinkedMemory::search` at the compression call
+        // site, not silently keep serving from `self.memories`. A wiring bug here — the
+        // call site checking the wrong field, or not checking at all — would still pass
+        // every test that only exercises `LinkedMemory` in isolation.
+        use remind_me_core::db::queries;
+        use remind_me_core::{Database, MemoryAddInput};
+        use rusqlite::{Connection, OpenFlags};
+
+        let path = std::env::temp_dir().join(format!(
+            "headroom-compression-linked-memory-test-{}.sqlite3",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        {
+            let db = Database::open(&path).unwrap();
+            queries::add_memory(
+                &db.conn(),
+                MemoryAddInput {
+                    sensitive: false,
+                    content: "This function is reachable only through the linked backend."
+                        .to_string(),
+                    category: "general".into(),
+                    tags: vec![],
+                    source: "manual".into(),
+                    metadata: serde_json::json!({}),
+                    subject: None,
+                    predicate: None,
+                    object: None,
+                    entities: vec![],
+                },
+            )
+            .unwrap();
+        }
+        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let linked = crate::linked_memory::LinkedMemory::for_test(conn, None);
+
+        use headroom_core::memory::{MemoryStore, Provenance};
+        let mut static_store = MemoryStore::new();
+        static_store.remember(
+            "This function is only in the static store and must not appear.",
+            Provenance::new("reader", "s1"),
+        );
+
+        let source = prose_request(); // newest user text: "what does this function do?"
+        let out = compress_dialect(
+            Dialect::Anthropic,
+            source.as_bytes(),
+            &compressors()
+                .with_memories(static_store, 8)
+                .with_linked_memory(Some(Arc::new(linked))),
+            true,
+            payg(),
+            Verbosity::Default,
+        );
+        let parsed: Value = serde_json::from_slice(&out).unwrap();
+        let newest = parsed["messages"][2]["content"].as_str().unwrap();
+
+        assert!(
+            newest.contains("reachable only through the linked backend"),
+            "the linked backend was not consulted at the compression call site: {newest}"
+        );
+        assert!(
+            !newest.contains("only in the static store"),
+            "the static store was used even though a linked backend was configured: {newest}"
+        );
+
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
