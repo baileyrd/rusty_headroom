@@ -669,6 +669,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "headroom-parity"
+version = "0.1.0"
+dependencies = [
+ "headroom-core",
+]
+
+[[package]]
 name = "headroom-proxy"
 version = "0.1.0"
 dependencies = [
