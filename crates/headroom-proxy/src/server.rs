@@ -1,21 +1,24 @@
 //! Server construction and lifecycle.
 
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::{Body, Bytes};
-use axum::extract::State;
+use axum::extract::{ConnectInfo, FromRequestParts, State};
+use axum::http::request::Parts;
 use axum::http::{HeaderMap, Method};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
+use headroom_core::ccr::CcrStore;
 use headroom_core::tokenizer::{HeuristicEstimator, Tokenizer};
 
 use crate::compression::{compress_dialect, Compressors, Dialect};
 use crate::config::Config;
 use crate::guard::{is_self_referential, RateLimiter};
-use crate::headers::{sanitize, HeaderPolicy};
+use crate::headers::{apply_forwarded, sanitize, HeaderPolicy};
 use crate::health::health;
 use crate::metrics::Metrics;
 use crate::observe::ObservingStream;
@@ -38,6 +41,9 @@ pub struct AppState {
     /// The store that was built, not the one that was configured — see
     /// [`Config::ccr_store_with_kind`].
     ccr_store_kind: crate::config::CcrStoreKind,
+    /// The same store handed to [`Compressors`], kept here too so [`serve`] can spawn
+    /// the periodic purge task against it — see [`spawn_ccr_purge_task`].
+    ccr_store: Arc<dyn CcrStore>,
 }
 
 /// Requests permitted per [`RATE_WINDOW`].
@@ -71,6 +77,10 @@ impl AppState {
         // built as. Re-reading the configuration downstream would report the store the
         // operator asked for, which is precisely the case worth telling them about.
         let (ccr_store, ccr_store_kind) = Config::ccr_store_with_kind();
+        // Cloned before the move into `Compressors::with_recommendations` below, so
+        // `serve` has a handle to spawn the periodic purge task against — see
+        // `spawn_ccr_purge_task`.
+        let ccr_store_for_purge = Arc::clone(&ccr_store);
         if !ccr_store_kind.survives_restart() && Config::persistent_store_requested() {
             tracing::warn!(
                 "a persistent CCR store was configured and could not be used; markers \
@@ -100,12 +110,21 @@ impl AppState {
             upstream,
             limiter: Arc::new(RateLimiter::new(RATE_CAPACITY, RATE_WINDOW)),
             ccr_store_kind,
+            ccr_store: ccr_store_for_purge,
         }
     }
 
     /// Which CCR store this process actually built.
     pub fn ccr_store_kind(&self) -> crate::config::CcrStoreKind {
         self.ccr_store_kind
+    }
+
+    /// The CCR store backing this state's compressors.
+    ///
+    /// Exposed so [`serve`] can spawn the periodic purge task against the exact store
+    /// requests are writing to, rather than one built separately.
+    pub(crate) fn ccr_store(&self) -> &Arc<dyn CcrStore> {
+        &self.ccr_store
     }
 
     /// Builds state with a specific rate limit, for tests that need to reach it.
@@ -192,6 +211,38 @@ async fn metrics_endpoint(State(state): State<AppState>) -> impl IntoResponse {
     )
 }
 
+/// The client's peer address, when the connection carries one.
+///
+/// Reads `ConnectInfo<SocketAddr>` straight out of the request extensions instead of
+/// taking `ConnectInfo<SocketAddr>` itself as an extractor, for the same reason
+/// `admin::runtime_env` reads it by hand: `ConnectInfo` implements `FromRequestParts`
+/// but not `OptionalFromRequestParts`, so `Option<ConnectInfo<SocketAddr>>` does not
+/// compile as an extractor, and the bare `ConnectInfo<SocketAddr>` extractor rejects
+/// the whole request outright when the server was not run through
+/// `into_make_service_with_connect_info` — which is exactly how every
+/// `Router::oneshot` test in this module and in `openai` drives these handlers.
+/// `X-Forwarded-For` is a policy-gated courtesy, not a security control, so its
+/// absence must never fail the request; this extractor reads the extension and
+/// yields `None` instead of rejecting.
+#[derive(Clone, Copy)]
+pub struct PeerAddr(pub Option<SocketAddr>);
+
+impl<S> FromRequestParts<S> for PeerAddr
+where
+    S: Send + Sync,
+{
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self(
+            parts
+                .extensions
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|info| info.0),
+        ))
+    }
+}
+
 /// `POST /v1/messages` — compress the live zone, relay upstream, stream the answer back.
 ///
 /// # Why the response is streamed rather than returned whole
@@ -204,19 +255,21 @@ async fn messages(
     State(state): State<AppState>,
     uri: axum::http::Uri,
     headers: HeaderMap,
+    PeerAddr(peer): PeerAddr,
     body: Bytes,
 ) -> Result<Response, RelayError> {
     let config = Config::from_env();
 
     let auth_mode = classify_auth_mode(&headers);
     let policy = CompressionPolicy::for_mode(auth_mode);
-    let upstream_headers = sanitize(
-        &headers,
-        HeaderPolicy {
-            forwarded_headers: policy.forwarded_headers,
-            strip_accept_encoding: policy.may_strip_accept_encoding,
-        },
-    );
+    let header_policy = HeaderPolicy {
+        forwarded_headers: policy.forwarded_headers,
+        strip_accept_encoding: policy.may_strip_accept_encoding,
+    };
+    let mut upstream_headers = sanitize(&headers, header_policy);
+    if let Some(peer) = peer {
+        apply_forwarded(&mut upstream_headers, header_policy, &peer.ip().to_string());
+    }
     tracing::debug!(
         header_count = upstream_headers.len(),
         auth = ?crate::headers::redacted_authorization(&headers),
@@ -416,15 +469,78 @@ pub async fn serve(config: &Config) -> std::io::Result<()> {
         "headroom-proxy listening"
     );
 
+    // Built and spawned before the server starts accepting requests, so the purge
+    // task is present for the state's whole lifetime rather than raced in afterward.
+    let state = AppState::default();
+    spawn_ccr_purge_task(Arc::clone(state.ccr_store()));
+
     // `into_make_service_with_connect_info` rather than the plain service: the admin
     // endpoint's only protection is that it can tell a local caller from a remote one,
     // and without connect info it refuses every request including the legitimate ones.
     axum::serve(
         listener,
-        router().into_make_service_with_connect_info::<SocketAddr>(),
+        router_with(state).into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown_signal())
     .await
+}
+
+/// How often the background task sweeps the CCR store for expired entries.
+///
+/// [`CcrStore::get`] already treats an expired entry as absent, so nothing on the
+/// request path depends on this running promptly. What depends on it is process memory
+/// (or disk, for a file-backed store): every lossy compression writes a new TTL'd entry,
+/// and without a sweep the backing map/directory grows for the life of the process.
+/// Every compressor sets its `CCR_TTL` to 24 hours, so five minutes is well inside a
+/// tenth of the shortest TTL in use — frequent enough that the store never accumulates
+/// more than a few minutes' worth of expired entries, without costing anything
+/// measurable.
+const CCR_PURGE_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+/// Removes expired entries from `store` once, returning and logging how many were
+/// removed.
+///
+/// Split out from [`spawn_ccr_purge_task`]'s scheduling loop so a test can call this
+/// directly against a store it seeded with expired entries, without waiting on a real
+/// timer to prove the wiring works.
+fn purge_ccr_once(store: &dyn CcrStore) -> usize {
+    let purged = store.purge_expired();
+    if purged > 0 {
+        tracing::debug!(purged, "purged expired CCR entries");
+    } else {
+        tracing::trace!("CCR purge pass found nothing expired");
+    }
+    purged
+}
+
+/// Spawns the background task that keeps the CCR store from growing without bound.
+///
+/// # Why this exists
+///
+/// [`CcrStore::get`] filters expired entries out of read results but never removes them
+/// from the backing map or directory — [`CcrStore::purge_expired`] is the only thing
+/// that does, and nothing in this binary called it before this task existed. Under
+/// ordinary sustained traffic that meant an in-memory or file-backed store grew for the
+/// life of the process, since every lossy compression writes a new TTL'd entry. A
+/// Redis-backed store is unaffected — it expires keys natively — but is not the default
+/// backend.
+///
+/// Spawned rather than awaited: [`serve`] starts accepting requests immediately, and
+/// this task runs alongside them for as long as the process does. It never holds a lock
+/// across an `.await` point and never blocks shutdown — dropping the runtime simply
+/// stops it mid-sleep.
+fn spawn_ccr_purge_task(store: Arc<dyn CcrStore>) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(CCR_PURGE_INTERVAL);
+        // The first tick fires immediately; nothing has had time to expire yet, so
+        // consume it here rather than logging a pass that can only ever find zero
+        // entries.
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            purge_ccr_once(store.as_ref());
+        }
+    });
 }
 
 /// Resolves when the process is asked to stop.
@@ -554,6 +670,64 @@ mod tests {
         .unwrap()
     }
 
+    /// Starts a fake provider on loopback that captures the request headers it
+    /// received, rather than the body.
+    ///
+    /// Companion to `fake_provider`: proving `X-Forwarded-For` reaches the wire needs
+    /// to look at what actually left the process, not just what `sanitize`/
+    /// `apply_forwarded` produced in memory.
+    async fn fake_provider_capturing_headers(
+        status: StatusCode,
+        reply: &'static str,
+    ) -> (String, Arc<Mutex<Option<HeaderMap>>>) {
+        let captured: Arc<Mutex<Option<HeaderMap>>> = Arc::new(Mutex::new(None));
+        let seen = captured.clone();
+
+        let app = Router::new().route(
+            "/v1/messages",
+            post(move |headers: HeaderMap, _body: Bytes| {
+                let seen = seen.clone();
+                async move {
+                    if let Ok(mut slot) = seen.lock() {
+                        *slot = Some(headers);
+                    }
+                    (status, [("content-type", content_type_of(reply))], reply)
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        (format!("http://{addr}"), captured)
+    }
+
+    /// Like `post_messages`, but attaches `ConnectInfo` to the request extensions the
+    /// same way `into_make_service_with_connect_info` does in production — the only
+    /// way a `oneshot`-driven test can supply one. See `PeerAddr`.
+    async fn post_messages_from(
+        app: Router,
+        body: String,
+        api_key: &str,
+        peer: SocketAddr,
+    ) -> Response {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/v1/messages")
+            .header("x-api-key", api_key)
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        request.extensions_mut().insert(ConnectInfo(peer));
+
+        app.oneshot(request).await.unwrap()
+    }
+
     // ---- the relay, end to end ----
 
     #[tokio::test]
@@ -628,6 +802,44 @@ mod tests {
             sent,
             source.as_bytes(),
             "subscription traffic was modified before forwarding"
+        );
+    }
+
+    #[tokio::test]
+    async fn payg_traffic_carries_x_forwarded_for_and_subscription_traffic_does_not() {
+        // Regression: `apply_forwarded` was fully implemented and unit-tested in
+        // `headers.rs`, but nothing on the request path ever called it, so
+        // `CompressionPolicy::forwarded_headers` had no observable effect — the policy
+        // permitted `X-Forwarded-For` for PayAsYouGo and OAuth traffic and nothing
+        // ever added it. A PayAsYouGo request must now carry the caller's address
+        // upstream, and a Subscription request — where `forwarded_headers` is
+        // `false` — must not.
+        let peer: SocketAddr = "203.0.113.5:54321".parse().unwrap();
+        let (base, captured) = fake_provider_capturing_headers(StatusCode::OK, "{}").await;
+        let state = AppState::new(&base);
+        let body = r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#.to_owned();
+
+        let response = post_messages_from(
+            router_with(state.clone()),
+            body.clone(),
+            "sk-ant-api03-x",
+            peer,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let headers = captured.lock().unwrap().clone().expect("nothing forwarded");
+        assert_eq!(
+            headers.get("x-forwarded-for").unwrap(),
+            "203.0.113.5",
+            "a PayAsYouGo request did not carry the caller's address upstream"
+        );
+
+        let response = post_messages_from(router_with(state), body, "", peer).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let headers = captured.lock().unwrap().clone().expect("nothing forwarded");
+        assert!(
+            headers.get("x-forwarded-for").is_none(),
+            "a Subscription request carried the caller's address upstream"
         );
     }
 
@@ -905,6 +1117,62 @@ mod tests {
         .unwrap()
     }
 
+    /// Starts a fake provider that answers any path, capturing the headers it received.
+    ///
+    /// Companion to `fake_any_path`, which only inspects body and path — proving
+    /// `X-Forwarded-For` reaches the wire requires looking at what actually left the
+    /// process, not just what `sanitize`/`apply_forwarded` produced in memory.
+    async fn fake_any_path_capturing_headers() -> (String, Arc<Mutex<Option<HeaderMap>>>) {
+        let captured: Arc<Mutex<Option<HeaderMap>>> = Arc::new(Mutex::new(None));
+        let seen = captured.clone();
+
+        let app = Router::new().fallback(move |headers: HeaderMap, _body: Bytes| {
+            let seen = seen.clone();
+            async move {
+                if let Ok(mut slot) = seen.lock() {
+                    *slot = Some(headers);
+                }
+                "{}"
+            }
+        });
+
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        (format!("http://{addr}"), captured)
+    }
+
+    /// Like `post_to`, but with control over the caller's credential and peer address.
+    ///
+    /// `post_to` always sends the same PayAsYouGo API key, which is right for every
+    /// test that only cares about compression. Proving `X-Forwarded-For` needs both a
+    /// Subscription-mode call (no recognized credential) and a known peer, attached to
+    /// the request extensions the same way `into_make_service_with_connect_info` does
+    /// in production — see `PeerAddr`.
+    async fn post_to_from(
+        app: Router,
+        path: &str,
+        body: String,
+        api_key: &str,
+        peer: SocketAddr,
+    ) -> Response {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("x-api-key", api_key)
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        request.extensions_mut().insert(ConnectInfo(peer));
+
+        app.oneshot(request).await.unwrap()
+    }
+
     /// An OpenAI chat request whose newest message is a bulky tool result.
     fn openai_chat_request() -> String {
         let records: Vec<String> = (0..120)
@@ -1001,6 +1269,52 @@ mod tests {
                 "{path} did not report its cache writes:\n{text}"
             );
             assert_eq!(state.metrics().cache_hit_rate(), Some(0.9), "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn openai_routes_forward_the_caller_only_under_the_permissive_policy() {
+        // Regression: `apply_forwarded` was fully implemented and unit-tested in
+        // `headers.rs`, but nothing on the request path ever called it, so
+        // `CompressionPolicy::forwarded_headers` had no observable effect. A
+        // PayAsYouGo request through either OpenAI surface must now carry
+        // `X-Forwarded-For` with the caller's address, and a Subscription request
+        // — where `forwarded_headers` is `false` — must not.
+        let peer: SocketAddr = "203.0.113.9:54321".parse().unwrap();
+
+        for (path, body) in [
+            (
+                "/v1/chat/completions",
+                r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#,
+            ),
+            ("/v1/responses", r#"{"model":"gpt-4o","input":"hi"}"#),
+        ] {
+            let (base, captured) = fake_any_path_capturing_headers().await;
+            let state = AppState::new(&base);
+
+            let response = post_to_from(
+                router_with(state.clone()),
+                path,
+                body.to_owned(),
+                "sk-ant-api03-x",
+                peer,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let headers = captured.lock().unwrap().clone().expect("nothing forwarded");
+            assert_eq!(
+                headers.get("x-forwarded-for").unwrap(),
+                "203.0.113.9",
+                "{path} did not carry the caller's address under PayAsYouGo"
+            );
+
+            let response = post_to_from(router_with(state), path, body.to_owned(), "", peer).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let headers = captured.lock().unwrap().clone().expect("nothing forwarded");
+            assert!(
+                headers.get("x-forwarded-for").is_none(),
+                "{path} carried the caller's address under Subscription mode"
+            );
         }
     }
 
@@ -1435,5 +1749,43 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn purge_ccr_once_removes_expired_entries_from_the_store() {
+        // Regression: `get` already treats an expired entry as absent, but nothing in
+        // this file ever called `purge_expired` on the store it built, so an in-memory
+        // or file-backed store's expired entries lived for the process's whole life.
+        // This exercises `purge_ccr_once` directly — the piece `spawn_ccr_purge_task`
+        // schedules on a `tokio::time::interval` — so the fix is proven without
+        // sleeping for a real timer tick.
+        use headroom_core::ccr::{ContentHash, InMemoryCcrStore};
+
+        let store = InMemoryCcrStore::new();
+        store
+            .put(ContentHash::of(b"stale"), b"stale", Duration::ZERO)
+            .unwrap();
+        store
+            .put(
+                ContentHash::of(b"fresh"),
+                b"fresh",
+                Duration::from_secs(300),
+            )
+            .unwrap();
+        assert_eq!(
+            store.len(),
+            1,
+            "len() already excludes the expired entry, before any purge runs"
+        );
+
+        let purged = purge_ccr_once(&store);
+
+        assert_eq!(purged, 1, "exactly the expired entry was removed");
+        assert_eq!(store.len(), 1, "the live entry is still retrievable");
+        assert_eq!(
+            purge_ccr_once(&store),
+            0,
+            "a second pass has nothing left to collect"
+        );
     }
 }

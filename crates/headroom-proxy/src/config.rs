@@ -44,6 +44,35 @@ pub mod vars {
     pub const REDIS_URL: &str = "HEADROOM_REDIS_URL";
 }
 
+/// Every `HEADROOM_*` name that some code in this crate actually reads.
+///
+/// # Why this list has to exist
+///
+/// [`set_overrides`] used to accept and store any name with the `HEADROOM_` prefix,
+/// checked against nothing. A typo — `HEADROOM_COMPRESION`, missing an `s` — or a
+/// documented variable this crate has never wired to `Config` (`HEADROOM_LOG`, read
+/// once by `main` through `tracing_subscriber::EnvFilter`, never by this module) was
+/// stored in the override map, echoed back by the admin endpoint in its `applied` list
+/// with an empty `needs_restart`, and never read again. An operator retuning a proxy
+/// during an incident would believe the change had taken and move on.
+///
+/// Kept beside [`vars`] so a new setting is wired to both in the same edit, rather than
+/// readable from `Config` but unreachable through the admin endpoint, or reachable
+/// through the admin endpoint but read by nothing.
+pub const KNOWN: [&str; 11] = [
+    vars::HOST,
+    vars::PORT,
+    vars::UPSTREAM,
+    vars::COMPRESSION,
+    vars::OUTPUT_SHAPER,
+    vars::RECOMMENDATIONS,
+    vars::MEMORY,
+    vars::MEMORY_LIMIT,
+    vars::STABILIZE,
+    vars::CCR_DIR,
+    vars::REDIS_URL,
+];
+
 /// Settings that are read once at startup and ignored thereafter.
 ///
 /// # Why this list has to exist
@@ -157,10 +186,14 @@ fn setting(name: &str) -> Option<String> {
 
 /// Applies runtime overrides, merging them over any already in force.
 ///
-/// Returns the names that were accepted. Names outside the `HEADROOM_` namespace are
-/// rejected: this endpoint exists to retune the proxy, and letting it set arbitrary
-/// environment names would make it a general-purpose lever on the process for anyone
-/// who can reach it.
+/// Returns the names that were accepted. Only names in [`KNOWN`] are accepted — that
+/// rejects everything outside the `HEADROOM_` namespace, since every entry in `KNOWN`
+/// carries the prefix, but it also rejects an unrecognized `HEADROOM_*` name, such as a
+/// typo (`HEADROOM_COMPRESION`) or a variable no code in this crate reads
+/// (`HEADROOM_LOG`, startup-only and owned by `main`, never by this module). Accepting
+/// either would let the caller believe an unread name is live, and letting an
+/// out-of-namespace name through at all would make this endpoint a general-purpose
+/// lever on the process for anyone who can reach it.
 ///
 /// # Why merge, when this used to replace
 ///
@@ -185,12 +218,27 @@ fn setting(name: &str) -> Option<String> {
 pub fn set_overrides(values: BTreeMap<String, String>) -> Vec<String> {
     let accepted: BTreeMap<String, String> = values
         .into_iter()
-        .filter(|(name, _)| name.starts_with("HEADROOM_"))
+        .filter(|(name, _)| KNOWN.contains(&name.as_str()))
         .collect();
     let names = accepted.keys().cloned().collect();
 
     if let Ok(mut guard) = OVERRIDES.write() {
-        guard.get_or_insert_with(BTreeMap::new).extend(accepted);
+        let map = guard.get_or_insert_with(BTreeMap::new);
+        for (name, value) in accepted {
+            // An empty value is "take this override back", not "override it with the
+            // empty string". `setting()` only falls through to `env::var()` when the
+            // key is *absent* from this map, so leaving an empty-string entry in place
+            // permanently shadowed the process environment with whatever every
+            // consumer's own empty-input default happens to be — turning
+            // `HEADROOM_COMPRESSION=0` (an env-configured safety policy) back on the
+            // moment an operator tried to "take back" an unrelated override, since
+            // `compression_enabled` reads `Some("")` as `true`.
+            if value.is_empty() {
+                map.remove(&name);
+            } else {
+                map.insert(name, value);
+            }
+        }
     }
     names
 }
@@ -209,7 +257,14 @@ pub fn set_overrides(values: BTreeMap<String, String>) -> Vec<String> {
 pub fn preview_overrides(values: &BTreeMap<String, String>) -> Config {
     let mut merged = overrides();
     for (name, value) in values {
-        if name.starts_with("HEADROOM_") {
+        if !name.starts_with("HEADROOM_") {
+            continue;
+        }
+        // Same "empty means take it back" rule as `set_overrides`, so a preview built
+        // from a clearing call matches what applying it would actually produce.
+        if value.is_empty() {
+            merged.remove(name);
+        } else {
             merged.insert(name.clone(), value.clone());
         }
     }
