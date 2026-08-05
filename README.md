@@ -55,7 +55,7 @@ not cached. Everything before it is forwarded as the exact bytes that arrived.
 | JSON | `SmartCrusher` — record arrays summarized, outliers kept verbatim |
 | logs | `LogCompressor` — repeated lines templated |
 | search results | `SearchCompressor` |
-| diffs | `DiffCompressor` |
+| diffs | `DiffCompressor` — unchanged context elided, plus lockfile churn and whitespace-only hunks |
 | source code | `CodeCompressor` — heuristic skeletonization |
 | prose | `TextSummarizer` — **tool output only**, never what a person typed |
 
