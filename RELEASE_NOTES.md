@@ -6,6 +6,38 @@ the crate starts publishing releases.
 
 ---
 
+## `/health` could not tell "the proxy is down" from "the provider is down"
+**2026-08-05** · closes #186 · one endpoint answering two questions with different remedies
+
+- `/health` was the only signal, and it folds liveness together with whether the relay
+  was built. Orchestrators route and restart on that. A proxy running perfectly during a
+  *provider* outage looks unhealthy, gets restarted, drops every in-flight stream, and
+  repairs nothing — restarting this process cannot fix someone else's network. The
+  inverse was also true: nothing reported an unreachable upstream at all, so the failure
+  that breaks every client was invisible.
+- Split into `GET /healthz` (liveness — no I/O, no upstream contact, the one thing a
+  restart can act on) and `GET /healthz/upstream` (reachability, 503 when the provider
+  cannot be reached — a signal to route away or alert, never to restart). `/health` is
+  untouched, so anything already deployed against it keeps working; a test asserts that.
+- Two things the probe deliberately is not. It measures **reachability, not
+  authorization**: a provider answering 401 to an unauthenticated probe is up, DNS, TLS
+  and the network path all worked, and reading that as "down" would report a permanent
+  outage. And it sends **no credentials** — this endpoint is unauthenticated, and
+  borrowing some other request's `Authorization` to make the probe look real would put a
+  customer credential on a request they never made.
+- The result is cached for 5 seconds. `/healthz/upstream` is scraped, often by several
+  probers, and probing per call would turn a health check into an outbound flood against
+  a provider that — when this endpoint matters most — is already struggling. A test
+  asserts 5 scrapes produce 1 outbound probe.
+- `GET /admin/upstream` reports the configured and active upstream side by side with a
+  `needs_restart` flag, loopback-gated like `/admin/runtime-env`. `HEADROOM_UPSTREAM` is
+  startup-only: an override lands in the map, nothing rebuilds the relay client, and
+  configuration and reality diverge while the runtime-env call reports success.
+- Caught in development: the handler first read `AppState` out of the request extensions,
+  where axum never puts it, so every local call would have hit the "state unavailable"
+  branch. Only the 403 test existed, and it passed — it refused before reaching the state.
+  The handler now takes `State` as an extractor and a test exercises the allowed path.
+
 ## The prose summarizer dropped the line the user was asking about
 **2026-08-05** · closes #178 · the same defect as #177, one compressor over
 

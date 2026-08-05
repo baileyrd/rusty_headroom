@@ -164,6 +164,19 @@ said zero*, and the metric cannot tell them apart:
 Neither is something a proxy can fix from where it sits, and substituting a guess for
 either would corrupt the one number the whole thing exists to move.
 
+Liveness and upstream reachability are separate questions with separate endpoints, and
+conflating them is an operational trap: a proxy that is up but cannot reach the provider
+is broken for every client, yet restarting it repairs nothing. `GET /healthz` is
+liveness — no I/O, no upstream contact, the one thing a restart can act on.
+`GET /healthz/upstream` answers whether the provider is reachable and returns 503 when it
+is not; that is a signal to route away or alert, never to restart. It reports
+reachability rather than authorization (a provider answering 401 to an unauthenticated
+probe is *up*), sends no credentials, and caches briefly so a scrape interval cannot turn
+a health check into outbound load. `GET /admin/upstream` reports the configured and the
+active upstream side by side with a `needs_restart` flag, because `HEADROOM_UPSTREAM` is
+startup-only and the two diverge silently after a runtime override; it is loopback-gated
+like `/admin/runtime-env`.
+
 `GET /health` reports `ccr_store` (`memory`, `file` or `redis`) and
 `ccr_store_persistent`. Two fields rather than one because `memory` means two different
 things: the default nobody changed, and a configured store that could not be opened. The

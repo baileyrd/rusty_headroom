@@ -195,6 +195,52 @@ pub async fn runtime_env(request: Request) -> Response {
 }
 
 /// Builds the refusal, in the shape the rest of the proxy uses for errors.
+/// `GET /admin/upstream` — where this proxy is actually forwarding.
+///
+/// Loopback-gated like [`runtime_env`], and for a weaker but real version of the same
+/// reason: the upstream URL is not a credential, but it names internal infrastructure
+/// when a customer points this at a gateway of their own, and an unauthenticated
+/// endpoint that maps someone's network is a courtesy to the wrong party.
+///
+/// Reports **both** values, deliberately. `POST /admin/runtime-env` accepts a new
+/// `HEADROOM_UPSTREAM` into the override map and nothing rebuilds the relay client, so
+/// configuration and reality diverge silently — the exact failure `Health::upstream` was
+/// changed to report. An operator retuning a proxy mid-incident needs to see the
+/// divergence, not one side of it.
+pub async fn upstream(
+    axum::extract::State(state): axum::extract::State<crate::server::AppState>,
+    request: Request,
+) -> Response {
+    let peer = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| info.0);
+
+    let Some(peer) = peer else {
+        return refuse("connection information unavailable; refusing to report upstream");
+    };
+
+    if !peer.ip().is_loopback() {
+        tracing::warn!(peer = %peer.ip(), "refused a non-local upstream request");
+        return refuse("upstream may only be read from the local host");
+    }
+
+    let configured = config::Config::from_env().upstream().to_owned();
+    let active = state.upstream_base().map(str::to_owned);
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "configured": configured,
+            "active": active,
+            // Named rather than left for the caller to compute, because the whole point
+            // of this endpoint is that the two can differ and nothing else says so.
+            "needs_restart": active.as_deref() != Some(configured.as_str()),
+        })),
+    )
+        .into_response()
+}
+
 fn refuse(message: &str) -> Response {
     (
         StatusCode::FORBIDDEN,
@@ -309,6 +355,79 @@ mod tests {
         }
 
         app().oneshot(request).await.unwrap()
+    }
+
+    /// Calls `GET /admin/upstream` from `peer`, against a proxy relaying to `upstream`.
+    async fn call_upstream(peer: Option<&str>, upstream: &str) -> Response {
+        let app = Router::new()
+            .route("/admin/upstream", axum::routing::get(super::upstream))
+            .with_state(crate::server::AppState::new(upstream));
+
+        let mut request = Request::builder()
+            .uri("/admin/upstream")
+            .body(Body::empty())
+            .unwrap();
+
+        if let Some(peer) = peer {
+            let addr: SocketAddr = peer.parse().unwrap();
+            request.extensions_mut().insert(ConnectInfo(addr));
+        }
+
+        app.oneshot(request).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn upstream_is_readable_from_the_local_host() {
+        // The path the refusal test cannot reach. It exists because the first version
+        // of this handler read `AppState` out of the request extensions, where axum
+        // never puts it — every local call would have hit the "state unavailable"
+        // branch, and only the 403 test was passing.
+        let _guard = SERIAL.lock().await;
+        let response = call_upstream(Some("127.0.0.1:5555"), "http://relay.example").await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = body_of(response).await;
+        assert_eq!(body["active"], "http://relay.example");
+    }
+
+    #[tokio::test]
+    async fn upstream_reports_a_configured_value_the_relay_never_picked_up() {
+        // The divergence this endpoint exists for. `HEADROOM_UPSTREAM` is startup-only:
+        // an override lands in the map and nothing rebuilds the relay client, so
+        // configuration and reality disagree while `/admin/runtime-env` reports success.
+        let _guard = SERIAL.lock().await;
+        config::clear_overrides();
+        config::set_overrides(BTreeMap::from([(
+            "HEADROOM_UPSTREAM".to_owned(),
+            "http://newly-configured.example".to_owned(),
+        )]));
+
+        let response = call_upstream(Some("127.0.0.1:5555"), "http://relay.example").await;
+        let body = body_of(response).await;
+
+        config::clear_overrides();
+
+        assert_eq!(body["active"], "http://relay.example");
+        assert_eq!(body["configured"], "http://newly-configured.example");
+        assert_eq!(
+            body["needs_restart"], true,
+            "the endpoint reported agreement between two values that differ"
+        );
+    }
+
+    #[tokio::test]
+    async fn upstream_refuses_a_non_local_caller() {
+        let _guard = SERIAL.lock().await;
+        let response = call_upstream(Some("203.0.113.9:5555"), "http://relay.example").await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn upstream_refuses_a_caller_it_cannot_place() {
+        let _guard = SERIAL.lock().await;
+        let response = call_upstream(None, "http://relay.example").await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     async fn body_of(response: Response) -> Value {

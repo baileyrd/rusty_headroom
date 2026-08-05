@@ -134,6 +134,65 @@ pub async fn health(State(state): State<AppState>) -> (StatusCode, Json<Health>)
     (report.status_code(), Json(report))
 }
 
+/// `GET /healthz` — liveness only.
+///
+/// # Why this is separate from `/health`
+///
+/// Liveness and upstream reachability are different questions with different remedies,
+/// and answering them through one endpoint forces a choice that is wrong either way.
+///
+/// If liveness folded in the upstream, a proxy that is running perfectly would report
+/// unhealthy during *the provider's* outage — and an orchestrator reading that restarts
+/// it, dropping in-flight requests to fix nothing. Restarting this process cannot repair
+/// someone else's network.
+///
+/// So this answers the one thing a restart can act on: is the process up and serving. No
+/// I/O, no upstream contact, no configuration read. [`upstream_health`] is where the
+/// other question lives.
+pub async fn healthz() -> StatusCode {
+    StatusCode::OK
+}
+
+/// What `/healthz/upstream` reports.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct UpstreamHealth {
+    /// `"ok"` when the upstream answered, `"unreachable"` when it did not.
+    pub status: &'static str,
+    /// Where the probe was sent — the relay's base, never the configured value.
+    pub upstream: String,
+    /// Whether the probe completed.
+    ///
+    /// Reachability, not authorization. A `401` from an unauthenticated probe means the
+    /// provider is up and this is `true` — see [`crate::upstream::Upstream::is_reachable`].
+    pub reachable: bool,
+}
+
+/// `GET /healthz/upstream` — can this proxy reach the provider?
+///
+/// Answers `503` when it cannot, so an orchestrator reading only the status code still
+/// learns something. That is a signal to *route away from* or alert on, not to restart:
+/// see [`healthz`] for why the two are split.
+///
+/// The result is cached briefly, so a scrape interval cannot turn a health check into an
+/// outbound request flood against a provider that may already be struggling.
+pub async fn upstream_health(State(state): State<AppState>) -> (StatusCode, Json<UpstreamHealth>) {
+    let reachable = state.upstream_reachable().await;
+
+    let report = UpstreamHealth {
+        status: if reachable { "ok" } else { "unreachable" },
+        upstream: state.upstream_base().unwrap_or("none").to_owned(),
+        reachable,
+    };
+
+    let code = if reachable {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    (code, Json(report))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
