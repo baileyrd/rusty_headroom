@@ -6,6 +6,20 @@ the crate starts publishing releases.
 
 ---
 
+## Eliding brace-less definitions was O(n²) on a long run of them
+**2026-08-04** · a C++ forward-declaration file, specifically
+
+- `mark_kept` called `end_of_braced_block` once per definition line and advanced its
+  own index by exactly one line each time. A definition with no opening brace anywhere
+  in the rest of the file — `class Foo;`, a C++ forward declaration — makes that scan
+  run to end-of-file to discover there's nothing to elide, and a run of N such lines
+  cost O(n) work N times over.
+- `scan_braced_block` now also reports how far it looked. When no opening brace was
+  found, the caller skips its own index straight past the whole scanned range instead
+  of re-scanning the same tail from every line in turn — every line is now examined by
+  the brace scan at most once. A 15,000-line regression fixture (previously ~100M
+  line-visits, well over a second) now completes near-instantly.
+
 ## A WebSocket close frame's code and reason were dropped in both directions
 **2026-08-04** · a client library's reconnect decision, silently erased
 
