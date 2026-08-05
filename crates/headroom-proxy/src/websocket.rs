@@ -27,7 +27,7 @@
 //! which is normal for a duplex protocol. Each direction gets a task, and the first one
 //! to finish tears down the other.
 
-use axum::extract::ws::{Message as AxumMessage, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{CloseFrame, Message as AxumMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
@@ -113,24 +113,45 @@ async fn pump(client: WebSocket, upstream: &str) -> Result<(), String> {
 /// Frame *kinds* are preserved exactly. A relay that turned every frame into text would
 /// corrupt binary payloads, and one that dropped pings would let an idle socket be
 /// reaped by an intermediary that was waiting for them.
+///
+/// A close frame's code and reason are preserved too, not just the fact that it was a
+/// close. A client library may branch on the code (1000 normal, 1008 policy violation,
+/// 1011 server error, ...) to decide whether reconnecting is worthwhile; collapsing
+/// every close to `Close(None)` would erase that signal even though the two crates'
+/// `CloseFrame` types carry the same code and reason. A source `Close(None)` — the
+/// spec-legal abrupt, code-less close — still maps to `Close(None)`, not a fabricated
+/// code.
 fn to_upstream_frame(frame: AxumMessage) -> UpstreamMessage {
     match frame {
         AxumMessage::Text(text) => UpstreamMessage::Text(text.as_str().into()),
         AxumMessage::Binary(bytes) => UpstreamMessage::Binary(bytes),
         AxumMessage::Ping(bytes) => UpstreamMessage::Ping(bytes),
         AxumMessage::Pong(bytes) => UpstreamMessage::Pong(bytes),
-        AxumMessage::Close(_) => UpstreamMessage::Close(None),
+        AxumMessage::Close(Some(frame)) => {
+            UpstreamMessage::Close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                code: frame.code.into(),
+                reason: frame.reason.as_str().into(),
+            }))
+        }
+        AxumMessage::Close(None) => UpstreamMessage::Close(None),
     }
 }
 
 /// Translates an upstream frame for the client socket.
+///
+/// See [`to_upstream_frame`] for why the close code and reason are preserved rather
+/// than collapsed.
 fn to_client_frame(frame: UpstreamMessage) -> AxumMessage {
     match frame {
         UpstreamMessage::Text(text) => AxumMessage::Text(text.as_str().into()),
         UpstreamMessage::Binary(bytes) => AxumMessage::Binary(bytes),
         UpstreamMessage::Ping(bytes) => AxumMessage::Ping(bytes),
         UpstreamMessage::Pong(bytes) => AxumMessage::Pong(bytes),
-        UpstreamMessage::Close(_) => AxumMessage::Close(None),
+        UpstreamMessage::Close(Some(frame)) => AxumMessage::Close(Some(CloseFrame {
+            code: frame.code.into(),
+            reason: frame.reason.as_str().into(),
+        })),
+        UpstreamMessage::Close(None) => AxumMessage::Close(None),
         // A raw frame is an internal tungstenite representation that never surfaces
         // from a read. Mapped rather than ignored so this match stays exhaustive if the
         // library adds a variant.
@@ -269,6 +290,54 @@ mod tests {
         assert!(matches!(
             to_client_frame(UpstreamMessage::Binary(vec![1].into())),
             AxumMessage::Binary(_)
+        ));
+    }
+
+    #[test]
+    fn a_close_frame_preserves_code_and_reason_in_both_directions() {
+        // Both `to_upstream_frame` and `to_client_frame` used to collapse every close
+        // frame to `Close(None)`, discarding the code and reason. A client library may
+        // branch on the code (e.g. 1008 policy violation) to decide whether
+        // reconnecting is worthwhile, so losing it silently breaks that decision.
+        let upstream_close = to_upstream_frame(AxumMessage::Close(Some(CloseFrame {
+            code: 1008,
+            reason: "policy violation".into(),
+        })));
+        match upstream_close {
+            UpstreamMessage::Close(Some(frame)) => {
+                assert_eq!(u16::from(frame.code), 1008);
+                assert_eq!(frame.reason.as_str(), "policy violation");
+            }
+            other => panic!("close frame arrived as {other:?}"),
+        }
+
+        let client_close = to_client_frame(UpstreamMessage::Close(Some(
+            tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                code: 1008u16.into(),
+                reason: "policy violation".into(),
+            },
+        )));
+        match client_close {
+            AxumMessage::Close(Some(frame)) => {
+                assert_eq!(frame.code, 1008);
+                assert_eq!(frame.reason.as_str(), "policy violation");
+            }
+            other => panic!("close frame arrived as {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_codeless_close_stays_codeless_in_both_directions() {
+        // `Close(None)` is a spec-legal abrupt close with no code at all. It must not
+        // gain a fabricated code on the way through — only a genuinely present
+        // `CloseFrame` should produce `Close(Some(_))` on the other side.
+        assert!(matches!(
+            to_upstream_frame(AxumMessage::Close(None)),
+            UpstreamMessage::Close(None)
+        ));
+        assert!(matches!(
+            to_client_frame(UpstreamMessage::Close(None)),
+            AxumMessage::Close(None)
         ));
     }
 
