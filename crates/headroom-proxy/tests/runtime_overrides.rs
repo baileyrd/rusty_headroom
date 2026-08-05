@@ -106,4 +106,41 @@ fn an_empty_value_returns_any_setting_to_its_default() {
         );
         config::clear_overrides();
     }
+    // The loop above never sets the real process environment, so `default` and the
+    // post-clear value can agree even when clearing merely fell back to a hardcoded
+    // default rather than genuinely restoring what the environment says. That was
+    // exactly the bug: `set_overrides` stored the empty string as a real override
+    // instead of removing the key, so `HEADROOM_COMPRESSION` read `Some("")` forever
+    // after the first clear — which happens to parse as `true`, `compression_enabled`'s
+    // own no-config default, so nothing above could tell the difference.
+    //
+    // With `HEADROOM_COMPRESSION=0` actually set in the environment, clearing an
+    // override on it must land back on `false`, not on `true`.
+    std::env::set_var(config::vars::COMPRESSION, "0");
+    config::clear_overrides();
+    assert!(
+        !Config::from_env().compression_enabled(),
+        "HEADROOM_COMPRESSION=0 in the environment was not honored with no override in force"
+    );
+
+    let mut set = BTreeMap::new();
+    set.insert(config::vars::COMPRESSION.to_owned(), "1".to_owned());
+    config::set_overrides(set);
+    assert!(
+        Config::from_env().compression_enabled(),
+        "the override did not take"
+    );
+
+    let mut cleared = BTreeMap::new();
+    cleared.insert(config::vars::COMPRESSION.to_owned(), String::new());
+    config::set_overrides(cleared);
+    assert!(
+        !Config::from_env().compression_enabled(),
+        "clearing the override with an empty value did not restore \
+         HEADROOM_COMPRESSION=0 from the environment"
+    );
+
+    std::env::remove_var(config::vars::COMPRESSION);
+    config::clear_overrides();
+
 }
