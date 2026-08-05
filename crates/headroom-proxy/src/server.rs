@@ -42,6 +42,11 @@ pub struct AppState {
     ///
     /// See [`AppState::upstream_reachable`].
     upstream_health: Arc<std::sync::Mutex<Option<(std::time::Instant, bool)>>>,
+    /// Per-shape observations, accumulated on the request path.
+    ///
+    /// Invariant I9: written after each compression decision and read only by the TOIN
+    /// endpoints. Nothing on the request path consults it.
+    aggregator: Arc<std::sync::Mutex<headroom_core::telemetry::Aggregator>>,
     /// The store that was built, not the one that was configured — see
     /// [`Config::ccr_store_with_kind`].
     ccr_store_kind: crate::config::CcrStoreKind,
@@ -81,6 +86,9 @@ impl AppState {
         // and request counters have to land in the same place the `/metrics` handler
         // reads from, or half the numbers would be invisible.
         let metrics = Arc::new(Metrics::new());
+        let aggregator = Arc::new(std::sync::Mutex::new(
+            headroom_core::telemetry::Aggregator::new(),
+        ));
 
         // Destructured here so the kind reaching `/health` is the one this store was
         // built as. Re-reading the configuration downstream would report the store the
@@ -113,12 +121,16 @@ impl AppState {
                 .with_memories(Config::memories(), Config::memory_limit())
                 // Routing reasons are counted here and nowhere else: the CLI and the
                 // library callers have no metrics endpoint to read them from.
-                .with_metrics(metrics.clone()),
+                .with_metrics(metrics.clone())
+                // Observation only (I9). The compressors write here; nothing reads it
+                // back to decide anything.
+                .with_aggregator(Arc::clone(&aggregator)),
             ),
             metrics,
             upstream,
             limiter: Arc::new(RateLimiter::new(RATE_CAPACITY, RATE_WINDOW)),
             upstream_health: Arc::new(std::sync::Mutex::new(None)),
+            aggregator,
             ccr_store_kind,
             ccr_store: ccr_store_for_purge,
         }
@@ -163,6 +175,11 @@ impl AppState {
     /// a change that had not happened.
     pub fn upstream_base(&self) -> Option<&str> {
         self.upstream.as_ref().map(|upstream| upstream.base())
+    }
+
+    /// The TOIN aggregate this process is accumulating into.
+    pub fn aggregator(&self) -> &Arc<std::sync::Mutex<headroom_core::telemetry::Aggregator>> {
+        &self.aggregator
     }
 
     /// Whether the upstream is reachable, answered from a short-lived cache.
@@ -260,6 +277,13 @@ pub fn router_with(state: AppState) -> Router {
         .route("/v1/retrieve", post(crate::ccr_api::retrieve_batch))
         .route("/v1/retrieve/stats", get(crate::ccr_api::retrieve_stats))
         .route("/v1/retrieve/{hash}", get(crate::ccr_api::retrieve_one))
+        // TOIN aggregates, read and exchanged. Observation only — see `crate::toin`.
+        .route("/v1/toin/stats", get(crate::toin::stats))
+        .route("/v1/toin/patterns", get(crate::toin::patterns))
+        .route("/v1/toin/pattern/{prefix}", get(crate::toin::pattern))
+        .route("/v1/telemetry/tools", get(crate::toin::tools))
+        .route("/v1/telemetry/export", get(crate::toin::export))
+        .route("/v1/telemetry/import", post(crate::toin::import))
         // Codex uses a WebSocket transport, and a proxy that only speaks HTTP silently
         // drops that client to whatever fallback it has, or breaks it.
         .route("/v1/realtime", get(crate::websocket::relay_socket))
@@ -1704,7 +1728,13 @@ mod tests {
     /// reads the `.route(` calls out of this file and fails if one is missing here. A
     /// hand-maintained copy of a list is exactly what this project keeps getting wrong,
     /// and axum's `Router` cannot be enumerated, so the list is checked instead of shared.
-    const ROUTES: [(&str, &str); 17] = [
+    const ROUTES: [(&str, &str); 23] = [
+        ("GET", "/v1/toin/stats"),
+        ("GET", "/v1/toin/patterns"),
+        ("GET", "/v1/toin/pattern/{prefix}"),
+        ("GET", "/v1/telemetry/tools"),
+        ("GET", "/v1/telemetry/export"),
+        ("POST", "/v1/telemetry/import"),
         ("POST", "/v1/compress"),
         ("POST", "/v1/retrieve"),
         ("GET", "/v1/retrieve/stats"),

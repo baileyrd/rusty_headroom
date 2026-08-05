@@ -248,6 +248,34 @@ impl Aggregator {
         &self.observations
     }
 
+    /// Folds another aggregator's observations into this one.
+    ///
+    /// Sums rather than replaces, because two deployments observing the same shape have
+    /// each seen real traffic and the merged sample count is the honest total. Replacing
+    /// would silently discard whichever side was imported second.
+    ///
+    /// Exists for aggregate interchange between deployments: a fleet of proxies each
+    /// learning in isolation cannot pool what it learned without this, which is most of
+    /// why TOIN is worth having across more than one machine.
+    pub fn merge(&mut self, other: &Aggregator) {
+        for (key, incoming) in &other.observations {
+            let entry = self.observations.entry(key.clone()).or_default();
+            entry.samples = entry.samples.saturating_add(incoming.samples);
+            entry.tokens_before = entry.tokens_before.saturating_add(incoming.tokens_before);
+            entry.tokens_after = entry.tokens_after.saturating_add(incoming.tokens_after);
+            entry.declines = entry.declines.saturating_add(incoming.declines);
+        }
+    }
+
+    /// Rebuilds an aggregator from exported observations.
+    ///
+    /// Used by the import path, which reads data from outside this process. Unparseable
+    /// input yields an empty aggregator rather than an error: an import that fails must
+    /// not be able to take down the endpoint, and merging nothing is the safe outcome.
+    pub fn from_observations(observations: BTreeMap<String, Observation>) -> Self {
+        Self { observations }
+    }
+
     /// Builds recommendations from what has been observed.
     ///
     /// `min_samples` is the floor below which a key is omitted entirely. A shape seen

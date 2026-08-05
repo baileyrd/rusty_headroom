@@ -6,6 +6,39 @@ the crate starts publishing releases.
 
 ---
 
+## The proxy observed nothing; TOIN existed only in the CLI
+**2026-08-05** · closes #185 · the issue understated this, and the source said why
+
+- #185 was filed as "expose the existing aggregation state over HTTP". There was none.
+  `telemetry::Aggregator` was reached only by `headroom learn`, which mines a corpus
+  offline — the proxy itself recorded Prometheus counters and nothing shape-aware. So the
+  endpoints could not be added without first making the proxy observe, which is the real
+  work and the reason TOIN was a feature in name only.
+- The proxy now accumulates one `Observation` per compressed block, keyed by
+  `(auth_mode, model_family, structure_hash)`. **Declines are recorded too**, and that is
+  the half that matters most: a shape that consistently declines is exactly what
+  `recommend` needs in order to stop attempting it, and counting only successes would make
+  every measured ratio an average over the cases that already worked.
+- Added `GET /v1/toin/stats`, `/v1/toin/patterns`, `/v1/toin/pattern/{prefix}`,
+  `/v1/telemetry/tools`, `/v1/telemetry/export` and `POST /v1/telemetry/import`. Export
+  and import round-trip, so a fleet can pool what its members learned — a proxy per
+  machine learning in isolation was most of what made TOIN not worth much.
+- **I9 is the design constraint and is asserted, not intended.** A test compresses the
+  same request through one compressor set with the aggregator attached and one without,
+  and requires byte-identical output. Import merges into the aggregate that `learn` and
+  these endpoints read — never into the router. Recommendations stay startup-loaded, so an
+  import cannot change what the running process compresses, which is I9 holding at the
+  seam where breaking it would be easiest.
+- Imported aggregates are untrusted input: bounded body, validated schema, and a malformed
+  import leaves the aggregate exactly as it was rather than half-merged. Merging **sums**
+  rather than replaces — two deployments that saw the same shape have each seen real
+  traffic, and replacing would silently discard whichever arrived second.
+- `CompressionPolicy` gains a `mode` field so an observer can name the auth mode without
+  re-deriving it from the policy's flags, which would have been a second copy of that
+  mapping. `AuthMode` gains a `Default` of `Subscription` — the most restrictive, matching
+  what `CompressionPolicy::default()` already grants, so a mode nobody set can never
+  authorize compression nobody intended.
+
 ## A marker could be handed to a client with no way to read it
 **2026-08-05** · closes #184 · CCR was reachable only through MCP
 

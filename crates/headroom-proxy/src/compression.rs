@@ -69,6 +69,12 @@ pub struct Compressors {
     /// reason is computed for the decision and not recorded, which is what every caller
     /// outside the proxy wants.
     metrics: Option<Arc<crate::metrics::Metrics>>,
+    /// Where per-shape observations accumulate, when the caller wants them.
+    ///
+    /// Optional for the same reason `metrics` is: the CLI and library callers have no
+    /// endpoint to read aggregates from. Invariant I9 governs what this may do — it
+    /// observes, and nothing here reads it back to decide anything.
+    aggregator: Option<Arc<std::sync::Mutex<headroom_core::telemetry::Aggregator>>>,
 }
 
 impl Compressors {
@@ -79,6 +85,7 @@ impl Compressors {
             memories: Default::default(),
             memory_limit: crate::config::DEFAULT_MEMORY_LIMIT,
             metrics: None,
+            aggregator: None,
         }
     }
 
@@ -92,6 +99,7 @@ impl Compressors {
             memories: Default::default(),
             memory_limit: crate::config::DEFAULT_MEMORY_LIMIT,
             metrics: None,
+            aggregator: None,
         }
     }
 
@@ -100,6 +108,18 @@ impl Compressors {
     /// Invariant I9: observation only. Nothing here changes what is compressed.
     pub fn with_metrics(mut self, metrics: Arc<crate::metrics::Metrics>) -> Self {
         self.metrics = Some(metrics);
+        self
+    }
+
+    /// Accumulates per-shape observations into `aggregator`.
+    ///
+    /// Invariant I9: observation only. Nothing here changes what is compressed, and a
+    /// test asserts the compressed bytes are identical with and without it.
+    pub fn with_aggregator(
+        mut self,
+        aggregator: Arc<std::sync::Mutex<headroom_core::telemetry::Aggregator>>,
+    ) -> Self {
+        self.aggregator = Some(aggregator);
         self
     }
 
@@ -284,6 +304,16 @@ pub fn compress_dialect<'a>(
         let mut candidate = block.clone();
         match validated_apply(transform, &mut candidate, estimator.as_ref()) {
             Ok(outcome) if outcome.is_compressed() => {
+                observe_shape(
+                    compressors,
+                    block,
+                    model,
+                    policy,
+                    Some((
+                        estimator.count(block.content()) as u64,
+                        estimator.count(candidate.content()) as u64,
+                    )),
+                );
                 edits.push((
                     location.message,
                     location.block,
@@ -291,7 +321,13 @@ pub fn compress_dialect<'a>(
                 ));
             }
             // Declined, or not smaller. Either way the original stands.
-            Ok(_) => {}
+            Ok(_) => {
+                // Recorded too, and this is the half that matters most: a shape that
+                // consistently declines is exactly what `recommend` needs to stop the
+                // proxy attempting it, and counting only the successes would make every
+                // measured ratio an average over the cases that worked.
+                observe_shape(compressors, block, model, policy, None);
+            }
             // An invariant violation is a bug, not something to paper over — but it
             // must not take down a customer's request either. Drop the edit, log, and
             // forward what arrived.
@@ -670,6 +706,43 @@ fn tool_call_arguments(message: &Value, dialect: Dialect) -> Vec<String> {
                 Vec::new()
             }
         }
+    }
+}
+
+/// Records one compression outcome against its shape.
+///
+/// # Invariant I9
+///
+/// This observes and returns nothing. It is called *after* the decision it describes, is
+/// handed the outcome rather than consulted for one, and holds the aggregator lock only
+/// long enough to add. A poisoned lock drops the observation rather than failing the
+/// request — telemetry must never be able to take down the request path it is watching.
+fn observe_shape(
+    compressors: &Compressors,
+    block: &Block,
+    model: &str,
+    policy: CompressionPolicy,
+    compressed: Option<(u64, u64)>,
+) {
+    let Some(aggregator) = compressors.aggregator.as_ref() else {
+        return;
+    };
+
+    let detected = headroom_core::detection::detect(block.content().as_bytes());
+    let key = headroom_core::telemetry::AggregationKey::new(
+        policy.mode,
+        model,
+        headroom_core::telemetry::StructureHash::of(block.content(), detected.content_type),
+    );
+
+    let Ok(mut aggregator) = aggregator.lock() else {
+        return;
+    };
+
+    use headroom_core::telemetry::Telemetry;
+    match compressed {
+        Some((before, after)) => aggregator.record(&key, before, after),
+        None => aggregator.record_decline(&key),
     }
 }
 
