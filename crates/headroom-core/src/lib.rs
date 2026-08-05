@@ -53,6 +53,7 @@ pub mod log_compressor;
 pub mod memory;
 pub mod output_shaping;
 pub mod pipeline;
+pub mod relevance;
 pub mod search_compressor;
 pub mod signals;
 pub mod smart_crusher;

@@ -59,6 +59,16 @@ not cached. Everything before it is forwarded as the exact bytes that arrived.
 | source code | `CodeCompressor` — heuristic skeletonization |
 | prose | `TextSummarizer` — **tool output only**, never what a person typed |
 
+What survives a lossy pass is decided structurally — how repetitive the records are,
+which fields are constant, which rows are statistically anomalous — and, on the proxy,
+by **what was asked**. A tool result exists because something requested it, so the
+newest user message and the arguments of the tool call it answers are scored against
+each record (BM25, no model artifact, no network), and records that match are pinned
+alongside the outliers. Ask about order `a3f9` among four hundred orders and that row
+survives an elision that removes its structural twins. Everywhere without a
+conversation to draw on — the CLI, the MCP server, the Python module — there is no
+query and compression behaves exactly as it did before.
+
 The proxy knows which is which from the conversation. Nothing else does, so every other
 surface takes it from the caller and defaults to tool output: `headroom compress
 --kind tool-output|text`, a `kind` property on the `headroom_compress` MCP tool, and

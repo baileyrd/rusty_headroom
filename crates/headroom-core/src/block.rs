@@ -144,6 +144,11 @@ pub struct Block {
     content: String,
     tool_use_id: Option<String>,
     is_error: bool,
+    /// The question this content answers, when a caller had one to give.
+    ///
+    /// Read by compressors that can use it to decide what survives; never written
+    /// back into the block's content. See [`Block::with_query`].
+    query: Option<String>,
 }
 
 impl Block {
@@ -154,6 +159,7 @@ impl Block {
             content: content.into(),
             tool_use_id: None,
             is_error: false,
+            query: None,
         }
     }
 
@@ -164,6 +170,7 @@ impl Block {
             content: content.into(),
             tool_use_id: Some(tool_use_id.into()),
             is_error: false,
+            query: None,
         }
     }
 
@@ -171,6 +178,34 @@ impl Block {
     pub fn with_error(mut self, is_error: bool) -> Self {
         self.is_error = is_error;
         self
+    }
+
+    /// Attaches the question this block's content was produced in answer to.
+    ///
+    /// Optional context, never required. A block without it compresses exactly as it
+    /// did before this existed — which is what lets the CLI, the MCP server and the
+    /// Python binding, none of which have a conversation to draw a query from, keep
+    /// working unchanged.
+    ///
+    /// The query is *read* by compressors and never emitted: it steers what survives,
+    /// and adding it to the output would put text the model never sent into the
+    /// conversation.
+    pub fn with_query(mut self, query: impl Into<String>) -> Self {
+        let query = query.into();
+        self.query = if query.trim().is_empty() {
+            // An empty query is the absence of one. Storing it would make
+            // `query()` return `Some("")`, and a caller checking `is_some()` would
+            // take the relevance path with nothing to be relevant to.
+            None
+        } else {
+            Some(query)
+        };
+        self
+    }
+
+    /// The question this block's content answers, if the caller supplied one.
+    pub fn query(&self) -> Option<&str> {
+        self.query.as_deref()
     }
 
     /// The block's kind.

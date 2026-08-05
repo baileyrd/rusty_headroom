@@ -6,6 +6,44 @@ the crate starts publishing releases.
 
 ---
 
+## SmartCrusher elided the record the user was asking about
+**2026-08-05** · closes #176, #177 · compression was structural and nothing else
+
+- Every keep/elide decision in the planner was a property of the **data alone**:
+  repetition, constant fields, statistical outliers. So a tool result compressed
+  identically whether the user asked "how many files are there" or "show me
+  `src/parser.rs`" — and a user asking about order `a3f9` among four hundred orders got
+  a result in which that row was no more likely to survive than any other. The failure
+  is invisible to every existing measure: the compression ratio is exactly as healthy
+  when the relevant record is dropped as when it is kept, which is why Round 1 closed
+  C4 as done and this went unnoticed.
+- Added `headroom_core::relevance`: a `RelevanceScorer` trait and `Bm25Scorer` — keyword
+  overlap with TF-IDF term rarity and length normalization. No model artifact, no
+  network, no new dependency. Both corrections matter here: without IDF a term present
+  in every record would decide nothing yet still score, and without length
+  normalization the planner would keep the *verbose* records rather than the relevant
+  ones. The embedding and hybrid tiers are out of scope (they need ONNX); the
+  reference's own embedding scorer is a stub and its hybrid tier degrades to BM25.
+- Wired through in the same change, deliberately. `Block` now carries an optional
+  `query`, the proxy builds one from the newest user-authored text plus the newest
+  assistant turn's tool-call arguments in all three dialect shapes, and
+  `plan_with_query` pins matching records as a **floor** the sample budget cannot cut
+  into — the relationship outliers already had. Landing the scorer alone would have
+  reproduced #71, #73, #75, #82 and #84 exactly: capability shipped, tested, and called
+  by nothing.
+- Three things the design has to get right, each with a test. The query excludes the
+  tool result being compressed, which arrives in a *user-role* message on the Anthropic
+  wire — score records against that and every record looks relevant. Pinning is capped,
+  so a query sharing a common term with every record (`file`, `error`, `status`) cannot
+  quietly pin the whole set and turn compression off while the metrics report a healthy
+  passthrough. And ties break toward the earlier record rather than relying on sort
+  stability, so I4 holds on a path that newly introduces float comparison.
+- Absent a query, output is byte-identical to before — asserted, not assumed. That is
+  what keeps the CLI, the MCP server and the Python binding, none of which have a
+  conversation to draw on, working unchanged. `plan` and `SmartCrusher::crush` keep
+  their signatures; the query arrives through additive `plan_with_query` and
+  `crush_for`. `CrushConfig` loses its `Eq` derive, since a threshold is an `f64`.
+
 ## The proxy 404'd every path it did not explicitly route
 **2026-08-05** · closes #175 · the route list was treated as the boundary
 

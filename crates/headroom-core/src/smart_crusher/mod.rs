@@ -24,4 +24,4 @@ pub use config::CrushConfig;
 pub use formatter::{format_plan, SmartCrusher};
 pub use ir::{Document, Shape};
 pub use outliers::{rank_outliers, Outlier, OutlierReason};
-pub use planning::{plan, CrushPlan, FieldPlan};
+pub use planning::{plan, plan_with_query, CrushPlan, FieldPlan};
