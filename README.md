@@ -29,7 +29,8 @@ HEADROOM_UPSTREAM=https://api.anthropic.com ./target/release/headroom-proxy
 ```
 
 `headroom wrap <agent>` prints the environment that routes a supported agent through the
-proxy, and `headroom unwrap` undoes it.
+proxy, and `headroom unwrap` undoes it. If a `wrap` was killed before `unwrap` could run,
+`headroom recover` finds the backup it left and restores it — dry by default.
 
 ## What it does to a request
 

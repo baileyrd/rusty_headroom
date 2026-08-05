@@ -6,6 +6,36 @@ the crate starts publishing releases.
 
 ---
 
+## A killed `wrap` left agent settings with no path back
+**2026-08-05** · closes #190 · `unwrap` is byte-exact, when it gets to run
+
+- `headroom unwrap` restores a wrapped settings file byte for byte from a whole-file
+  backup, verified SHA-256 identical (L8). That is correct **when it runs**. A `wrap`
+  killed mid-session, a shell closed under one, or a reboot leaves
+  `settings.json.headroom-backup` on disk with nothing pointing at it. The user is left
+  with an agent config they did not write, and the only route back was knowing the suffix
+  and copying by hand.
+- Added `headroom recover [--path DIR] [--apply]`. It scans for orphaned backups, names
+  the settings file each belongs to, and restores through **the same
+  `unwrap_settings_file`** — so recovery carries L8's byte-exactness guarantee rather than
+  a second implementation of it, asserted by a test that wraps a file with awkward
+  whitespace and recovers it exactly.
+- **Dry by default.** This runs when the operator is already in a bad state: their config
+  is not what they wrote and they are working out why. A tool that writes first and
+  explains afterwards makes a wrong guess unrecoverable, so `--apply` is a second
+  deliberate act. "Nothing to recover" is said plainly rather than by printing nothing,
+  because silence reads as a tool that failed to run.
+- **It scans rather than consulting a registry, and that is not a shortcut.** `wrap` only
+  ever touches the file the caller named with `--settings`; there is no list of locations
+  it might have written to. So recovery looks where the operator is — the directory they
+  pass, defaulting to the current one — rather than walking their home directory
+  uninvited. Depth-bounded at six, because a recovery tool that hangs on a deep tree is
+  useless precisely when it is needed.
+- An unreadable directory is skipped rather than fatal, so one permission error does not
+  cost the operator everything else reachable. Results are sorted, so two runs agree.
+  Unrelated files are never reported: a recovery tool that offers to overwrite a file it
+  has no backup for is worse than one that finds nothing.
+
 ## Savings reset on every deploy
 **2026-08-05** · closes #187 · see DECISIONS D40
 

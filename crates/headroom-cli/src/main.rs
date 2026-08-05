@@ -75,6 +75,19 @@ enum Command {
         #[arg(long)]
         settings: Option<std::path::PathBuf>,
     },
+    /// Find and restore agent settings a killed `wrap` left behind.
+    ///
+    /// `unwrap` restores a wrapped file byte for byte — when it gets to run. A `wrap`
+    /// killed mid-session, or a machine rebooted under one, leaves the backup on disk
+    /// with nothing pointing at it. This finds those.
+    Recover {
+        /// Directory to scan. Defaults to the current one.
+        #[arg(long, default_value = ".")]
+        path: std::path::PathBuf,
+        /// Restore what is found. Without this, nothing is written.
+        #[arg(long)]
+        apply: bool,
+    },
     /// Undo `wrap`, restoring any settings file byte for byte.
     Unwrap {
         /// Agent name.
@@ -157,6 +170,7 @@ fn main() -> std::process::ExitCode {
             settings,
         } => commands::wrap(&agent, &proxy, settings.as_deref()),
         Command::Unwrap { agent, settings } => commands::unwrap(&agent, settings.as_deref()),
+        Command::Recover { path, apply } => commands::recover(&path, apply),
         Command::Savings { since_days } => commands::savings(since_days),
         Command::Perf { iterations } => commands::perf(iterations),
         Command::Deploy { port, upstream } => commands::deploy(port, &upstream),
