@@ -664,7 +664,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1841,7 +1841,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2019,7 +2019,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "remind_me_core"
 version = "0.1.0"
-source = "git+https://github.com/baileyrd/rusty_remind_me?rev=69014cc91aaa83605c8696dbe90c588efce28ef9#69014cc91aaa83605c8696dbe90c588efce28ef9"
+source = "git+https://github.com/baileyrd/rusty_remind_me?rev=9fbc391dfa72b4103bc437b48ae451b9d7bfa937#9fbc391dfa72b4103bc437b48ae451b9d7bfa937"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2274,7 +2274,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3201,7 +3201,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

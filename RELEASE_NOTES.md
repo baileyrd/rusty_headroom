@@ -6,6 +6,17 @@ the crate starts publishing releases.
 
 ---
 
+## Re-pin remind_me_core to rusty_remind_me's main
+**2026-08-05** · follow-up to #215
+
+- `baileyrd/rusty_remind_me#188` merged. `headroom-proxy`'s `remind_me_core` git
+  dependency now pins its merge commit (`9fbc391`) instead of the feature-branch tip
+  it pointed at while that PR was still open — same commit's content either way, no
+  behavior change. Pinned to the merge commit rather than `main`'s later tip, so this
+  dependency tracks exactly the PR that added the seam it needs.
+
+---
+
 ## A linked memory backend, with an in-process embedder instead of a probed daemon
 **2026-08-05** · closes #215 · `--features linked-memory`, off by default
 

@@ -35,9 +35,11 @@ futures-util = { version = "0.3.33", default-features = false, features = ["sink
 # records for `ocrs`/`rten`.
 rusqlite = { version = "0.31", optional = true }
 # `rusty_remind_me`'s `remind_me_core`, pinned to the merge commit of "Let a caller
-# supply the embedder to search_memories" (baileyrd/rusty_remind_me#188). Re-pin to
-# `main` once that PR merges — see DECISIONS D44.
-remind_me_core = { git = "https://github.com/baileyrd/rusty_remind_me", rev = "69014cc91aaa83605c8696dbe90c588efce28ef9", optional = true, default-features = false }
+# supply the embedder to search_memories" (baileyrd/rusty_remind_me#188, merged as
+# 9fbc391), now on `main` — see DECISIONS D44. Pinned to that merge commit rather than
+# `main`'s later tip so this dependency tracks exactly the PR that added the seam it
+# needs, not whatever unrelated work has landed on `main` since.
+remind_me_core = { git = "https://github.com/baileyrd/rusty_remind_me", rev = "9fbc391dfa72b4103bc437b48ae451b9d7bfa937", optional = true, default-features = false }
 headroom-embed = { path = "../headroom-embed", optional = true }
 
 [dev-dependencies]

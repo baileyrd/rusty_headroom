@@ -1673,12 +1673,13 @@ source — and `tokio` with `full`, neither optional in `remind_me_core`'s own m
 `dep:headroom-embed`, and `headroom-embed/local` (`rten` + `tokenizers`). A clean
 `cargo build -p headroom-proxy --release`: 97s with default features, 171s with
 `--features linked-memory` — +74s, +76%, on this repository's CI runners. `remind_me_core`
-is pinned by commit (`rev = "69014cc91aaa83605c8696dbe90c588efce28ef9"`, the tip of
+is pinned by commit (`rev = "9fbc391dfa72b4103bc437b48ae451b9d7bfa937"`, the merge commit of
 `baileyrd/rusty_remind_me#188`, "Let a caller supply the embedder to search_memories" — the
 PR that gave this crate a seam to inject `headroom-embed`'s embedder into at all, since
 `search_memories` previously reached for `remind_me_core::embedder::available_embedder()`
-itself). Re-pin to `main` once that PR merges, per this repository's "merge with merge
-commits" convention.
+itself, now on `rusty_remind_me`'s `main`). Pinned to that merge commit specifically rather
+than `main`'s later tip, so this dependency tracks exactly the PR that added the seam it
+needs and nothing `rusty_remind_me` has merged since.
 
 **`remind_me_core::db::queries::search_memories_with_embedder` is not exercised by CI, and is
 not claimed to be.** `rten`'s forward pass ships unexercised in this environment for the same
