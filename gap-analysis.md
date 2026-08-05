@@ -1,5 +1,16 @@
 # rusty_headroom — Parity Gap Analysis
 
+This document has two rounds. **Round 1** (below, through the Summary) assessed an empty
+repository against the reference's *published documentation*, and its 97 rows are all closed
+or explicitly deferred. **[Round 2](#round-2--source-derived-assessment)** re-assesses the
+now-populated repository against the reference's *actual source*, which turned out to be a
+different shape than the docs implied. Round 1 is kept as the record of how the codebase got
+here; Round 2 is the live gap list.
+
+---
+
+## Round 1 — documentation-derived assessment
+
 **Target:** `baileyrd/rusty_headroom` (empty repo — single bare commit, no source)
 **Reference:** [`headroomlabs-ai/headroom`](https://github.com/headroomlabs-ai/headroom) @ `main`, pinned at commit `HEAD` of 2026-08-03 (Apache-2.0)
 **Assessment path:** `spec` — clean-room, documentation-driven. Capabilities extracted from the
@@ -354,3 +365,125 @@ Dependency-first, so each layer has something real to build on:
 8. **X1–X5** — proxy skeleton through the Anthropic handler
 9. **X9–X10** — SSE
 10. Everything else, breadth-first by workstream
+
+---
+
+# Round 2 — source-derived assessment
+
+**Date:** 2026-08-05
+**Target:** `baileyrd/rusty_headroom` @ `242641b` — 6 crates, all 97 Round 1 rows closed or deferred
+**Reference:** [`headroomlabs-ai/headroom`](https://github.com/headroomlabs-ai/headroom) @ `d0a86d4`
+(2026-08-04, Apache-2.0). **Pinned for this whole round** — the reference ships continuously and
+the list below is meaningless against a moving base.
+**Assessment path:** `source` — the reference was cloned and read. Round 1 was deliberately
+clean-room from docs; the docs turned out to under-describe the system, so this round reads the
+source to *enumerate* capabilities. Implementation stays clean-room: gaps are described by
+behavior, not by transcribing upstream code.
+
+## What reading the source changed
+
+Round 1 assumed the reference was a Rust project, because `REALIGNMENT/` and `RUST_DEV.md` are
+written as though it is. It is not. The reference is **Python-primary with a Rust port in
+progress**: 1,366 `.py` files against 194 `.rs`. That single fact splits "parity" into two
+different questions, and this round tracks both.
+
+**Target A — the Rust port.** Compare `crates/` to `crates/`. On this axis we are *ahead* in
+places: the reference's Rust proxy registers only `/healthz`, `/healthz/upstream`, `/metrics`,
+`/v1/chat/completions`, `/v1/responses` plus the Bedrock/Vertex routes. It has no `/v1/messages`
+route (Anthropic traffic is compressed inside its catch-all forwarder), no MCP server, no CLI,
+no WebSocket relay of its own, and no `/admin/runtime-env`. We have all of those.
+
+**Target B — the product surface.** Compare our Rust to everything the reference ships in either
+language. This is the larger list, and it is where the Round 1 doc was most optimistic: features
+the docs mention in a sentence turn out to be whole subsystems.
+
+Both targets are in scope for this round, per the scope decision below.
+
+## Scope decisions for Round 2
+
+| Question | Answer |
+| --- | --- |
+| Parity target | **Both** — Target A (Rust port) and Target B (product surface), tracked separately |
+| Derivation | Capabilities enumerated from source; implementation still written fresh |
+| Reference pin | `d0a86d4`, fixed for the round |
+| Still explicitly OUT | ONNX / Kompress ML compressor; dashboard & web UI; native Bedrock + Vertex routes; Python/TS framework integrations (LangChain, Vercel AI, LiteLLM, Agno, CrewAI, AutoGen, Strands) |
+
+The Round 1 exclusions above are **carried forward unchanged**. Reading the source did not
+produce a reason to revisit them, and reversing a scope decision is its own conversation. Note
+that the reference's `relevance::EmbeddingScorer` is itself a stub pending ONNX, so excluding
+ONNX excludes only the embedding *tier* — the BM25 tier below is unaffected.
+
+## Corrections to Round 1 rows
+
+Three Round 1 rows were closed on a reading of the docs that the source does not support:
+
+| Row | Round 1 claim | What the source shows |
+| --- | --- | --- |
+| P4 | "offloads — covered by the existing compressors; a separate layer would be a second name for the same mechanism" | Partly true, but two of the reference's six offloads are **not** a second name for anything we have: `diff_noise` (drop lockfile and whitespace-only hunks) and `prose_field` (CCR-offload prose leaves *nested inside* structured payloads). Filed as [G7](https://github.com/baileyrd/rusty_headroom/issues/181) and [G8](https://github.com/baileyrd/rusty_headroom/issues/182). |
+| C4 | "anchors + planning — decide what to keep/elide before mutating anything. Done." | The reference's planning layer is **query-aware**: it scores items against the user's recent prompts joined with the assistant's tool-call arguments, and pins matches. Ours is purely structural. Filed as [G2](https://github.com/baileyrd/rusty_headroom/issues/176)/[G3](https://github.com/baileyrd/rusty_headroom/issues/177). |
+| X5 | Anthropic handler "Done", with the route list treated as the proxy's surface | The reference proxy is a *transparent reverse proxy* with a catch-all fallback; the routes are fast paths, not the boundary. Ours 404s everything unlisted. Filed as [G1](https://github.com/baileyrd/rusty_headroom/issues/175). |
+
+## Gap table — Target A (Rust port)
+
+| ID | Symbol | Category | Target | Est. size | Notes |
+| --- | --- | --- | --- | --- | --- |
+| [G1](https://github.com/baileyrd/rusty_headroom/issues/175) | catch-all transparent forward | fn | A+B | M | `router.fallback(any(catch_all))`. Every unrecognized path forwards upstream, including WebSocket upgrades on arbitrary paths. Ours has no fallback, so `/v1/models`, `/v1/messages/batches`, `/v1/messages/count_tokens`, `/v1/embeddings` and every future provider endpoint return 404. This is a drop-in-compatibility defect, not a missing feature — the proxy's whole contract is "point your base URL here". **Highest priority in this round.** |
+| [G2](https://github.com/baileyrd/rusty_headroom/issues/176) | `relevance` — trait + BM25 scorer | trait/fn | A+B | M | `RelevanceScorer` trait plus a BM25 scorer (TF-IDF with length normalization). No ML dependency; the reference's embedding and hybrid tiers degrade to BM25 when embeddings are unavailable, which is their default state. Pure addition. |
+| [G3](https://github.com/baileyrd/rusty_headroom/issues/177) | query-aware keep decisions in SmartCrusher planning | fn | A+B | M | Build the query from the newest user messages joined with the assistant's tool-call argument JSON; score candidate items; pin above-threshold items into the keep set. Depends on G2. This is the row that makes G2 worth having — a scorer nothing consults is exactly the failure the reachability audit exists to catch. |
+| [G4](https://github.com/baileyrd/rusty_headroom/issues/178) | query-aware keep decisions in the prose path | fn | A+B | S | Same scorer applied to `TextSummarizer`'s line budget, unioned with the existing anchor/tag floor. Depends on G2. |
+| [G5](https://github.com/baileyrd/rusty_headroom/issues/179) | statistical ID-field / score-field detection | fn | A+B | M | Detect fields that are unique identifiers (which must not drive compression decisions) versus fields carrying a ranking signal, from per-field statistics rather than name heuristics. Improves what SmartCrusher elides. |
+| [G6](https://github.com/baileyrd/rusty_headroom/issues/180) | model → context-window limits | fn | A | S | Reference vendors LiteLLM's `model_prices_and_context_window.json` for `max_input_tokens`. **Note:** the module is declared in their `compression/mod.rs` and referenced nowhere else in their Rust — it is unreached upstream too. Filed at low priority, and any implementation must land *wired*, per the reachability rule. |
+| [G7](https://github.com/baileyrd/rusty_headroom/issues/181) | `DiffNoise` offload | fn | A+B | M | Drop diff hunks the model does not need: lockfile churn (`package-lock.json`, `Cargo.lock`, `yarn.lock`, `go.sum`) and whitespace-only changes, while keeping the manifest line that carries the actual meaning. |
+| [G8](https://github.com/baileyrd/rusty_headroom/issues/182) | prose-field offload | fn | A+B | M | CCR-backed extractive compression for prose leaves nested *inside* structured payloads — today a long prose string inside a JSON tool result is only reachable by SmartCrusher's structural rules, never by the prose compressor. |
+| [G9](https://github.com/baileyrd/rusty_headroom/issues/183) | parity fixture-replay harness | infra | A | M | The reference ships a `headroom-parity` crate: replay recorded fixtures through the implementation and diff outputs, with explicit `Skipped` for stubbed comparators. Adopting the shape — recorded fixtures, per-transform comparators, a count of what is genuinely covered — turns this document from a hand-maintained table into a measured signal. Same instinct as `scripts/reachability-audit.sh`. |
+
+`hf_impl.rs` (Round 1 T3) remains present upstream and deferred here for the reasons in D16 —
+unchanged by this round.
+
+## Gap table — Target B (product surface)
+
+| ID | Symbol | Category | Target | Est. size | Notes |
+| --- | --- | --- | --- | --- | --- |
+| [G10](https://github.com/baileyrd/rusty_headroom/issues/184) | CCR over HTTP | fn | B | M | `/v1/compress`, `/v1/retrieve`, `/v1/retrieve/{hash}`, `/v1/retrieve/stats`, `/v1/retrieve/tool_call`. We reach CCR only through the MCP tool, so any non-MCP client can be *given* a `<<ccr:HASH>>` marker it has no way to resolve. |
+| [G11](https://github.com/baileyrd/rusty_headroom/issues/185) | TOIN / telemetry over HTTP | fn | B | M | `/v1/telemetry`, `/v1/telemetry/export`, `/v1/telemetry/import`, `/v1/telemetry/tools`, `/v1/toin/patterns`, `/v1/toin/stats`, `/v1/feedback`. Observation-only per I9 — these publish and exchange aggregates, they must not feed request-time hints. |
+| [G12](https://github.com/baileyrd/rusty_headroom/issues/186) | operational endpoints | fn | B | S | `/healthz` and `/healthz/upstream` (liveness distinguished from upstream reachability) and `/admin/upstream`. We have `/health` only, which cannot tell an orchestrator whether the upstream is the thing that is down. |
+| [G13](https://github.com/baileyrd/rusty_headroom/issues/187) | durable savings ledger | type/fn | B | L | Reference persists savings over time and reports against it. `headroom savings` here reads a `/metrics` scrape off stdin and is stateless, so it can report a rate but never a total, and nothing survives a proxy restart. |
+| [G14](https://github.com/baileyrd/rusty_headroom/issues/188) | `headroom audit` | fn | B | M | Audit traffic for compression opportunities that were declined — the counterpart to `learn`, which mines a corpus. Reads what actually flowed. |
+| [G15](https://github.com/baileyrd/rusty_headroom/issues/189) | `headroom capture` | fn | B | M | Capture traffic and emit a differential report between two captures. The investigation tool for "why did this request not compress". |
+| [G16](https://github.com/baileyrd/rusty_headroom/issues/190) | `headroom recover` | fn | B | S | Recover agent state left behind in a temporary Headroom home by an interrupted wrapper. `unwrap` restores a settings file byte-for-byte, but only when it gets to run — a killed `wrap` leaves state with no path back. |
+| [G17](https://github.com/baileyrd/rusty_headroom/issues/191) | `headroom evals` | infra | B | L | Evaluation harness with categories — measures compression quality against a fixture corpus rather than asserting a single ratio. |
+| [G18](https://github.com/baileyrd/rusty_headroom/issues/192) | MCP proxy wrapper | fn | B | L | Reference wraps *another* MCP server and compresses its tool results in flight (`create_headroom_mcp_proxy`). This is architecturally different from our MCP server, which exposes three headroom tools: it puts compression in front of a server the user already runs, with no agent-side change. |
+| [G19](https://github.com/baileyrd/rusty_headroom/issues/193) | memory persistence + retrieval | type/fn | B | L | Reference memory is vector-backed with extraction, budget, provenance sync and its own MCP server (`memory_save`, `memory_search`). Ours is an in-memory content-addressed store with no persistence, eviction, or retrieval-by-similarity. **Split candidate** — persistence first, retrieval second; the vector index needs a dependency decision (stop-and-ask). |
+| [G20](https://github.com/baileyrd/rusty_headroom/issues/194) | `headroom memory` CLI | fn | B | M | Depends on G19. |
+| [G21](https://github.com/baileyrd/rusty_headroom/issues/195) | agent coverage audit | fn | B | M | Reference carries provider definitions for ~20 agents (claude, codex, cursor, aider, cline, continue, goose, openhands, opencode, grok, kimi, gemini, copilot, zcode, omp, cortex_code, cloudcode, openclaw, mistral_vibe, …). We wrap 8. Audit which of the remainder are env-var-wrappable and close the ones that are. |
+| [G22](https://github.com/baileyrd/rusty_headroom/issues/196) | configuration surface audit | infra | B | M | Reference exposes ~318 `HEADROOM_*` settings; we expose 12. Most of the difference is knobs on features we do not have, so this is **not** 306 gaps — it is one audit issue to find the settings that gate behavior we *do* have and are simply not configurable (compression deadlines/timeouts, worker counts, CORS origins, CCR TTL and backend selection, per-content-type compressor enablement). |
+| [G23](https://github.com/baileyrd/rusty_headroom/issues/197) | code-aware compression via external tools | fn | B | L | Reference shells out to `difft`, `scc` and `ast-grep` (pinned versions, checksummed downloads, `tools doctor` reporting) for structural code understanding. Our code compressor is a heuristic skeletonizer (D3). Needs a dependency/toolchain decision — **stop-and-ask**, not auto-implemented. |
+
+## Summary
+
+| | Rows |
+| --- | ---: |
+| Target A (Rust port) | 9 |
+| Target B (product surface) | 14 |
+| **Total** | **23** |
+
+Seven rows (G1–G5, G7, G8) count against **both** targets — they are gaps in the reference's Rust
+*and* in the product. Those are the ones to work first: they are the only items where "which
+parity target did you mean" has no bearing on the answer.
+
+Two rows are flagged **stop-and-ask** rather than auto-implementable: G19 (vector index
+dependency) and G23 (external binary toolchain). Neither is a breaking change — the target still
+has no consumers to break — but both add third-party surface, which the loop does not merge
+unattended.
+
+### Suggested implementation order
+
+1. **G1** — the catch-all. Everything else is a compression improvement; this one is a
+   correctness bug against the proxy's stated contract.
+2. **G2 → G3, G4** — the relevance scorer and the two places it must actually be reached from.
+   Landing G2 alone would reproduce the exact defect the reachability audit was built to catch.
+3. **G12, G10, G11** — the HTTP surface, cheapest first.
+4. **G7, G8, G5** — compression quality.
+5. **G13 → G14, G15** — the savings ledger and the tools that read it.
+6. **G16, G20, G21, G22** — operational and coverage work.
+7. **G6, G9, G17, G18, G19, G23** — the remainder, breadth-first.
