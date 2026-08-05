@@ -6,6 +6,39 @@ the crate starts publishing releases.
 
 ---
 
+## Prose nested inside a JSON payload was never reached by the prose compressor
+**2026-08-05** · closes #182 · the #82/#84 asymmetry, one level further in
+
+- Content routing (D1) decides about a **block**: the block is JSON, or code, or prose,
+  and one compressor gets it. So a tool result shaped like
+  `{"status":"ok","report":"<6KB of narrative>"}` goes to SmartCrusher, which sees the
+  narrative as one long string value and has no structural rule that applies to it. Hand
+  the same string to `headroom compress` directly and it shrinks substantially. That is
+  the exact asymmetry that produced #82 (the proxy held no code compressor) and #84
+  (nor a prose one) — this time one level inside the envelope, where neither of those
+  fixes reaches.
+- `SmartCrusher` now walks string leaves before planning and summarizes the ones that
+  detect as prose, then runs the structural pass over the reduced document so any anchor
+  it keeps carries the shorter text. **`TextSummarizer` is reused, not reimplemented**:
+  it already owns the anchor floor, the tag-delimiter floor, the relevance pass from
+  #176 and the CCR round-trip, and a second copy of that decision is what check 6 of the
+  reachability audit fails the build over. Its own size threshold applies unchanged, so
+  a leaf too short to be worth summarizing is left exactly as it was.
+- Gated to tool output, which is D24 applied one level in: a JSON payload a person wrote
+  may carry their own prose, and summarizing that is a different act from summarizing
+  what a command printed. `Block::kind().is_tool_output()` is the gate, checked in
+  `apply` — the same place the query is read.
+- Two failure modes the structure had to avoid. Only a **decline** is absorbed when the
+  structural pass says no: a real error (malformed JSON, a store that will not write)
+  still surfaces, or a broken CCR round-trip would read as a successful compression whose
+  marker redeems nothing. And when the document is not a record set but its prose *did*
+  shrink, the reduced form is returned rather than the original — the decline was about
+  the structure, not about the work already done.
+- Detection runs on each leaf, so a long identifier, a base64 blob or an embedded JSON
+  document is not summarized as prose. The walk is depth-bounded by
+  `CrushConfig::max_depth` for the reason that bound already exists: this recurses over
+  tool output, which is not trusted input.
+
 ## A dependency bump forwarded thousands of lockfile lines whole
 **2026-08-05** · closes #181 · context elision cannot reach a hunk that is all changes
 

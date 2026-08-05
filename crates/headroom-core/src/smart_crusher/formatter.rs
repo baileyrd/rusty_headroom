@@ -21,6 +21,7 @@
 //! The last is what makes the lossiness acceptable. The original is in the CCR
 //! store, and the marker is how the model asks for it back.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -28,10 +29,11 @@ use serde_json::Value;
 use super::{
     analyze_record_set, plan_with_query, rank_outliers, CrushConfig, CrushPlan, Document, FieldPlan,
 };
-use crate::block::Block;
+use crate::block::{Block, BlockKind};
 use crate::ccr::{store_and_mark, CcrStore};
 use crate::detection::{detect, AdaptiveSizer, ContentType};
 use crate::error::{Declined, Error, Result};
+use crate::text_crusher::TextSummarizer;
 use crate::transform::{LossyTransform, Transform};
 
 /// How long an original stays retrievable.
@@ -153,6 +155,31 @@ impl SmartCrusher {
     /// [`SmartCrusher::crush`] is this with no query, and the two produce identical
     /// bytes in that case. See [`plan_with_query`] for why the query matters.
     pub fn crush_for(&self, source: &str, query: Option<&str>) -> Result<String> {
+        self.crush_with(source, query, false)
+    }
+
+    /// Compresses `source`, optionally shrinking prose strings nested inside it.
+    ///
+    /// # The gap `prose_leaves` closes
+    ///
+    /// Content routing (D1) is a decision about a *block*: the block is JSON, or code, or
+    /// prose, and one compressor gets it. So a block routed here has its prose leaves
+    /// handled by structural rules and never by the prose compressor — a 6KB narrative
+    /// inside a JSON tool result is, to the analyzer, one long string value.
+    ///
+    /// That is the same asymmetry as #82 and #84, one level further in: `headroom
+    /// compress` shrinks that string substantially when handed it directly, while the
+    /// proxy forwards it whole inside its envelope.
+    ///
+    /// Off by default and enabled only from [`Transform::apply`] for tool output, because
+    /// summarizing prose somebody wrote is a different act from summarizing what a
+    /// command printed (D24).
+    pub fn crush_with(
+        &self,
+        source: &str,
+        query: Option<&str>,
+        prose_leaves: bool,
+    ) -> Result<String> {
         // Cheapest checks first. Detection is a pass over the bytes; parsing is more.
         let detection = detect(source.as_bytes());
         if detection.content_type != ContentType::Json {
@@ -162,6 +189,41 @@ impl SmartCrusher {
             return Err(Error::declined(Declined::BelowThreshold));
         }
 
+        // Prose leaves are shrunk first, so the structural pass that follows plans over
+        // the reduced document and any anchor it keeps carries the shorter text.
+        let (reduced, leaves) = if prose_leaves {
+            self.shrink_prose_leaves(source)?
+        } else {
+            (Cow::Borrowed(source), 0)
+        };
+
+        let structural = self.crush_structurally(reduced.as_ref(), source, query);
+
+        match structural {
+            Ok(compressed) => Ok(compressed),
+            // The document is not a record set, or summarizing it would not pay. If prose
+            // leaves shrank, that is still a real reduction and forwarding the original
+            // would throw it away — the decline is about the *structure*, not about the
+            // work already done.
+            // Only a *decline* is absorbed. A real failure — malformed JSON, a store
+            // that will not write — must still surface, or a broken CCR round-trip would
+            // read as a successful compression whose marker redeems nothing.
+            Err(Error::Declined(_)) if leaves > 0 => Ok(reduced.into_owned()),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// The record-set pass, over `source` — with `original` stored for retrieval.
+    ///
+    /// `original` is the caller's bytes, not the prose-reduced ones: a marker has to
+    /// redeem what actually arrived, or retrieving it returns content the model never
+    /// saw in full.
+    fn crush_structurally(
+        &self,
+        source: &str,
+        original: &str,
+        query: Option<&str>,
+    ) -> Result<String> {
         let document = Document::parse(source, &self.config)?;
 
         let stats = analyze_record_set(&document, &self.config)
@@ -172,9 +234,79 @@ impl SmartCrusher {
 
         // Store before marking, via the helper that pairs them — a marker must never
         // advertise a hash nothing was stored under.
-        let marker = store_and_mark(self.store.as_ref(), source.as_bytes(), CCR_TTL)?;
+        let marker = store_and_mark(self.store.as_ref(), original.as_bytes(), CCR_TTL)?;
 
         format_plan(&document, &plan, Some(&marker))
+    }
+
+    /// Replaces long prose string values with their summarized form.
+    ///
+    /// Returns the rewritten JSON and how many leaves changed. Borrowed and unchanged
+    /// when nothing qualified, so the common case allocates nothing.
+    ///
+    /// Reuses [`TextSummarizer`] rather than reimplementing a summary here: it already
+    /// owns the anchor floor, the tag-delimiter floor, the relevance pass and the CCR
+    /// round-trip, and a second copy of that decision is what check 6 of the reachability
+    /// audit fails the build over. Its own size threshold applies, so a leaf too short to
+    /// be worth summarizing declines and is left exactly as it was.
+    fn shrink_prose_leaves<'a>(&self, source: &'a str) -> Result<(Cow<'a, str>, usize)> {
+        let mut value: Value = serde_json::from_str(source).map_err(|err| Error::Malformed {
+            content_type: "json",
+            detail: err.to_string(),
+        })?;
+
+        let summarizer = TextSummarizer::new(Arc::clone(&self.store));
+        let mut changed = 0usize;
+        shrink_in_place(&mut value, &summarizer, &mut changed, self.config.max_depth);
+
+        if changed == 0 {
+            return Ok((Cow::Borrowed(source), 0));
+        }
+
+        Ok((Cow::Owned(serde_json::to_string(&value)?), changed))
+    }
+}
+
+/// Walks `value`, summarizing prose leaves in place.
+///
+/// Depth-bounded for the same reason [`CrushConfig::max_depth`] exists: this recurses
+/// over tool output, which is not trusted input, and unbounded recursion over it is a
+/// stack overflow waiting to be triggered.
+fn shrink_in_place(
+    value: &mut Value,
+    summarizer: &TextSummarizer,
+    changed: &mut usize,
+    depth: usize,
+) {
+    if depth == 0 {
+        return;
+    }
+
+    match value {
+        Value::String(text) => {
+            // Detection first, on the leaf itself. A long identifier, a base64 blob or an
+            // embedded JSON document are all long strings and none of them is prose.
+            if detect(text.as_bytes()).content_type != ContentType::Prose {
+                return;
+            }
+
+            let mut block = Block::new(BlockKind::ToolResult, text.clone());
+            if summarizer.apply(&mut block).is_ok() {
+                *text = block.content().to_owned();
+                *changed += 1;
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                shrink_in_place(item, summarizer, changed, depth - 1);
+            }
+        }
+        Value::Object(fields) => {
+            for (_, field) in fields.iter_mut() {
+                shrink_in_place(field, summarizer, changed, depth - 1);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -188,13 +320,191 @@ impl Transform for SmartCrusher {
         // This is the single line that makes the relevance pass reachable from a real
         // request rather than only from a test — the defect that produced #71, #73,
         // #75, #82 and #84, each time by landing capability with no caller.
-        let compressed = self.crush_for(block.content(), block.query())?;
+        // Prose leaves are only shrunk for tool output. A JSON payload a person wrote
+        // may carry their own prose, and summarizing that is a different act (D24) —
+        // the same gate `TextSummarizer` applies at the top level, applied one level in.
+        let compressed = self.crush_with(
+            block.content(),
+            block.query(),
+            block.kind().is_tool_output(),
+        )?;
         block.replace_content(compressed);
         Ok(())
     }
 }
 
 impl LossyTransform for SmartCrusher {}
+
+#[cfg(test)]
+mod prose_leaf_tests {
+    use super::*;
+    use crate::ccr::InMemoryCcrStore;
+
+    fn crusher() -> (SmartCrusher, Arc<InMemoryCcrStore>) {
+        let store = Arc::new(InMemoryCcrStore::new());
+        (SmartCrusher::new(store.clone()), store)
+    }
+
+    /// Prose long enough for the summarizer's own threshold to accept it.
+    fn narrative() -> String {
+        (0..200)
+            .map(|i| format!("The deployment step number {i} completed as expected."))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// A tool result whose envelope is small and whose payload is a long narrative.
+    fn envelope() -> String {
+        serde_json::json!({
+            "status": "ok",
+            "report": narrative(),
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn a_prose_leaf_inside_json_is_shrunk() {
+        // The gap. Routing hands this block to SmartCrusher because it is JSON, so the
+        // prose compressor never sees the payload — `headroom compress` shrinks that
+        // same string substantially when handed it directly. Same asymmetry as #82 and
+        // #84, one level further in.
+        let (crusher, _store) = crusher();
+        let source = envelope();
+
+        assert!(
+            crusher.crush(&source).is_err(),
+            "the structural pass already handled this; the test proves nothing"
+        );
+
+        let out = crusher
+            .crush_with(&source, None, true)
+            .expect("prose leaves should shrink");
+
+        assert!(
+            out.len() < source.len() / 2,
+            "output is {} bytes against {} in",
+            out.len(),
+            source.len()
+        );
+        assert!(
+            out.contains("\"status\":\"ok\""),
+            "the envelope did not survive"
+        );
+    }
+
+    #[test]
+    fn the_shrunk_leaf_is_retrievable() {
+        // Lossy with a way back, like every other offload. The summarizer stores the
+        // original leaf and leaves its marker in place.
+        let (crusher, store) = crusher();
+        let out = crusher
+            .crush_with(&envelope(), None, true)
+            .expect("prose leaves should shrink");
+
+        // Sliced between the delimiters rather than to end-of-line: the marker now sits
+        // inside a JSON string, so the newline after it is the two characters `\` and
+        // `n` and a line-oriented split hands `parse_marker` an escape sequence.
+        let start = out.find("<<ccr:").expect("a marker survived into the leaf");
+        let end = out[start..].find(">>").expect("the marker is closed") + start + 2;
+        let hash = crate::ccr::parse_marker(&out[start..end]).expect("the marker parses");
+        let stored = store.get(hash).expect("store readable").expect("present");
+
+        assert_eq!(String::from_utf8_lossy(&stored), narrative());
+    }
+
+    #[test]
+    fn a_short_leaf_is_left_exactly_as_it_was() {
+        // The summarizer's own size threshold applies unchanged, so a leaf too short to
+        // be worth summarizing is not touched — and the whole document then declines
+        // exactly as it did before this existed.
+        let (crusher, _store) = crusher();
+        let source = serde_json::json!({
+            "status": "ok",
+            "note": "a short human-readable note that is nowhere near the threshold",
+            "padding": "x".repeat(2000),
+        })
+        .to_string();
+
+        let with = crusher.crush_with(&source, None, true);
+        let without = crusher.crush_with(&source, None, false);
+
+        assert_eq!(with.is_err(), without.is_err());
+    }
+
+    #[test]
+    fn non_prose_leaves_are_never_touched() {
+        // A long identifier, a base64 blob and an embedded JSON document are all long
+        // strings, and summarizing any of them would corrupt content the model needs
+        // verbatim.
+        let (crusher, _store) = crusher();
+        let blob = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVph".repeat(200);
+        let source = serde_json::json!({ "status": "ok", "payload": blob }).to_string();
+
+        let out = crusher.crush_with(&source, None, true);
+
+        // Either it declined outright or it left the blob alone; what it must not do is
+        // return something with the blob summarized.
+        if let Ok(compressed) = out {
+            assert!(
+                compressed.contains(&blob) || !compressed.contains("lines,"),
+                "a base64 payload was summarized as prose"
+            );
+        }
+    }
+
+    #[test]
+    fn the_structural_pass_still_wins_where_it_applies() {
+        // A record set must compress structurally, as before — the prose pass runs first
+        // but must not prevent the summary that is the higher-value result.
+        let (crusher, _store) = crusher();
+        let records: Vec<String> = (0..200)
+            .map(|i| format!(r#"{{"path":"src/module_{i}.rs","kind":"file","status":"ok"}}"#))
+            .collect();
+        let source = format!("[{}]", records.join(","));
+
+        let out = crusher
+            .crush_with(&source, None, true)
+            .expect("should compress");
+
+        assert!(
+            out.contains("200 records"),
+            "the structural pass did not run"
+        );
+    }
+
+    #[test]
+    fn shrinking_prose_leaves_is_deterministic() {
+        let (crusher, _store) = crusher();
+        let source = envelope();
+        let first = crusher.crush_with(&source, None, true).expect("shrinks");
+        for _ in 0..5 {
+            assert_eq!(
+                first,
+                crusher.crush_with(&source, None, true).expect("shrinks")
+            );
+        }
+    }
+
+    #[test]
+    fn a_block_that_is_not_tool_output_keeps_its_prose() {
+        // D24, one level in. A JSON payload a person wrote may carry their own prose,
+        // and summarizing that is a different act from summarizing what a command
+        // printed.
+        let (crusher, _store) = crusher();
+
+        let mut authored = Block::new(BlockKind::Text, envelope());
+        let authored_result = crusher.apply(&mut authored);
+
+        let mut tool = Block::new(BlockKind::ToolResult, envelope());
+        crusher.apply(&mut tool).expect("tool output shrinks");
+
+        assert!(
+            authored_result.is_err(),
+            "a person's own JSON had its prose summarized"
+        );
+        assert!(tool.content().len() < envelope().len() / 2);
+    }
+}
 
 #[cfg(test)]
 mod tests {
