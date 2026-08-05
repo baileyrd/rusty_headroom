@@ -6,6 +6,32 @@ the crate starts publishing releases.
 
 ---
 
+## The prose summarizer dropped the line the user was asking about
+**2026-08-05** · closes #178 · the same defect as #177, one compressor over
+
+- `TextSummarizer` chose surviving lines from two floors — structural anchors
+  (headings, hunk headers, fence markers, stack frames) and tag delimiters — plus an
+  importance heuristic. All three measure whether a line *looks* significant. None can
+  tell whether it is the line somebody wanted. So a 200-line tool result mentioning the
+  service the user asked about, in an ordinary prose sentence with no structural marker
+  on it, dropped that sentence and kept 60 lines of routine status.
+- `required_lines` gains a third contributor: the same `Bm25Scorer` #176 added, scored
+  per line against the block's query and unioned with the existing floors. Reused, not
+  reimplemented — a second copy of the scoring decision is what check 6 of the
+  reachability audit fails the build over.
+- The cap matters more here than it did for records. `keep_with_required` treats the
+  required set as a **hard floor** and will exceed `line_budget` to honor it, so an
+  uncapped pin from a query sharing a common term with every line would keep the whole
+  document — compression silently switching itself off rather than merely weakening.
+  `max_relevant_lines` defaults to 10 against a 60-line budget: relevance promotes
+  lines *within* the summary, it does not get to replace it.
+- Tested with its control, as #177 was: the needle is asserted to be dropped without a
+  query before it is asserted to survive with one. Also covered — the anchor and tag
+  floors still hold when a query is present (a pinned line must never push `</result>`
+  out), surviving lines keep their relative order (I6), and output is byte-identical
+  absent a query. `TextConfig` loses its `Eq` derive for the same reason `CrushConfig`
+  did.
+
 ## SmartCrusher elided the record the user was asking about
 **2026-08-05** · closes #176, #177 · compression was structural and nothing else
 
