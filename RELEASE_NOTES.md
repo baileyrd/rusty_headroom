@@ -6,6 +6,17 @@ the crate starts publishing releases.
 
 ---
 
+## A WebSocket close frame's code and reason were dropped in both directions
+**2026-08-04** · a client library's reconnect decision, silently erased
+
+- `to_upstream_frame`/`to_client_frame` collapsed every close frame to `Close(None)`,
+  discarding the code and reason even though both crates' `CloseFrame` types carry
+  them. A client library may branch on the code (1000 normal, 1008 policy violation,
+  1011 server error, …) to decide whether reconnecting is worthwhile.
+- Fixed: the code and reason now cross in both directions. A genuinely code-less
+  `Close(None)` — the spec-legal abrupt close — still maps to `Close(None)`, not a
+  fabricated code.
+
 ## The Responses API's mid-stream `error` event was silently dropped
 **2026-08-04** · a real provider error, never recorded as a failure
 
