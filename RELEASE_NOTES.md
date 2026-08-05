@@ -6,6 +6,16 @@ the crate starts publishing releases.
 
 ---
 
+## The Responses API's mid-stream `error` event was silently dropped
+**2026-08-04** · a real provider error, never recorded as a failure
+
+- `classify` split an event's type on its last `.` to get a stem and suffix — but
+  the Responses API's error event arrives as a bare `"error"`, with no `.` at all. The
+  split left an empty stem, which matched neither `("error", _)` nor
+  `("response", "error")` and fell through to `Other`.
+- Fixed: a type with no `.` is now its own stem with an empty suffix, so a bare `error`
+  is classified correctly.
+
 ## The relay dropped every query string
 **2026-08-04** · found while checking whether `claude -p` could drive the live measurement
 
