@@ -6,6 +6,33 @@ the crate starts publishing releases.
 
 ---
 
+## A dependency bump forwarded thousands of lockfile lines whole
+**2026-08-05** · closes #181 · context elision cannot reach a hunk that is all changes
+
+- `DiffCompressor` elides unchanged context and keeps every added and removed line —
+  correct, and the rule the compressor was built on. It is also exactly why a lockfile
+  diff survived it intact: **every line in one is a changed line**. `npm install foo`
+  reshuffles thousands of `package-lock.json` lines around a single meaningful line in
+  `package.json`, and the whole thing went upstream. Round 1 closed P4 ("offloads") on
+  the reasoning that the existing compressors already cover it; two of the reference's
+  six offloads are not covered, and this is one of them.
+- Added a noise pass ahead of the context pass. Whole hunks are dropped when the file is
+  a generated lockfile (`package-lock.json`, `Cargo.lock`, `yarn.lock`, `go.sum`,
+  `poetry.lock`, `uv.lock`, `pnpm-lock.yaml`, `Gemfile.lock`, `composer.lock`,
+  `flake.lock`) or when every change in the hunk is whitespace. The file header always
+  survives, so the reader can still see *which* file was elided and why, and the dropped
+  content goes to CCR like every other offload — retrievable, not destroyed.
+- Whitespace detection compares the added and removed lines as **multisets** with all
+  whitespace stripped, not pairwise: a reformat can reorder lines within a hunk, and a
+  pairwise walk would call that a real change. Both sides must be non-empty, so a pure
+  insertion of blank lines is not mistaken for a no-op — it added content, even if that
+  content is empty. A hunk that reformats three lines *and* changes a fourth is a real
+  change and is kept whole; that boundary has its own test.
+- Lockfiles are matched on the **file name**, so one in any directory is recognized while
+  `src/Cargo.lock.rs` and `Cargo.lock/notes.txt` are not. Measured on a 400-package bump:
+  801 lines of churn elided, the `"widget": "4.2.1"` manifest line intact, output under a
+  quarter of the input. A diff of only real changes compresses byte-identically to before.
+
 ## `/health` could not tell "the proxy is down" from "the provider is down"
 **2026-08-05** · closes #186 · one endpoint answering two questions with different remedies
 
