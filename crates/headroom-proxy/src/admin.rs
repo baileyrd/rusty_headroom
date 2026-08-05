@@ -38,9 +38,10 @@ const MAX_BODY_BYTES: usize = 64 * 1024;
 /// Applies runtime configuration overrides.
 ///
 /// The body is a flat object of `HEADROOM_*` names to string values. Names outside
-/// that namespace are ignored rather than rejected wholesale, so a caller sending one
-/// unknown key still gets the rest applied — and the response says exactly which were
-/// taken, so "ignored" is never something the caller has to infer.
+/// that namespace, or within it but not one of [`crate::config::KNOWN`] (a typo, or a
+/// variable no code in this crate reads), are ignored rather than rejected wholesale,
+/// so a caller sending one bad key still gets the rest applied — and the response says
+/// exactly which were taken, so "ignored" is never something the caller has to infer.
 pub async fn runtime_env(request: Request) -> Response {
     // Read straight from the extensions rather than through an `Option<ConnectInfo>`
     // extractor, which axum will not build: `ConnectInfo` implements
@@ -475,25 +476,42 @@ mod tests {
     #[test]
     fn every_startup_only_name_is_a_real_setting() {
         // A typo here would silently drop a name from the warning — the value would be
-        // stored, reported as live, and never read. Checked against the `vars` module
+        // stored, reported as live, and never read. Checked against `config::KNOWN`
         // rather than trusted.
-        let known = [
-            config::vars::HOST,
-            config::vars::PORT,
-            config::vars::UPSTREAM,
-            config::vars::COMPRESSION,
-            config::vars::OUTPUT_SHAPER,
-            config::vars::RECOMMENDATIONS,
-            config::vars::MEMORY,
-            config::vars::MEMORY_LIMIT,
-            config::vars::STABILIZE,
-            config::vars::CCR_DIR,
-            config::vars::REDIS_URL,
-        ];
-
         for name in config::STARTUP_ONLY {
-            assert!(known.contains(&name), "{name} is not a known setting");
+            assert!(
+                config::KNOWN.contains(&name),
+                "{name} is not a known setting"
+            );
         }
+    }
+
+    #[tokio::test]
+    async fn an_unrecognized_headroom_name_is_not_reported_as_applied() {
+        // `set_overrides` used to accept and store any `HEADROOM_`-prefixed name,
+        // checked against nothing. A typo (`HEADROOM_MADE_UP_NAME`) or a documented
+        // variable this crate has never wired to `config` (`HEADROOM_LOG`, read once
+        // by `main` at startup, never by this module) was stored in the override map,
+        // echoed back in `applied` with an empty `needs_restart`, and never read
+        // again. Mixed with a real setting in the same call so the fix is proven to be
+        // selective rather than a blanket rejection of the whole request.
+        let _guard = SERIAL.lock().await;
+        config::clear_overrides();
+
+        let response = call(
+            Some("127.0.0.1:5555"),
+            r#"{"HEADROOM_MADE_UP_NAME":"x","HEADROOM_LOG":"debug","HEADROOM_COMPRESSION":"0"}"#,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_of(response).await;
+        assert_eq!(body["applied"], serde_json::json!(["HEADROOM_COMPRESSION"]));
+        assert!(!config::overrides().contains_key("HEADROOM_MADE_UP_NAME"));
+        assert!(!config::overrides().contains_key("HEADROOM_LOG"));
+        assert!(config::overrides().contains_key(config::vars::COMPRESSION));
+
+        config::clear_overrides();
     }
 
     #[tokio::test]
