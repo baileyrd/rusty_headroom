@@ -6,6 +6,19 @@ the crate starts publishing releases.
 
 ---
 
+## An SSE frame with no terminator could buffer without bound
+**2026-08-04** · the streaming twin of `observe.rs`'s existing body cap
+
+- `SseParser::feed` accumulated into `buffer` until it saw `\n\n`/`\r\n\r\n`, with no
+  upper bound. A hung or misbehaving upstream, a compromised/MITM'd one, or a provider
+  bug streaming one unbounded `data:` field never sends that terminator, so the buffer
+  grew for the entire lifetime of the connection.
+- Added `MAX_FRAME_BYTES` (1 MiB, a quarter of `observe.rs`'s `MAX_BUFFERED_BODY`, sized
+  for one buffered reply rather than one frame). Past the cap, `feed` drops what it was
+  holding and marks the parser overflowed; the relayed bytes are unaffected — only
+  this reply's telemetry is given up on — and `observe.rs` now logs it once rather
+  than on every subsequent poll.
+
 ## The relay dropped every query string
 **2026-08-04** · found while checking whether `claude -p` could drive the live measurement
 
