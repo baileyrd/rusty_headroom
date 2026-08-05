@@ -218,6 +218,132 @@ pub fn is_wrapped(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    // ---- recovery from an interrupted wrap (#190) ----
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("headroom-recover-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn an_orphaned_backup_is_found_and_names_its_settings_file() {
+        // The state a killed `wrap` leaves: the backup is on disk and nothing points at
+        // it. Before this, the only route back was knowing the suffix and copying by hand.
+        let dir = scratch("orphan");
+        let settings = dir.join("settings.json");
+        std::fs::write(
+            &settings,
+            r#"{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:8787"}}"#,
+        )
+        .unwrap();
+        std::fs::write(backup_path(&settings), r#"{"env":{}}"#).unwrap();
+
+        let found = find_orphaned_backups(&dir, 4);
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(wrapped_path_of(&found[0]).unwrap(), settings);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recovery_restores_the_original_bytes_exactly() {
+        // The same guarantee `unwrap` carries, through the same function rather than a
+        // second implementation of it.
+        let dir = scratch("bytes");
+        let settings = dir.join("settings.json");
+        let original = "{\n  \"env\": {},\n  \"trailing\": \"whitespace\"   \n}\n";
+
+        std::fs::write(&settings, original).unwrap();
+        wrap_settings_file(&settings, "http://127.0.0.1:8787").expect("wraps");
+        assert_ne!(std::fs::read_to_string(&settings).unwrap(), original);
+
+        let found = find_orphaned_backups(&dir, 4);
+        let wrapped = wrapped_path_of(&found[0]).unwrap();
+        assert!(unwrap_settings_file(&wrapped).expect("restores"));
+
+        assert_eq!(std::fs::read_to_string(&settings).unwrap(), original);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_nested_backup_is_found_within_the_depth_bound() {
+        let dir = scratch("nested");
+        let nested = dir.join("a").join("b");
+        std::fs::create_dir_all(&nested).unwrap();
+        let settings = nested.join("config.json");
+        std::fs::write(&settings, "{}").unwrap();
+        std::fs::write(backup_path(&settings), "{}").unwrap();
+
+        assert_eq!(find_orphaned_backups(&dir, 4).len(), 1);
+        // Past the bound, the walk stops rather than running forever.
+        assert_eq!(find_orphaned_backups(&dir, 1).len(), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unrelated_files_are_never_reported() {
+        // A recovery tool that offers to overwrite files it has no backup for is worse
+        // than one that finds nothing.
+        let dir = scratch("unrelated");
+        std::fs::write(dir.join("settings.json"), "{}").unwrap();
+        std::fs::write(dir.join("notes.txt"), "hello").unwrap();
+        std::fs::write(dir.join("something.backup"), "{}").unwrap();
+
+        assert!(find_orphaned_backups(&dir, 4).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_backup_with_no_original_name_is_not_restorable() {
+        // A file named exactly the suffix has no settings file to point at. Restoring
+        // "over nothing" would create a file the operator never had.
+        assert_eq!(wrapped_path_of(Path::new(BACKUP_SUFFIX)), None);
+        assert_eq!(wrapped_path_of(Path::new("settings.json")), None);
+    }
+
+    #[test]
+    fn results_are_ordered_so_two_runs_agree() {
+        // Directory iteration order is unspecified. An operator comparing two runs
+        // should not have to reconcile it.
+        let dir = scratch("ordered");
+        for name in ["c.json", "a.json", "b.json"] {
+            let settings = dir.join(name);
+            std::fs::write(&settings, "{}").unwrap();
+            std::fs::write(backup_path(&settings), "{}").unwrap();
+        }
+
+        let first = find_orphaned_backups(&dir, 4);
+        let again = find_orphaned_backups(&dir, 4);
+
+        assert_eq!(first, again);
+        assert_eq!(first.len(), 3);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unreadable_directory_does_not_stop_the_scan() {
+        // Recovery runs when things are already wrong. A permission error in one corner
+        // of the tree must not cost the operator what is reachable elsewhere.
+        let dir = scratch("partial");
+        let settings = dir.join("settings.json");
+        std::fs::write(&settings, "{}").unwrap();
+        std::fs::write(backup_path(&settings), "{}").unwrap();
+
+        // A path that is not a directory at all exercises the same skip branch portably.
+        assert!(find_orphaned_backups(&dir.join("settings.json"), 4).is_empty());
+        assert_eq!(find_orphaned_backups(&dir, 4).len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     use super::*;
 
     /// A scratch directory that cleans itself up.
@@ -683,4 +809,67 @@ mod mcp_tests {
 
         assert!(install_mcp_server(&path, "headroom-mcp").is_err());
     }
+}
+
+/// Finds orphaned wrap backups under `root`.
+///
+/// # Why this scans rather than consulting a registry
+///
+/// `wrap` only ever touches a file the caller named with `--settings`. There is no list
+/// of locations it might have written to, so there is nothing to consult — recovery has
+/// to look. It looks where the operator is (the directory they pass, defaulting to the
+/// current one) rather than guessing at their home directory, because walking somebody's
+/// `$HOME` uninvited is a bigger liberty than this feature is worth.
+///
+/// Depth-bounded: a recovery tool that walks an unbounded tree can hang on a deep or
+/// cyclic directory, and it runs when the operator is already in a bad state.
+pub fn find_orphaned_backups(root: &Path, max_depth: usize) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    collect_backups(root, max_depth, &mut found);
+    // Sorted so two runs report the same order. Directory iteration order is not
+    // specified, and an operator comparing two runs should not have to reconcile it.
+    found.sort();
+    found
+}
+
+fn collect_backups(dir: &Path, depth_left: usize, found: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        // Unreadable directories are skipped rather than fatal. A permission error
+        // somewhere in the tree must not stop recovery of what *is* reachable.
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+
+        if kind.is_dir() {
+            // Symlinks are not followed: `is_dir` on a `file_type` from `read_dir` is
+            // false for a symlink, which is what stops a cycle from hanging this.
+            if depth_left > 0 {
+                collect_backups(&path, depth_left - 1, found);
+            }
+        } else if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(BACKUP_SUFFIX))
+        {
+            found.push(path);
+        }
+    }
+}
+
+/// The settings file a backup belongs to.
+///
+/// The inverse of [`backup_path`]. Returns `None` for a path that does not end in the
+/// suffix, so a caller cannot accidentally restore over an unrelated file.
+pub fn wrapped_path_of(backup: &Path) -> Option<PathBuf> {
+    let name = backup.file_name()?.to_str()?;
+    let original = name.strip_suffix(BACKUP_SUFFIX)?;
+    if original.is_empty() {
+        return None;
+    }
+    Some(backup.with_file_name(original))
 }

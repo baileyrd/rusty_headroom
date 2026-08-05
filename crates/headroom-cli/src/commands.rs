@@ -1473,6 +1473,72 @@ pub fn unwrap(agent: &str, settings: Option<&std::path::Path>) -> anyhow::Result
 /// # Errors
 ///
 /// Returns an error if the metrics text cannot be read from stdin.
+/// Finds — and optionally restores — agent settings a killed `wrap` left behind.
+///
+/// # Why this is dry by default
+///
+/// It runs when the operator is already in a bad state: their agent config is not what
+/// they wrote and they are trying to find out what happened. A tool that writes first and
+/// explains afterwards makes a wrong guess unrecoverable. So it reports, and `--apply`
+/// is a second, deliberate act.
+pub fn recover(root: &std::path::Path, apply: bool) -> anyhow::Result<()> {
+    // Deep enough to find a config nested a few levels down, bounded so a recovery tool
+    // cannot hang walking a deep tree.
+    const MAX_DEPTH: usize = 6;
+
+    let backups = crate::wrap::find_orphaned_backups(root, MAX_DEPTH);
+    let mut stdout = std::io::stdout().lock();
+
+    if backups.is_empty() {
+        // Said plainly rather than by printing nothing. "Nothing to recover" is a real
+        // answer, and silence reads as a tool that failed to run.
+        writeln!(stdout, "nothing to recover under {}", root.display())?;
+        stdout.flush()?;
+        return Ok(());
+    }
+
+    for backup in &backups {
+        let Some(wrapped) = crate::wrap::wrapped_path_of(backup) else {
+            continue;
+        };
+
+        if !apply {
+            writeln!(
+                stdout,
+                "found  {}\n  would restore {}",
+                backup.display(),
+                wrapped.display()
+            )?;
+            continue;
+        }
+
+        // Restored through the same function `unwrap` uses, so recovery carries the same
+        // byte-exactness guarantee rather than a second implementation of it.
+        match crate::wrap::unwrap_settings_file(&wrapped) {
+            Ok(true) => writeln!(stdout, "restored {}", wrapped.display())?,
+            Ok(false) => writeln!(
+                stdout,
+                "skipped  {} (its backup vanished between scan and restore)",
+                wrapped.display()
+            )?,
+            // Reported and continued. One unreadable backup must not cost the operator
+            // the others, and the failed one is still on disk to handle by hand.
+            Err(err) => writeln!(stdout, "failed   {}: {err}", wrapped.display())?,
+        }
+    }
+
+    if !apply {
+        writeln!(
+            stdout,
+            "\n{} to restore. Nothing was written; re-run with --apply.",
+            backups.len()
+        )?;
+    }
+
+    stdout.flush()?;
+    Ok(())
+}
+
 pub fn savings(since_days: Option<u64>) -> anyhow::Result<()> {
     // The ledger first, because it is the only source that can answer over a period
     // longer than one process lifetime. The stdin path is kept, not replaced: it is what
